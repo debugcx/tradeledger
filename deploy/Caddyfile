@@ -1,0 +1,10 @@
+{$TRADELEDGER_DOMAIN:localhost} {
+    encode gzip
+
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy same-origin
+    }
+
+    reverse_proxy tradeledger:8790
+}

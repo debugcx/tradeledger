@@ -1,0 +1,22 @@
+{
+  "name": "tradeledger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TradeLedger - 本地优先的加密合约交易复盘台账（交易统计、盈亏推导、CSV 导入、标签与笔记）",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "seed": "node --env-file-if-exists=.env src/seed.js",
+    "reset": "node --env-file-if-exists=.env src/seed.js --reset",
+    "sync": "node --env-file-if-exists=.env src/sync-cli.js",
+    "backup": "node --env-file-if-exists=.env src/backup-cli.js backup",
+    "backup:list": "node --env-file-if-exists=.env src/backup-cli.js list",
+    "restore": "node --env-file-if-exists=.env src/backup-cli.js restore",
+    "restore:stage": "node --env-file-if-exists=.env src/backup-cli.js stage",
+    "test": "node --test",
+    "smoke": "node scripts/smoke.mjs"
+  }
+}

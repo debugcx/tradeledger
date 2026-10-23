@@ -1,0 +1,13 @@
+.git
+.github
+data
+node_modules
+tests
+scripts
+docs
+.env
+.env.*
+*.log
+*.db
+*.db-wal
+*.db-shm

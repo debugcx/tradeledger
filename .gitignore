@@ -1,0 +1,11 @@
+node_modules/
+data/
+*.log
+.env
+.env.*
+!.env.example
+!.env.docker.example
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
