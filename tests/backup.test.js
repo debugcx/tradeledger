@@ -21,7 +21,12 @@ const image = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2,
 function startFakeDav() {
   const files = new Map();
   const deletes = [];
+  const expectedAuth = 'Basic ' + Buffer.from('u:p').toString('base64');
   const server = http.createServer((req, res) => {
+    if (req.headers.authorization !== expectedAuth) {
+      res.writeHead(401, { 'www-authenticate': 'Basic realm="test"' });
+      return res.end();
+    }
     const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
     const chunks = [];
     req.on('data', (c) => chunks.push(c));

@@ -18,6 +18,12 @@ export function getMasterKey() {
 
   const fromEnv = process.env.TRADELEDGER_MASTER_KEY;
   if (fromEnv) {
+    if (fromEnv === 'replace-with-64-hex-chars' || fromEnv === 'change-me') {
+      throw new Error('TRADELEDGER_MASTER_KEY 仍是示例值，请在 .env 设置真实密钥（openssl rand -hex 32）');
+    }
+    if (!/^[0-9a-f]{64}$/i.test(fromEnv)) {
+      console.warn('[crypto] TRADELEDGER_MASTER_KEY 不是 64 位十六进制，将按口令 SHA-256 派生；生产环境建议使用 openssl rand -hex 32');
+    }
     cachedKey = /^[0-9a-f]{64}$/i.test(fromEnv)
       ? Buffer.from(fromEnv, 'hex')
       : crypto.createHash('sha256').update(fromEnv).digest();

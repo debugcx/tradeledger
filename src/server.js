@@ -105,6 +105,12 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+const WEAK_PASSWORDS = new Set(['demo1234', 'change-me', 'change-me-to-a-long-random-password']);
+if (config.passwordFromEnv && (WEAK_PASSWORDS.has(config.password) || config.password.length < 8)) {
+  console.error('[config] TRADELEDGER_PASSWORD 仍是示例值或少于 8 位，请改成强密码后再启动');
+  process.exit(1);
+}
+
 if (config.seedDemo && !fs.existsSync(config.dbFile)) {
   try {
     seed({ quiet: true });

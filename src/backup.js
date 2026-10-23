@@ -266,7 +266,7 @@ function webdavCredentials() {
   if (phraseEnc) {
     try { passphrase = decryptSecret(phraseEnc); } catch { throw new Error('备份密码无法解密，请在设置页重新填写'); }
   }
-  return { ...cfg, password, passphrase };
+  return { ...cfg, username: cfg.webdavUsername, password, passphrase };
 }
 
 /* ---------------- WebDAV ---------------- */
@@ -298,8 +298,9 @@ function davError(res, action) {
 
 async function davRequest(url, { method = 'GET', body, headers = {} } = {}, creds) {
   const h = { ...headers };
-  if (creds.username) {
-    h.authorization = 'Basic ' + Buffer.from(`${creds.username}:${creds.password}`).toString('base64');
+  const username = creds.username || creds.webdavUsername || '';
+  if (username) {
+    h.authorization = 'Basic ' + Buffer.from(`${username}:${creds.password}`).toString('base64');
   }
   try {
     return await fetch(url, {

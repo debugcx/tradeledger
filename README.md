@@ -236,10 +236,12 @@ cloudflared:
 ### 7. 安全清单
 
 - 应用容器不发布 `8790`，只通过 Caddy/Tunnel 暴露；
-- 使用强密码，建议再加 Cloudflare Access 或 Tailscale；
+- 使用强密码，建议再加 Cloudflare Access 或 Tailscale；密码仍是示例值或少于 8 位时服务会拒绝启动；
 - 交易所 API 只给只读权限；
-- `master.key` 离线保存一份；
+- `master.key` 离线保存一份；示例值 `replace-with-64-hex-chars` 会导致启动失败；
 - SQLite 必须放本地磁盘，不要放 NFS/SMB。
+
+仓库附带一个 GitHub Actions 模板 `deploy/github-actions-test.yml`；复制到 `.github/workflows/test.yml` 即可启用测试与镜像构建（推送 token 需要 `workflow` 权限）。
 
 ## 已知限制（v0.5）
 
