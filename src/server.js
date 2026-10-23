@@ -111,6 +111,12 @@ if (config.passwordFromEnv && (WEAK_PASSWORDS.has(config.password) || config.pas
   process.exit(1);
 }
 
+const masterFromEnv = process.env.TRADELEDGER_MASTER_KEY;
+if (masterFromEnv === 'replace-with-64-hex-chars' || masterFromEnv === 'change-me') {
+  console.error('[config] TRADELEDGER_MASTER_KEY 仍是示例值，请设置真实密钥（openssl rand -hex 32）后再启动');
+  process.exit(1);
+}
+
 if (config.seedDemo && !fs.existsSync(config.dbFile)) {
   try {
     seed({ quiet: true });
