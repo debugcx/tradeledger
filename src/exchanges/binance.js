@@ -17,21 +17,57 @@ const BASE = process.env.BINANCE_FAPI_BASE || 'https://fapi.binance.com';
 const BASE_SAPI = process.env.BINANCE_SAPI_BASE || 'https://api.binance.com';
 const WINDOW_MS = 7 * 86400_000;
 
+// 本机时钟与币安服务器的偏差（ms）。币安要求 timestamp 不超过服务器时间 1 秒，
+// 本机走快就会报 -1021；用公共接口 /fapi/v1/time 对齐，偏差每 30 分钟刷新一次。
+let timeOffsetMs = null;
+let timeSyncedAt = 0;
+
+async function syncTimeOffset() {
+  const t0 = Date.now();
+  const res = await requestJson(`${BASE}/fapi/v1/time`, { method: 'GET', timeout: 10_000, retries: 1 });
+  const rtt = Date.now() - t0;
+  const server = Number(res.json?.serverTime);
+  if (!Number.isFinite(server)) throw new Error('Binance 服务器时间返回异常');
+  timeOffsetMs = server - (t0 + rtt / 2);
+  timeSyncedAt = Date.now();
+  console.error(`[binance] 时钟偏差 ${timeOffsetMs >= 0 ? '+' : ''}${timeOffsetMs}ms，已对齐`);
+  return timeOffsetMs;
+}
+
 async function call(path, creds, opts = {}) {
-  const sep = path.includes('?') ? '&' : '?';
-  const query = `${path.split('?')[1] ? `${path.split('?')[1]}&` : ''}recvWindow=5000&timestamp=${Date.now()}`;
-  const signed = `${query}&signature=${hmacHex(creds.apiSecret, query)}`;
-  const base = opts.baseUrl || BASE;
-  const res = await requestJson(`${base}${path.split('?')[0]}${sep}${signed}`, {
-    method: 'GET',
-    timeout: opts.timeout,
-    retries: opts.retries,
-    headers: { 'X-MBX-APIKEY': creds.apiKey },
-  });
-  const data = res.json;
-  if (!data) throw new Error(`Binance 返回无法解析（HTTP ${res.status}）`);
-  if (data.code && data.code < 0) throw new Error(`Binance ${data.code}: ${data.msg || ''}`);
-  return data;
+  if (timeOffsetMs === null || Date.now() - timeSyncedAt > 30 * 60_000) {
+    try { await syncTimeOffset(); } catch { timeOffsetMs = timeOffsetMs ?? 0; timeSyncedAt = Date.now(); }
+  }
+  const baseUrl = opts.baseUrl || BASE;
+  const attempt = async () => {
+    const sep = path.includes('?') ? '&' : '?';
+    const query = `${path.split('?')[1] ? `${path.split('?')[1]}&` : ''}recvWindow=5000&timestamp=${Date.now() + timeOffsetMs}`;
+    const url = `${baseUrl}${path.split('?')[0]}${sep}${query}&signature=${hmacHex(creds.apiSecret, query)}`;
+    const res = await requestJson(url, {
+      method: 'GET',
+      timeout: opts.timeout,
+      retries: opts.retries,
+      headers: { 'X-MBX-APIKEY': creds.apiKey },
+    });
+    const data = res.json;
+    if (!data) throw new Error(`Binance 返回无法解析（HTTP ${res.status}）`);
+    if (data.code && data.code < 0) {
+      const err = new Error(`Binance ${data.code}: ${data.msg || ''}`);
+      err.code = data.code;
+      throw err;
+    }
+    return data;
+  };
+  try {
+    return await attempt();
+  } catch (err) {
+    // 时钟偏差导致的 -1021：重新对齐后重试一次
+    if (String(err.code) === '-1021') {
+      await syncTimeOffset();
+      return await attempt();
+    }
+    throw err;
+  }
 }
 
 function toFill(row) {
