@@ -154,7 +154,8 @@ export const gate = {
           const amount = num(row.change);
           events.push({
             external_id: `gate:fund:${row.time}:${row.text}:${row.change}:${row.balance}`,
-            symbol: toSymbol(row.text),
+            // text 形如 "BTC_USDT:流水ID"，剥掉后缀再转交易对
+            symbol: toSymbol(String(row.text || '').split(':')[0].trim()),
             time: new Date(time).toISOString(),
             amount,
           });
@@ -182,7 +183,9 @@ export const gate = {
     if (!(until > start)) return { trades: [] };
 
     const windows = windowsDescending(start, until, 29 * 86400_000).slice(0, 31);
-    const byDay = new Map(); // 'YYYY-MM-DD|BTC_USDT' -> { day, contract, pnl, fee, last }
+    // 账本 text 形如 "BTC_USDT" 或 "BTC_USDT:流水ID"，冒号后缀必须剥掉
+    const cleanContract = (raw) => String(raw || '').split(':')[0].trim();
+    const byDay = new Map(); // 'YYYY-MM-DD|BTC_USDT' -> { day, contract, pnl, fee, first, last }
     for (const w of windows) {
       for (const type of ['pnl', 'fee']) {
         for (let offset = 0; offset < 500; offset += 100) {
@@ -196,16 +199,15 @@ export const gate = {
           if (!Array.isArray(rows) || !rows.length) break;
           for (const r of rows) {
             const t = Number(r.time || 0) * 1000;
-            const contract = String(r.text || '');
+            const contract = cleanContract(r.text);
             if (!t || !contract.includes('_')) continue; // 非合约明细行
-            const key = `${new Date(t).toISOString().slice(0, 10)}|${contract}`;
-            const cur = byDay.get(key) || { day: key.split('|')[0], contract, pnl: 0, fee: 0, last: 0 };
-            if (type === 'pnl') {
-              cur.pnl += num(r.change);
-              cur.last = Math.max(cur.last, t);
-            } else {
-              cur.fee += num(r.change); // 账本 fee 为负（支出）
-            }
+            const day = new Date(t).toISOString().slice(0, 10);
+            const key = `${day}|${contract}`;
+            const cur = byDay.get(key) || { day, contract, pnl: 0, fee: 0, first: t, last: t };
+            if (type === 'pnl') cur.pnl += num(r.change);
+            else cur.fee += num(r.change); // 账本 fee 为负（支出）
+            cur.first = Math.min(cur.first, t);
+            cur.last = Math.max(cur.last, t);
             byDay.set(key, cur);
           }
           if (rows.length < 100) break;
@@ -214,24 +216,30 @@ export const gate = {
     }
     const trades = [...byDay.values()]
       .sort((a, b) => (a.day < b.day ? -1 : 1))
-      .map((v) => ({
-        external_id: `gate:ledger:${v.day}:${v.contract}`,
-        symbol: toSymbol(v.contract),
-        side: 'long', // 方向无法从账本得知，统计多空占比时请注意备注
-        order_type: 'other',
-        size: 0,
-        notional: 0,
-        entry_price: 0,
-        exit_price: 0,
-        open_time: new Date(`${v.day}T00:00:00.000Z`).toISOString(),
-        close_time: new Date(v.last || Date.parse(`${v.day}T23:59:59.000Z`)).toISOString(),
-        pnl: v.pnl + v.fee,
-        fee: v.fee,
-        funding: 0,
-        source: 'api',
-        market: 'futures',
-        note: '账本回填：成交明细已超出 Gate 保留期，按合约×日聚合；价格/数量/方向不可得',
-      }));
+      .map((v) => {
+        const feeOnly = v.pnl === 0; // 纯手续费日：合约跨日持仓的开仓腿落在当天
+        return {
+          external_id: `gate:ledger:${v.day}:${v.contract}`,
+          symbol: toSymbol(v.contract),
+          side: 'long', // 方向无法从账本得知，统计多空占比时请注意备注
+          order_type: 'other',
+          size: 0,
+          notional: 0,
+          entry_price: 0,
+          exit_price: 0,
+          open_time: new Date(v.first).toISOString(),
+          close_time: new Date(v.last).toISOString(),
+          pnl: v.pnl + v.fee,
+          fee: v.fee,
+          funding: 0,
+          source: 'api',
+          market: 'futures',
+          note: feeOnly
+            ? '账本回填·纯手续费日：该合约当日只有开仓/减仓手续费（已实现盈亏落在其他日期）；价格/数量/方向不可得'
+            : '账本回填：成交明细已超出 Gate 保留期，按合约×日聚合；价格/数量/方向不可得',
+          tags: ['账本回填'],
+        };
+      });
     return { trades: trades.slice(0, cap) };
   },
 

@@ -557,7 +557,9 @@ async function loadTradeFills(trade) {
       fromMs,
       toMs: toMs + 60_000, // 仓位历史的平仓时间戳可能略晚于最后一笔成交
     });
-    if (!res?.fills?.length) return { unsupported: '该区间没有拉到逐笔成交' };
+    if (!res?.fills?.length) {
+      return { unsupported: res?.reason || '该区间没有拉到逐笔成交' };
+    }
     store.saveTradeFillsCache(trade.id, inputs, res.fills);
     return { fills: res.fills };
   } catch (err) {

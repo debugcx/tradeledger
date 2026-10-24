@@ -418,6 +418,14 @@ export const okx = {
       if (!next || next === after || rows.length < 100) break;
       after = next;
     }
+    // fills-history 只保留约 3 个月。更早的成交 OKX 只提供「两年归档」异步导出
+    // （POST 申请文件、生成约需 30 小时），无法用于页面实时查询，如实返回原因。
+    if (!out.length && Number(fromMs) < Date.now() - 90 * 86400_000) {
+      return {
+        fills: [],
+        reason: 'OKX 逐笔成交仅保留约 3 个月，该回合超出保留期；更早记录需在 OKX 官网「两年归档」申请导出（生成约需 30 小时），无法实时拉取',
+      };
+    }
     out.sort((a, b) => a.t - b.t);
     const result = { fills: out.slice(0, cap) };
     if (fillCache.size >= 300) fillCache.delete(fillCache.keys().next().value);

@@ -83,22 +83,22 @@ const server = http.createServer((req, res) => {
       ]));
     }
   } else if (url.pathname === '/api/v4/futures/usdt/account_book') {
-    // 账本：pnl 为不含费盈亏；fee 为负数支出。按 from/to 过滤模拟真实行为
+    // 账本：pnl 为不含费盈亏；fee 为负数支出；text 带 ":流水ID" 后缀需清洗；按 from/to 过滤
     const inRange = (r) => Number(r.time) >= Number(q.from) && Number(r.time) <= Number(q.to);
     if (q.type === 'pnl') {
       res.end(JSON.stringify([
-        { id: 'b1', time: '1782900000', change: '3.5', text: 'BTC_USDT', balance: '0' },
-        { id: 'b2', time: '1782900100', change: '2.5', text: 'BTC_USDT', balance: '0' },
-        { id: 'b3', time: '1782900200', change: '-1', text: 'LTC_USDT', balance: '0' },
+        { id: 'b1', time: '1782900000', change: '3.5', text: 'BTC_USDT:900001', balance: '0' },
+        { id: 'b2', time: '1782900100', change: '2.5', text: 'BTC_USDT:900002', balance: '0' },
+        { id: 'b3', time: '1782900200', change: '-1', text: 'LTC_USDT:900003', balance: '0' },
       ].filter(inRange)));
     } else if (q.type === 'fee') {
       res.end(JSON.stringify([
-        { id: 'c1', time: '1782900000', change: '-0.3', text: 'BTC_USDT', balance: '0' },
-        { id: 'c2', time: '1782900200', change: '-0.2', text: 'LTC_USDT', balance: '0' },
+        { id: 'c1', time: '1782899900', change: '-0.3', text: 'BTC_USDT:900001', balance: '0' },
+        { id: 'c2', time: '1782900200', change: '-0.2', text: 'LTC_USDT:900003', balance: '0' },
       ].filter(inRange)));
     } else {
       res.end(JSON.stringify([
-        { id: 'd1', time: '1782900050', change: '0.01', text: 'BTC_USDT', balance: '0' },
+        { id: 'd1', time: '1782900050', change: '0.01', text: 'BTC_USDT:900001', balance: '0' },
       ].filter(inRange)));
     }
   } else if (url.pathname === '/api/v4/futures/usdt/candlesticks') {
@@ -151,17 +151,23 @@ test('Gate：张数按面值换算、回合合并成一条、K 线与成交明�
     assert.equal(funding.events.length, 1);
     assert.equal(funding.events[0].symbol, 'BTC/USDT');
 
-    // 账本回填：成交明细边界(2026-01-10)之前的 pnl/fee 按合约×日聚合
+    // 账本回填：成交明细边界(2026-09-01)之前的 pnl/fee 按合约×日聚合
     const ledger = await gate.fetchLedgerTrades({
-      creds, fromMs: Date.parse('2026-01-01T00:00:00Z'), toMs: Date.now(),
+      creds, fromMs: Date.parse('2026-06-01T00:00:00Z'), toMs: Date.now(),
     });
     assert.equal(ledger.trades.length, 2);
     const btc = ledger.trades.find((t) => t.symbol === 'BTC/USDT');
     assert.ok(btc);
     assert.equal(btc.pnl, 5.7); // 3.5 + 2.5 − 0.3 费
     assert.equal(btc.fee, -0.3);
-    assert.equal(btc.external_id.startsWith('gate:ledger:2026-'), true);
+    assert.ok(btc.external_id.startsWith('gate:ledger:2026-'));
+    assert.ok(!btc.external_id.includes(':900001')); // text 的流水ID后缀已剥掉
+    assert.equal(btc.symbol, 'BTC/USDT'); // 交易对名不含后缀
+    assert.deepEqual(btc.tags, ['账本回填']);
     assert.ok(btc.note.includes('账本回填'));
+    // 时间戳用账本真实首末条（fee c1 更早 → open；pnl b2 最后 → close）
+    assert.equal(btc.open_time, new Date(1782899900 * 1000).toISOString());
+    assert.equal(btc.close_time, new Date(1782900100 * 1000).toISOString());
     const ltc = ledger.trades.find((t) => t.symbol === 'LTC/USDT');
     assert.equal(ltc.pnl, -1.2); // −1 − 0.2
   } finally {
