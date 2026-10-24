@@ -66,6 +66,10 @@ async function call(path, creds, opts = {}) {
       await syncTimeOffset();
       return await attempt();
     }
+    // 币安 WAF 对部分数据中心出口 IP 拦截交易历史类接口，返回 HTML 404 错误页
+    if (String(err.message).includes('<!DOCTYPE')) {
+      throw new Error('Binance 边缘节点拦截了该请求（当前网络出口 IP 被其风控拦截，数据中心 IP 常见）：请更换代理节点后重试，或改用未被拦截的网络出口');
+    }
     throw err;
   }
 }
