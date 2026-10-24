@@ -480,6 +480,12 @@ export function transferSummary() {
     `SELECT asset, COUNT(*) AS count, COALESCE(SUM(amount),0) AS amount
      FROM transfers GROUP BY asset ORDER BY amount DESC LIMIT 20`,
   );
+  const byAssetNet = all(
+    `SELECT asset,
+       COALESCE(SUM(CASE WHEN type IN ('deposit', 'internal_in', 'rebate') THEN amount ELSE 0 END), 0) AS inflow,
+       COALESCE(SUM(CASE WHEN type NOT IN ('deposit', 'internal_in', 'rebate') THEN amount ELSE 0 END), 0) AS outflow
+     FROM transfers GROUP BY asset ORDER BY inflow + outflow DESC LIMIT 20`,
+  );
   const get = (type) => byType.find((x) => x.type === type) || { count: 0, amount: 0, fee: 0 };
   const deposits = get('deposit');
   const withdrawals = get('withdraw');
@@ -490,6 +496,83 @@ export function transferSummary() {
     net: (Number(deposits.amount) || 0) - (Number(withdrawals.amount) || 0),
     byType,
     byAsset,
+    byAssetNet,
+  };
+}
+
+/** 策略机器人回合（按「策略机器人」标签识别），供机器人页展示 */
+export function listBotTrades(accountId = null) {
+  const params = [];
+  let sql = `SELECT tr.*, a.name AS account_name, a.exchange AS account_exchange
+    FROM trades tr
+    JOIN trade_tags tt ON tt.trade_id = tr.id
+    JOIN tags g ON g.id = tt.tag_id AND g.name = '策略机器人'
+    JOIN accounts a ON a.id = tr.account_id
+    WHERE 1=1`;
+  if (accountId) { sql += ' AND tr.account_id = ?'; params.push(Number(accountId)); }
+  sql += ' GROUP BY tr.id ORDER BY tr.close_time DESC LIMIT 500';
+  return all(sql, ...params);
+}
+
+/* ---------------- 交易详情缓存（K 线 / 逐笔成交，落库持久化） ---------------- */
+
+export function getTradeCurveCache(tradeId) {
+  const row = get('SELECT inputs, bar, candles, truncated FROM trade_curves WHERE trade_id = ?', Number(tradeId));
+  if (!row) return null;
+  try {
+    return { inputs: row.inputs, bar: row.bar, candles: JSON.parse(row.candles), truncated: Boolean(row.truncated) };
+  } catch {
+    return null;
+  }
+}
+
+export function saveTradeCurveCache(tradeId, inputs, { bar, candles, truncated }) {
+  run(
+    `INSERT INTO trade_curves (trade_id, inputs, bar, candles, truncated, fetched_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(trade_id) DO UPDATE SET
+       inputs = excluded.inputs, bar = excluded.bar, candles = excluded.candles,
+       truncated = excluded.truncated, fetched_at = excluded.fetched_at`,
+    Number(tradeId), String(inputs || ''), String(bar || ''), JSON.stringify(candles || []),
+    truncated ? 1 : 0, nowIso(),
+  );
+}
+
+export function getTradeFillsCache(tradeId) {
+  const row = get('SELECT inputs, fills FROM trade_fills_cache WHERE trade_id = ?', Number(tradeId));
+  if (!row) return null;
+  try {
+    return { inputs: row.inputs, fills: JSON.parse(row.fills) };
+  } catch {
+    return null;
+  }
+}
+
+export function saveTradeFillsCache(tradeId, inputs, fills) {
+  run(
+    `INSERT INTO trade_fills_cache (trade_id, inputs, fills, fetched_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(trade_id) DO UPDATE SET
+       inputs = excluded.inputs, fills = excluded.fills, fetched_at = excluded.fetched_at`,
+    Number(tradeId), String(inputs || ''), JSON.stringify(fills || []), nowIso(),
+  );
+}
+
+/** 邀请/经纪人返佣账单汇总：count 为全部笔数，usdt 仅统计 USDT 计价部分 */
+export function rebateSummary(accountId = null) {
+  const where = accountId ? ' AND account_id = ?' : '';
+  const params = accountId ? [Number(accountId)] : [];
+  const row = get(
+    `SELECT COUNT(*) AS count,
+       COALESCE(SUM(CASE WHEN asset = 'USDT' THEN amount ELSE 0 END), 0) AS usdt,
+       COALESCE(SUM(CASE WHEN asset != 'USDT' THEN 1 ELSE 0 END), 0) AS others
+     FROM transfers WHERE type = 'rebate'${where}`,
+    ...params,
+  ) || {};
+  return {
+    count: Number(row.count) || 0,
+    usdt: Number(row.usdt) || 0,
+    others: Number(row.others) || 0,
   };
 }
 
@@ -584,7 +667,7 @@ export function countTrades() {
 
 export function getTrade(id) {
   const row = get(
-    `SELECT tr.*, a.name AS account_name, a.exchange AS account_exchange
+    `SELECT tr.*, a.name AS account_name, a.exchange AS account_exchange, a.is_demo AS account_is_demo
      FROM trades tr JOIN accounts a ON a.id = tr.account_id WHERE tr.id = ?`,
     Number(id),
   );
@@ -690,11 +773,12 @@ export function deleteTrade(id) {
 }
 
 /** 批量导入（带事务、去重、标签） */
-export function importTrades(trades, accountId) {
+export function importTrades(trades, accountId, { upsert = false } = {}) {
   const at = nowIso();
   return tx((db) => {
     let inserted = 0;
     let skipped = 0;
+    let updated = 0;
     const insert = db.prepare(
       `INSERT INTO trades (account_id, external_id, symbol, side, order_type, size, notional,
          entry_price, exit_price, open_time, close_time, pnl, fee, funding, source, market, note,
@@ -702,12 +786,71 @@ export function importTrades(trades, accountId) {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const exists = db.prepare(
-      'SELECT id FROM trades WHERE account_id = ? AND external_id = ?',
+      'SELECT id, source FROM trades WHERE account_id = ? AND external_id = ?',
+    );
+    // OKX 偶尔补写行的 openTime（如从 cTime 整秒值精化为实际成交时间），同一回合
+    // 会带着新外部 ID 再来一次。按 posId + 盈亏/数量指纹做二次匹配：命中则改键并回写，
+    // 而不是插入重复记录。时间窗口 180s 内，避免误并同 posId 的相邻独立回合。
+    const byFingerprint = db.prepare(
+      `SELECT id FROM trades WHERE account_id = ? AND source = 'api' AND external_id LIKE ?
+         AND symbol = ? AND ABS(pnl - ?) < 1e-9 AND ABS(size - ?) < 1e-9
+         AND ABS(strftime('%s', close_time) * 1000 - ?) < 180000 LIMIT 1`,
+    );
+    const rekey = db.prepare('UPDATE trades SET external_id = ? WHERE id = ?');
+    // upsert 只更新交易所侧字段；复盘笔记、标签、创建时间保留。
+    const updateApi = db.prepare(
+      `UPDATE trades SET symbol = ?, side = ?, order_type = ?, size = ?, notional = ?,
+         entry_price = ?, exit_price = ?, open_time = ?, close_time = ?, pnl = ?, fee = ?, funding = ?,
+         updated_at = ? WHERE id = ?`,
     );
     const seen = new Set();
     for (const trade of trades) {
       const ext = trade.external_id || `csv:${Math.random().toString(36).slice(2)}`;
-      if (seen.has(ext) || exists.get(Number(accountId), ext)) { skipped++; continue; }
+      if (seen.has(ext)) { skipped++; continue; }
+      const found = exists.get(Number(accountId), ext);
+      if (found) {
+        // OKX 部分平仓会原地更新仓位历史行：api 行允许回写最终状态，其余来源一律跳过
+        if (upsert && found.source === 'api' && trade.source === 'api') {
+          updateApi.run(
+            String(trade.symbol || ''), String(trade.side || 'long'), trade.order_type || 'other',
+            Number(trade.size) || 0, Number(trade.notional) || 0,
+            Number(trade.entry_price) || 0, Number(trade.exit_price) || 0,
+            trade.open_time, trade.close_time,
+            Number(trade.pnl) || 0, Number(trade.fee) || 0, Number(trade.funding) || 0,
+            at, found.id,
+          );
+          updated++;
+        } else {
+          skipped++;
+        }
+        seen.add(ext);
+        continue;
+      }
+      // openTime 漂移的同一回合：按指纹找到旧行，改键到新 ID 并回写最终状态
+      const okxId = /^okx:(\d+):\d+$/.exec(ext);
+      if (upsert && okxId && trade.source === 'api') {
+        const closeMs = Date.parse(trade.close_time || '');
+        const twin = Number.isFinite(closeMs)
+          ? byFingerprint.get(
+              Number(accountId), `okx:${okxId[1]}:%`, String(trade.symbol || ''),
+              Number(trade.pnl) || 0, Number(trade.size) || 0, closeMs,
+            )
+          : null;
+        if (twin) {
+          rekey.run(ext, twin.id);
+          updateApi.run(
+            String(trade.symbol || ''), String(trade.side || 'long'), trade.order_type || 'other',
+            Number(trade.size) || 0, Number(trade.notional) || 0,
+            Number(trade.entry_price) || 0, Number(trade.exit_price) || 0,
+            trade.open_time, trade.close_time,
+            Number(trade.pnl) || 0, Number(trade.fee) || 0, Number(trade.funding) || 0,
+            at, twin.id,
+          );
+          updated++;
+          seen.add(ext);
+          continue;
+        }
+      }
       const r = insert.run(
         Number(accountId), ext, trade.symbol, trade.side, trade.order_type || 'other',
         Number(trade.size) || 0, Number(trade.notional) || 0,
@@ -728,7 +871,7 @@ export function importTrades(trades, accountId) {
       seen.add(ext);
       inserted++;
     }
-    return { inserted, skipped };
+    return { inserted, skipped, updated };
   });
 }
 
@@ -736,6 +879,14 @@ export function importTrades(trades, accountId) {
 
 export function listTags() {
   return all('SELECT * FROM tags ORDER BY name ASC');
+}
+
+export function listTagsWithCounts() {
+  return all(
+    `SELECT t.id, t.name, t.color, COUNT(tt.trade_id) AS count
+     FROM tags t LEFT JOIN trade_tags tt ON tt.tag_id = t.id
+     GROUP BY t.id ORDER BY count DESC, t.name ASC`,
+  );
 }
 
 export function getOrCreateTag(name) {
@@ -771,16 +922,50 @@ export function setTradeTags(tradeId, names) {
   });
 }
 
+/** 切换一笔交易的某个标签（有则移除、无则加上），不改其他标签 */
+export function toggleTradeTag(tradeId, name) {
+  const tag = getOrCreateTag(String(name || '').trim());
+  if (!tag) return null;
+  const has = get(
+    'SELECT 1 AS x FROM trade_tags WHERE trade_id = ? AND tag_id = ?',
+    Number(tradeId), tag.id,
+  );
+  if (has) {
+    run('DELETE FROM trade_tags WHERE trade_id = ? AND tag_id = ?', Number(tradeId), tag.id);
+    return { tag: tag.name, attached: false };
+  }
+  run('INSERT OR IGNORE INTO trade_tags (trade_id, tag_id) VALUES (?, ?)', Number(tradeId), tag.id);
+  return { tag: tag.name, attached: true };
+}
+
+/** 优先复盘队列：还没写复盘笔记的大亏交易（按亏损从大到小） */
+export function listReviewQueue({ threshold = 0, accountId = null, limit = 8 } = {}) {
+  const params = [Number(threshold)];
+  let sql = `SELECT tr.*, a.name AS account_name, a.exchange AS account_exchange
+    FROM trades tr JOIN accounts a ON a.id = tr.account_id
+    WHERE tr.pnl <= ? AND (tr.note IS NULL OR tr.note = '')`;
+  if (accountId) { sql += ' AND tr.account_id = ?'; params.push(Number(accountId)); }
+  sql += ' ORDER BY tr.pnl ASC LIMIT ?';
+  params.push(Math.max(1, Math.min(20, Number(limit) || 8)));
+  return attachTagsToRows(all(sql, ...params));
+}
+
 /* ---------------- 笔记 ---------------- */
 
 const NOTE_CATEGORIES = new Set(['general', 'periodic', 'symbol', 'strategy', 'spot', 'ai-report']);
 
-export function listNotes({ category = null, subject = null, accountId = null } = {}) {
+export function listNotes({ category = null, subject = null, accountId = null, q = null } = {}) {
   const where = [];
   const params = [];
   if (category) { where.push('n.category = ?'); params.push(String(category)); }
   if (subject !== null && subject !== undefined && subject !== '') { where.push('n.subject = ?'); params.push(String(subject)); }
   if (accountId !== null && accountId !== undefined && accountId !== '') { where.push('n.account_id = ?'); params.push(Number(accountId)); }
+  if (q && String(q).trim()) {
+    // 转义 LIKE 通配符，用户输入的 % _ \ 按字面匹配
+    const like = `%${String(q).trim().replace(/[\\%_]/g, (m) => '\\' + m)}%`;
+    where.push(`(n.title LIKE ? ESCAPE '\\' OR n.content LIKE ? ESCAPE '\\' OR n.subject LIKE ? ESCAPE '\\')`);
+    params.push(like, like, like);
+  }
   return all(
     `SELECT n.*, a.name AS account_name
        FROM notes n
@@ -1108,16 +1293,6 @@ export function updateReportJob(id, patch) {
   if (!job) return null;
   Object.assign(job, patch);
   return job;
-}
-
-export function latestReportJob(periodKind, periodLabel) {
-  let found = null;
-  for (const job of reportJobs.values()) {
-    if (job.periodKind === String(periodKind) && job.periodLabel === String(periodLabel)) {
-      if (!found || job.startedAt > found.startedAt) found = job;
-    }
-  }
-  return found;
 }
 
 export function getMeta(key, fallback = null) {

@@ -49,62 +49,6 @@ function configPanel({ config, presets, notice, error }) {
     </section>`;
 }
 
-export function aiPage({ user, config, weekLabel, noteCount, notice, error }) {
-  const modelLabel = config.provider === 'ollama'
-    ? `Ollama · ${config.model}`
-    : `${config.provider} · ${config.model}`;
-  const needsKey = !config.hasKey && config.provider !== 'ollama';
-
-  const body = `
-    ${error ? `<div class="alert alert-error">${e(error)}</div>` : ''}
-    ${notice ? `<div class="alert alert-ok">${e(notice)}</div>` : ''}
-    ${needsKey ? `<div class="alert alert-info">还没有配置 API Key，请先到 <a href="/dashboard/settings/ai">设置与数据 → AI 模型</a> 填写。</div>` : ''}
-
-    <div class="page-actions">
-      <a class="btn btn-primary" href="/dashboard/review">周期报告（推荐入口）</a>
-      <a class="btn btn-ghost" href="/dashboard/review/ai-reports">AI 报告专页</a>
-    </div>
-
-    <section class="panel">
-      <div class="panel-head"><h2>生成复盘</h2>
-        <span class="muted small">当前模型：${e(modelLabel)} · <a href="/dashboard/settings/ai">配置模型</a></span></div>
-      <form class="form grid-form" id="ai-generate-form">
-        <label class="field"><span>范围</span>
-          <select name="scope">
-            <option value="week">指定 ISO 周</option>
-            <option value="recent14">最近 14 天</option>
-            <option value="all">全部历史</option>
-          </select>
-        </label>
-        <label class="field"><span>周（范围=指定周时使用）</span>
-          <input type="week" name="week" value="${e(weekLabel)}">
-        </label>
-        <label class="field checkbox-field"><span>上下文</span>
-          <label class="check"><input type="checkbox" name="include_notes" value="1" checked>
-            附带 ${noteCount} 篇笔记与交易复盘</label>
-        </label>
-        <label class="field wide"><span>你想让模型重点看什么（可选）</span>
-          <textarea name="instruction" rows="3" placeholder="例如：重点分析连续亏损的原因，并给出下周的仓位规则"></textarea>
-        </label>
-        <div class="form-actions wide">
-          <button class="btn btn-primary" type="submit" data-ai-generate>生成复盘</button>
-          <span class="muted small" data-ai-status></span>
-        </div>
-      </form>
-      <div class="ai-result markdown" data-ai-result></div>
-      <div class="form-actions" data-ai-actions style="display:none">
-        <button class="btn btn-ghost" type="button" data-ai-save>保存为笔记</button>
-        <a class="btn btn-ghost" href="/dashboard/review" target="_blank">对照周报页面</a>
-      </div>
-    </section>`;
-
-  return shell({
-    active: 'ai', user, title: 'AI 复盘',
-    subtitle: '用自己的模型读你的笔记和周交易，生成下一次能执行的结论',
-    body,
-  });
-}
-
 export function aiSettingsPage({ user, config, presets, notice, error }) {
   return shell({
     active: 'ai-settings', user, title: 'AI 模型',

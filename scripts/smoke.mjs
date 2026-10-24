@@ -101,7 +101,7 @@ console.log('\n▶ 登录');
 console.log('\n▶ 登录后页面');
 const protectedPaths = ['/dashboard', '/dashboard/calendar', '/dashboard/journal', '/dashboard/journal/new',
   '/dashboard/transfers', '/dashboard/spot', '/dashboard/import', '/dashboard/accounts', '/dashboard/accounts/new',
-  '/dashboard/reconcile', '/dashboard/review', '/dashboard/ai', '/dashboard/tags', '/dashboard/notes',
+  '/dashboard/reconcile', '/dashboard/review', '/dashboard/tags', '/dashboard/notes',
   '/dashboard/notes/new', '/dashboard/settings', '/api/docs'];
 for (const path of protectedPaths) {
   const res = await req(path);
@@ -126,6 +126,9 @@ console.log('\n▶ 仪表盘内容');
     && html.includes('href="/dashboard/review"') && html.includes('href="/dashboard/transfers"')
     && html.includes('href="/dashboard/spot"') && !html.includes('href="/dashboard/ai"'),
   '侧栏包含交易所/资金流水/现货/对账/周期报告（无 AI 复盘）');
+  record(html.indexOf('设置与数据') >= 0 && html.indexOf('设置与数据') < html.indexOf('href="/dashboard/reconcile"'),
+    '对账已归入「设置与数据」分组');
+  record(!html.includes('现货资产种类'), '现货计数不再用「余额种类」口径');
 }
 
 console.log('\n▶ 日历');
@@ -173,9 +176,19 @@ console.log('\n▶ P1 交易所与对账');
   record(hlNew.includes('钱包地址') && !hlNew.includes('API Secret'), 'Hyperliquid 只要求钱包地址');
 
   const transfersHtml = await text(await req('/dashboard/transfers'));
-  record(transfersHtml.includes('充提与划转') && transfersHtml.includes('总充值'), '资金流水页渲染');
+  record(transfersHtml.includes('充提、划转与返佣') && transfersHtml.includes('总充值'), '资金流水页渲染');
+  record(transfersHtml.includes('value="rebate"') && transfersHtml.includes('>返佣</option>'), '资金流水支持按返佣筛选');
   const transfersApi = await jsonOf(await req('/api/transfers'));
   record(transfersApi.count === 0 && transfersApi.summary, '资金流水 API 正常');
+  const dashNoRebate = await text(await req('/dashboard'));
+  record(!dashNoRebate.includes('账单返佣'), '无返佣数据时仪表盘不显示账单返佣统计');
+  record(dashNoRebate.includes('成交记录里的正手续费（负费率）'), '做市返佣保留并注明口径');
+
+  // 行为诊断 + 优先复盘
+  record(dashNoRebate.includes('行为诊断'), '仪表盘包含行为诊断面板');
+  record(dashNoRebate.includes('保本线'), '行为诊断展示盈亏比保本线');
+  record(dashNoRebate.includes('优先复盘'), '仪表盘包含优先复盘队列');
+  record(dashNoRebate.includes('快捷标签') || dashNoRebate.includes('大亏交易都已写过复盘'), '复盘队列快捷标签渲染');
 
   const spotHtml = await text(await req('/dashboard/spot'));
   record(spotHtml.includes('现货持仓') && spotHtml.includes('现货成交'), '现货页渲染');
@@ -243,26 +256,22 @@ console.log('\n▶ P2 周报与 AI 上下文');
   record(badWeek.status === 200, '非法周参数回退本周', `→ ${badWeek.status}`);
 }
 
-/* ---------------- AI 复盘 ---------------- */
+/* ---------------- AI ---------------- */
 
-console.log('\n▶ AI 复盘');
+console.log('\n▶ AI');
 {
-  const aiHtml = await text(await req('/dashboard/ai'));
-  record(aiHtml.includes('生成复盘') && aiHtml.includes('配置模型'), 'AI 复盘页渲染');
+  const aiOld = await req('/dashboard/ai');
+  record(aiOld.status === 302 && String(aiOld.headers.get('location')).startsWith('/dashboard/review'),
+    '旧入口 /dashboard/ai 重定向到周期报告', `→ ${aiOld.status}`);
   const aiSettingsHtml = await text(await req('/dashboard/settings/ai'));
   record(aiSettingsHtml.includes('模型配置') && aiSettingsHtml.includes('data-ai-test'), 'AI 模型设置页有配置/测试入口');
 
-  if (aiHtml.includes('还没有配置 API Key')) {
+  if (aiSettingsHtml.includes('还没有保存 API Key')) {
     const test = await req('/api/ai/test', { method: 'POST' });
     const testBody = await test.json().catch(() => null);
     record(test.status === 400 && testBody?.ok === false, '未配置 Key 时测试 → 400', `→ ${test.status}`);
-
-    const gen = await req('/api/ai/generate', { method: 'POST', form: { scope: 'week' } });
-    const genBody = await gen.json().catch(() => null);
-    record(gen.status === 400 && /API Key/.test(String(genBody?.error || '')), '未配置 Key 时生成 → 400',
-      `→ ${gen.status}`);
   } else {
-    record(true, '已配置 Key，跳过真实生成调用（避免产生费用）');
+    record(true, '已配置 Key，跳过真实调用（避免产生费用）');
   }
 }
 
@@ -493,6 +502,94 @@ const csvText = 'symbol,side,close_time,pnl,fee,funding,open_time,entry_price,ex
     await req('/dashboard/import/templates/delete', { method: 'POST', form: { id: String(templateId) } });
     record(!(await text(await req('/dashboard/import'))).includes('smoke-map'), '映射模板已删除');
   }
+}
+
+/* ---------------- 账户维度 / 笔记搜索分页 / 布局 ---------------- */
+
+console.log('\n▶ 账户维度筛选');
+{
+  const cal = await text(await req('/dashboard/calendar?account_id=1'));
+  record(cal.includes('正在查看单个账户'), '盈亏日历单账户视图生效');
+  record(cal.includes('year=') && cal.includes('account_id=1'), '日历翻月链接保留账户参数');
+  const calAll = await text(await req('/dashboard/calendar'));
+  record(!calAll.includes('正在查看单个账户'), '日历无效/缺省账户回退聚合');
+  const acc = await text(await req('/dashboard?account_id=1'));
+  record(acc.includes('正在查看单个账户'), '仪表盘单账户视图生效');
+  record(acc.includes('market=futures&account_id=1'), '市场页签保留账户参数');
+  const accBad = await text(await req('/dashboard?account_id=99999'));
+  record(!accBad.includes('正在查看单个账户'), '无效账户号回退到聚合视图');
+
+  const jr = await text(await req('/dashboard/journal?account_id=1'));
+  record(jr.includes('条 / 共') && jr.includes('SMOKE-CSV-1/USDT'), '交易记录按账户过滤后仍有导入数据');
+  const jrApi = await jsonOf(await req('/api/trades?account_id=1&limit=1000'));
+  record(jrApi.trades.length > 0 && jrApi.trades.every((t) => t.account_id === 1), 'API 也支持 account_id 过滤');
+}
+
+console.log('\n▶ 交易详情盈亏曲线');
+{
+  // 快捷标签：验证仪表盘渲染的表单 action 指向正确路由，并按表单路径走一遍挂/摘
+  const dash = await text(await req('/dashboard'));
+  const action = (dash.match(/action="(\/dashboard\/journal\/\d+\/tag)"/) || [])[1];
+  record(Boolean(action), `快捷标签表单 action 指向路由（${action || '未找到'}）`);
+  if (action) {
+    await req(action, { method: 'POST', form: { tag: 'smoke-quick', back: '/dashboard' } });
+    const afterAdd = await text(await req(action.replace(/\/tag$/, '')));
+    record(afterAdd.includes('smoke-quick'), '快捷标签 POST 挂上');
+    await req(action, { method: 'POST', form: { tag: 'smoke-quick', back: '/dashboard' } });
+    const afterDel = await text(await req(action.replace(/\/tag$/, '')));
+    record(!afterDel.includes('smoke-quick'), '快捷标签 POST 再点移除');
+  }
+
+  const list = (await jsonOf(await req('/api/trades?limit=5'))).trades;
+  let sawPanel = false;
+  let sawChart = false;
+  for (const t of list.slice(0, 5)) {
+    const html = await text(await req(`/dashboard/journal/${t.id}`));
+    if (!html.includes('持仓盈亏曲线（开仓 → 平仓）')) continue;
+    sawPanel = true;
+    // 演示账户不拉真实行情 → 命中提示分支；真实账户才有 SVG 曲线
+    if (html.includes('演示账户不拉取真实行情')) sawChart = true;
+    break;
+  }
+  record(sawPanel, '交易详情页渲染盈亏曲线面板');
+  record(sawChart, '演示账户显示行情提示而不请求外网');
+  for (const t of list.slice(0, 5)) {
+    const html = await text(await req(`/dashboard/journal/${t.id}`));
+    if (!html.includes('操作明细（开仓 → 平仓）')) continue;
+    record(html.includes('演示账户不拉取真实成交明细'), '操作明细面板渲染（演示账户提示而不请求外网）');
+    break;
+  }
+}
+
+console.log('\n▶ 笔记搜索与分页');
+{
+  const hit = await text(await req('/dashboard/notes?q=' + encodeURIComponent('spot smoke note')));
+  record(hit.includes('spot smoke note') && hit.includes('搜索「'), '笔记搜索按内容命中');
+  const miss = await text(await req('/dashboard/notes?q=' + encodeURIComponent('绝不存在的关键词xyz')));
+  record(miss.includes('没有匹配') && miss.includes('清除'), '搜索无结果时给出提示与清除入口');
+
+  for (let i = 1; i <= 26; i++) {
+    await req('/dashboard/notes/save', { method: 'POST', form: { title: `SMOKE-PAGE-${String(i).padStart(2, '0')}`, content: `分页冒烟 ${i}` } });
+  }
+  const q = encodeURIComponent('SMOKE-PAGE');
+  const page1 = await text(await req(`/dashboard/notes?q=${q}`));
+  record(page1.includes('SMOKE-PAGE-26') && !page1.includes('SMOKE-PAGE-01'), '第 1 页只含最新 24 篇');
+  record(page1.includes('下一页') && page1.includes('共 26 篇'), '分页条与总数已渲染');
+  const page2 = await text(await req(`/dashboard/notes?q=${q}&page=2`));
+  record(page2.includes('SMOKE-PAGE-01') && !page2.includes('SMOKE-PAGE-26'), '第 2 页含最旧 2 篇');
+
+  const created = (await jsonOf(await req('/api/notes'))).notes.filter((n) => /^SMOKE-PAGE-/.test(n.title));
+  for (const n of created) await req('/dashboard/notes/delete', { method: 'POST', form: { id: String(n.id) } });
+  record((await jsonOf(await req('/api/notes'))).notes.every((n) => !/^SMOKE-PAGE-/.test(n.title)), '分页测试笔记已清理');
+}
+
+console.log('\n▶ 布局修复');
+{
+  const html = await text(await req('/dashboard/transfers'));
+  record(html.includes('table-wrap'), '宽表格容器支持横向滚动');
+  record(!html.includes('随账户同步自动更新；需要钱包/资产只读权限'), '旧的断裂 panel-head 文案已合并');
+  const spotHtml = await text(await req('/dashboard/spot'));
+  record(spotHtml.includes('持仓币种') && spotHtml.includes('计价币余额'), '现货页计数口径与持仓一致');
 }
 
 /* ---------------- 筛选与导出 ---------------- */

@@ -4,7 +4,38 @@ import { shell } from './layout.js';
 const sign = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : 'flat');
 const sourceLabel = (s) => ({ api: '交易所同步', csv: 'CSV 导入', manual: '手动', demo: '演示' }[s] || s);
 
-export function reconcilePage({ user, report, notice, error }) {
+/** 月度对账：应用内净盈亏 vs 交易所账本实结算（盈亏+手续费+资金费） */
+function monthlyPanel(monthly) {
+  if (!monthly || !monthly.length) return '';
+  const blocks = monthly.map((m) => {
+    if (m.error) {
+      return `<section class="panel">
+        <div class="panel-head"><h2>月度对账 · ${e(m.account.name)}</h2></div>
+        <div class="chart-empty">账本拉取失败：${e(m.error)}</div>
+      </section>`;
+    }
+    const rows = m.rows.map((r) => {
+      const ok = Math.abs(r.diff) <= Math.max(1, Math.abs(r.exchange) * 0.02);
+      return `<tr>
+        <td>${e(r.month)}</td>
+        <td class="${sign(r.app)}">${fmtMoney(r.app)}</td>
+        <td class="${sign(r.exchange)}">${fmtMoney(r.exchange)}</td>
+        <td class="${ok ? 'pos' : 'neg'} strong">${ok ? '一致' : fmtMoney(r.diff)}</td>
+      </tr>`;
+    }).join('');
+    return `<section class="panel">
+      <div class="panel-head"><h2>月度对账 · ${e(m.account.name)}（${e(m.account.exchange)}）</h2>
+        <span class="muted small">应用内净盈亏 vs 交易所账本（已实现盈亏+手续费+资金费）· 缓存 30 分钟</span></div>
+      <table class="table">
+        <thead><tr><th>月份</th><th>应用内</th><th>交易所账本</th><th>差异</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="4" class="muted center">暂无数据</td></tr>'}</tbody>
+      </table>
+    </section>`;
+  }).join('');
+  return blocks;
+}
+
+export function reconcilePage({ user, report, monthly = [], notice, error }) {
   const sourceRows = report.bySource.map((s) => `<tr>
     <td>${e(sourceLabel(s.source))}</td>
     <td>${fmtNum(s.checked)}</td>
@@ -71,7 +102,9 @@ export function reconcilePage({ user, report, notice, error }) {
         <thead><tr><th>平仓时间</th><th>币种</th><th>来源</th><th>缺失字段</th></tr></thead>
         <tbody>${missingRows}</tbody>
       </table>
-    </section>` : ''}`;
+    </section>` : ''}
+
+    ${monthlyPanel(monthly)}`;
 
   return shell({
     active: 'reconcile', user, title: '对账',

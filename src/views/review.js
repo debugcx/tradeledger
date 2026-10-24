@@ -14,7 +14,7 @@ function listSection(title, rows, render, empty = '本周期样本不足。') {
 }
 
 export function reportPage({
-  user, review, prev, next, markdownPreview, promptText,
+  user, review, prev, next, markdownPreview, promptText, markdownTruncated = false,
   savedReport = null, history = [], aiStatus = null, notice, error,
 }) {
   const kind = review.period.kind;
@@ -116,7 +116,7 @@ export function reportPage({
         <a class="btn btn-ghost small" href="/dashboard/review?${queryOf(next)}">下一个周期 →</a>
         <a class="btn btn-ghost small" href="/api/review?${queryOf(review.period)}&format=md">下载 Markdown</a>
         <a class="btn btn-ghost small" href="/api/review?${queryOf(review.period)}&format=json">下载 JSON</a>
-        <button class="btn btn-ghost small" type="button" data-copy-review="${e(review.period.label)}">复制 Markdown</button>
+        <button class="btn btn-ghost small" type="button" data-copy-review="${e(queryOf(review.period))}">复制 Markdown</button>
         <a class="btn btn-ghost small" href="#ai-report">AI 解读 ↓</a>
       </div>
       <p class="muted small" style="margin:12px 0 0">区间：${e(review.period.from.slice(0, 10))} → ${e(review.period.to.slice(0, 10))}（服务端本地时区）</p>
@@ -173,6 +173,7 @@ export function reportPage({
       <details>
         <summary class="muted small" style="cursor:pointer">展开完整 Markdown</summary>
         <pre class="code review-context">${e(markdownPreview)}</pre>
+        ${markdownTruncated ? '<p class="muted small">内容过长已截断；完整报告用「复制 Markdown」或「下载 Markdown」获取。</p>' : ''}
       </details>
     </section>`;
 
@@ -191,7 +192,7 @@ export function savedReportPage({ user, report, notice, error }) {
     notice, error,
     body: `<div class="page-actions">
       <a class="btn btn-ghost small" href="/dashboard/review/ai-reports">← 返回 AI 报告</a>
-      <a class="btn btn-ghost small" href="/dashboard/review?kind=${e(report.period_kind)}">查看${e(kindLabel)}报数据</a>
+      <a class="btn btn-ghost small" href="/dashboard/review?${report.period_kind === 'month' ? `month=${encodeURIComponent(report.period_label)}` : report.period_kind === 'year' ? `year=${encodeURIComponent(report.period_label)}` : `week=${encodeURIComponent(report.period_label)}`}&kind=${e(report.period_kind)}">查看${e(kindLabel)}报数据</a>
       <form method="post" action="/dashboard/review/ai/save-note" class="inline">
         <input type="hidden" name="report_id" value="${report.id}">
         <button class="btn btn-primary small" type="submit">写入笔记</button>

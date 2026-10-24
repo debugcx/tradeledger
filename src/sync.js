@@ -129,7 +129,8 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
       windowBudget: config.syncWindowBudget,
     });
     const trades = Array.isArray(result?.trades) ? result.trades : [];
-    const imported = store.importTrades(trades, accountId);
+    // upsert：OKX 部分平仓会原地更新仓位历史行，重新拉到同 ID 时回写最终状态
+    const imported = store.importTrades(trades, accountId, { upsert: true });
     const nextCursor = result?.nextCursor || null;
     const done = !nextCursor;
 
@@ -153,6 +154,8 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
     }
     const fundingApplied = store.applyFundingEvents(accountId);
     let transfersInserted = 0;
+    let botsInserted = 0;
+    let ledgerInserted = 0;
     let spotInserted = 0;
     let spotFillsInserted = 0;
     if (typeof adapter.fetchTransfers === 'function') {
@@ -166,8 +169,47 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
           const transferResult = await adapter.fetchTransfers({
             creds, fromMs: tFrom, toMs: now, limit: 2000,
           });
-          transfersInserted = store.insertTransfers(transferResult?.transfers || [], accountId);
+          let transferRows = transferResult?.transfers || [];
+          if (typeof adapter.fetchRebates === 'function') {
+            try {
+              const rebates = await adapter.fetchRebates({ creds, fromMs: tFrom, toMs: now, limit: 2000 });
+              transferRows = transferRows.concat(rebates?.transfers || []);
+            } catch (err) {
+              warnings.push(`返佣账单拉取失败：${err?.message || err}`);
+            }
+          }
+          transfersInserted = store.insertTransfers(transferRows, accountId);
           store.updateAccountTransferSync(accountId);
+          // 策略机器人（网格）：已结束回合并入交易日志，随流水节流（6 小时）一起拉
+          if (typeof adapter.fetchBots === 'function') {
+            try {
+              const bots = await adapter.fetchBots({ creds, fromMs: tFrom, toMs: now, limit: 200 });
+              const res = store.importTrades(bots?.trades || [], accountId, { upsert: true });
+              botsInserted = res.inserted + (res.updated || 0);
+            } catch (err) {
+              warnings.push(`策略机器人拉取失败：${err?.message || err}`);
+            }
+          }
+          // 账本回填：成交明细超出交易所保留期时，从账本重建降级回合（目前 Gate）
+          if (typeof adapter.fetchLedgerTrades === 'function') {
+            try {
+              const led = await adapter.fetchLedgerTrades({ creds, fromMs: tFrom, toMs: now, limit: 500 });
+              const res = store.importTrades(led?.trades || [], accountId, { upsert: true });
+              ledgerInserted = res.inserted + (res.updated || 0);
+              // 重建的回合不在成交批次里，资金费按同一窗口补拉一次（事件按 external_id 幂等）
+              if (ledgerInserted && typeof adapter.fetchFunding === 'function') {
+                try {
+                  const funding = await adapter.fetchFunding({ creds, fromMs: tFrom, toMs: now, cursor: null, limit: 2000 });
+                  if (funding?.events?.length) {
+                    store.insertFundingEvents(funding.events, accountId);
+                    store.applyFundingEvents(accountId);
+                  }
+                } catch { /* 资金费补充失败不影响主流程 */ }
+              }
+            } catch (err) {
+              warnings.push(`账本回填失败：${err?.message || err}`);
+            }
+          }
         } catch (err) {
           warnings.push(`资金流水拉取失败：${err?.message || err}`);
           // 避免每 5 秒重试打爆接口；6 小时后再试，或点“重新回溯”立即重试
@@ -195,7 +237,7 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
           const spotTrades = matchFills(fills, `spot:${account.exchange}`, { longOnly: true })
             .map((t) => ({ ...t, market: 'spot', source: 'api' }));
           if (spotTrades.length) {
-            spotInserted = store.importTrades(spotTrades, accountId).inserted;
+            spotInserted = store.importTrades(spotTrades, accountId, { upsert: true }).inserted;
           }
           store.updateAccountSpotSync(accountId);
         } catch (err) {
@@ -210,9 +252,11 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
       state: done ? null : { fromMs, toMs, cursor: nextCursor, batches, mode },
       done: account.sync_done ? 1 : (done ? 1 : 0),
       status: 'ok',
-      message: `fetched ${trades.length}, inserted ${imported.inserted}, skipped ${imported.skipped}`
+      message: `fetched ${trades.length}, inserted ${imported.inserted}, updated ${imported.updated || 0}, skipped ${imported.skipped}`
         + (fundingApplied ? `, funding ${fundingApplied}` : '')
         + (transfersInserted ? `, transfers ${transfersInserted}` : '')
+        + (botsInserted ? `, bots ${botsInserted}` : '')
+        + (ledgerInserted ? `, ledger ${ledgerInserted}` : '')
         + (spotInserted ? `, spot ${spotInserted}` : '')
         + (spotFillsInserted ? `, spot fills ${spotFillsInserted}` : '')
         + (warnings.length ? `, warn: ${warnings[0]}` : ''),
@@ -220,6 +264,7 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
     store.finishSyncRun(runId, {
       fetched: trades.length,
       inserted: imported.inserted,
+      updated: imported.updated || 0,
       skipped: imported.skipped,
       status: 'ok',
       message: done ? 'batch complete' : 'more history available',
@@ -232,10 +277,13 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
       mode,
       fetched: trades.length,
       inserted: imported.inserted,
+      updated: imported.updated || 0,
       skipped: imported.skipped,
       fundingInserted,
       fundingApplied,
       transfersInserted,
+      botsInserted,
+      ledgerInserted,
       spotInserted,
       spotFillsInserted,
       warnings,

@@ -5,6 +5,10 @@ export function spotPage({ user, balances, holdings, fills, spotTrades = [], not
   const spotValue = holdings.reduce((a, h) => a + (Number(h.value) || 0), 0);
   const withCost = holdings.filter((h) => h.avg_cost !== null && h.avg_cost !== undefined);
   const coverage = holdings.length ? withCost.length / holdings.length : 0;
+  // 计价币（USDT/USDC）不参与持仓行，单独汇总展示，避免「资产数」和持仓表对不上
+  const quoteTotal = balances
+    .filter((b) => b.asset === 'USDT' || b.asset === 'USDC')
+    .reduce((a, b) => a + (Number(b.total) || 0), 0);
 
   const holdingRows = holdings.map((h) => {
     const qty = Number(h.quantity) || 0;
@@ -50,8 +54,9 @@ export function spotPage({ user, balances, holdings, fills, spotTrades = [], not
 
   const body = `
     <div class="mini-strip">
-      <div class="mini-stat"><span>现货资产</span><b>${fmtNum(balances.length)}</b></div>
-      <div class="mini-stat"><span>持仓交易对</span><b>${fmtNum(holdings.length)}</b></div>
+      <div class="mini-stat"><span>持仓币种</span><b>${fmtNum(holdings.length)}</b>
+        <div class="muted small">不含 USDT 等计价币</div></div>
+      <div class="mini-stat"><span>计价币余额</span><b>${fmtNum(quoteTotal, 2)} <span class="muted small">USDT/USDC</span></b></div>
       <div class="mini-stat"><span>现货市值</span><b>${fmtMoney(spotValue, { sign: false })}</b></div>
       <div class="mini-stat"><span>成本基础覆盖</span><b>${(coverage * 100).toFixed(0)}%</b>
         <div class="muted small">${withCost.length} / ${holdings.length} 个持仓有买入成本</div></div>

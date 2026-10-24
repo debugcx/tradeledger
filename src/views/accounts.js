@@ -79,7 +79,7 @@ export function accountsPage({ user, accounts, meta, runs, accountStats = {}, st
             <button class="btn btn-ghost small" type="submit">重新回溯</button>
           </form>
           <form method="post" action="/dashboard/accounts/${a.id}/delete" class="inline"
-            onsubmit="return confirm('删除账户「${e(a.name)}」？已同步的交易会保留。')">
+            onsubmit='return confirm(${e(JSON.stringify(`删除账户「${a.name}」？已同步的交易会保留。`))})'>
             <button class="btn btn-ghost small danger" type="submit">删除</button>
           </form>`}
       </td>

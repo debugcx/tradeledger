@@ -1,6 +1,9 @@
 import { hmacBase64 } from '../crypto.js';
 import { requestJson } from '../http-client.js';
-import { num, windowsDescending, matchFills, toSymbol, splitPair, quoteFee, isSupportedSpotSymbol, SPOT_QUOTES } from './common.js';
+import { num, windowsDescending, matchFills, toSymbol, splitPair, quoteFee, isSupportedSpotSymbol, SPOT_QUOTES, marketCache, cacheGet, cachePut } from './common.js';
+
+const candleCache = marketCache('bitget:candles');
+const fillCache = marketCache('bitget:fills');
 
 /**
  * Bitget V2 只读接入（USDT 本位合约）。
@@ -335,5 +338,89 @@ export const bitget = {
       });
     }
     return { balances, positions: outPositions };
+  },
+
+  // 行情 K 线（公共接口）。合约/现货的粒度字符串不同；行 = [时间, 开, 高, 低, 收, ...]。
+  async fetchCandles({ symbol, market = 'futures', fromMs, toMs }) {
+    const instId = String(symbol || '').replace('/', '').toUpperCase();
+    if (!instId) return { bar: '1H', candles: [], truncated: false };
+    const bars = market === 'spot'
+      ? [['1min', 60_000], ['5min', 300_000], ['15min', 900_000], ['30min', 1_800_000],
+        ['1h', 3_600_000], ['4h', 14_400_000], ['6h', 21_600_000], ['12h', 43_200_000], ['1day', 86_400_000]]
+      : [['1m', 60_000], ['5m', 300_000], ['15m', 900_000], ['30m', 1_800_000],
+        ['1H', 3_600_000], ['4H', 14_400_000], ['6H', 21_600_000], ['12H', 43_200_000], ['1D', 86_400_000]];
+    const dur = Math.max(0, Number(toMs) - Number(fromMs));
+    let bar = bars[bars.length - 1][0], barMs = bars[bars.length - 1][1];
+    for (const [name, ms] of bars) {
+      if (dur / ms <= 90) { bar = name; barMs = ms; break; }
+    }
+    const cacheKey = `zc|${instId}|${market}|${bar}|${Math.floor(fromMs / barMs)}|${Math.floor(toMs / barMs)}`;
+    const hit = cacheGet(candleCache, cacheKey);
+    if (hit) return hit;
+
+    const path = market === 'spot' ? '/api/v2/spot/market/candles' : '/api/v2/mix/market/candles';
+    const params = {
+      symbol: instId, granularity: bar, limit: '1000',
+      startTime: String(Math.max(0, Number(fromMs))), endTime: String(Number(toMs)),
+    };
+    if (market !== 'spot') params.productType = 'USDT-FUTURES';
+    const res = await requestJson(`${BASE}${path}?${new URLSearchParams(params)}`, { method: 'GET' });
+    if (!Array.isArray(res.json?.data)) throw new Error(`Bitget K 线返回异常（HTTP ${res.status}）`);
+    const out = res.json.data
+      .map((r) => ({ t: Number(r[0]), o: num(r[1]), h: num(r[2]), l: num(r[3]), c: num(r[4]) }))
+      .filter((k) => k.t >= Number(fromMs) && k.t <= Number(toMs))
+      .sort((a, b) => a.t - b.t);
+    const result = { bar, candles: out.slice(0, 300), truncated: out.length >= 300 };
+    return cachePut(candleCache, cacheKey, result);
+  },
+
+  // 某个回合的逐笔成交（需签名）
+  async fetchEpisodeFills({ creds, symbol, market = 'futures', fromMs, toMs, limit }) {
+    const instId = String(symbol || '').replace('/', '').toUpperCase();
+    if (!instId) return { fills: [] };
+    const cap = Math.max(50, Number(limit) || 300);
+    const cacheKey = `zf|${instId}|${market}|${fromMs}|${toMs}`;
+    const hit = cacheGet(fillCache, cacheKey);
+    if (hit) return hit;
+
+    const out = [];
+    if (market === 'spot') {
+      for (let page = 1; page <= 3 && out.length < cap; page++) {
+        const rows = await call('/api/v2/spot/trade/fills', {
+          symbol: instId, startTime: String(fromMs), endTime: String(toMs),
+          limit: '100', page: String(page),
+        }, creds);
+        if (!Array.isArray(rows) || !rows.length) break;
+        for (const r of rows) {
+          out.push({
+            t: Number(r.ts ?? r.cTime ?? 0),
+            side: String(r.side || '').toLowerCase() === 'buy' ? 'buy' : 'sell',
+            price: num(r.price), qty: num(r.size ?? r.baseVolume),
+            fee: fillFee(r), feeCcy: r.feeCoin || '', billId: r.tradeId || '',
+          });
+        }
+        if (rows.length < 100) break;
+      }
+    } else {
+      for (let page = 0; page < 3 && out.length < cap; page++) {
+        const rows = await call('/api/v2/mix/trade/fills', {
+          symbol: instId, productType: 'USDT-FUTURES',
+          startTime: String(fromMs), endTime: String(toMs), limit: '100',
+        }, creds);
+        if (!Array.isArray(rows) || !rows.length) break;
+        for (const r of rows) {
+          out.push({
+            t: Number(r.fillTime ?? r.ts ?? r.cTime ?? 0),
+            side: String(r.side || '').toLowerCase() === 'buy' ? 'buy' : 'sell',
+            price: num(r.price), qty: num(r.size ?? r.baseVolume),
+            fee: fillFee(r), feeCcy: r.feeCoin || 'USDT', billId: r.tradeId || '',
+          });
+        }
+        if (rows.length < 100) break;
+      }
+    }
+    out.sort((a, b) => a.t - b.t);
+    const result = { fills: out.slice(0, cap) };
+    return cachePut(fillCache, cacheKey, result);
   },
 };

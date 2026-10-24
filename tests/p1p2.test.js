@@ -246,16 +246,16 @@ test('同步引擎：分批游标、断点续传、去重与审计', async () =>
 
   const r2 = await syncAccount(account.id, { registry: { fake } });
   assert.equal(r2.inserted, 1);
-  assert.equal(r2.skipped, 1);
+  assert.equal(r2.updated, 1); // tradeA 重现：api 行回写（upsert），不再计 skipped
   assert.equal(r2.done, true);
   row = store.getAccount(account.id);
   assert.equal(row.sync_done, 1);
   assert.equal(row.sync_state, null);
 
-  // 完成后再次同步：走增量，重复数据全部跳过
+  // 完成后再次同步：走增量，重复 api 行全部走 upsert 回写
   const r3 = await syncAccount(account.id, { registry: { fake } });
   assert.equal(r3.inserted, 0);
-  assert.equal(r3.skipped, 2);
+  assert.equal(r3.updated, 2);
   assert.equal(store.listTrades().length, 2);
   assert.equal(store.listSyncRuns().length, 3);
   assert.ok(store.listSyncRuns()[0].fetched > 0);

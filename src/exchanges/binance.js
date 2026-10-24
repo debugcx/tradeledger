@@ -1,6 +1,9 @@
 import { hmacHex } from '../crypto.js';
 import { requestJson } from '../http-client.js';
-import { num, windowsDescending, matchFills, toSymbol, splitPair, quoteFee, SPOT_QUOTES } from './common.js';
+import { num, windowsDescending, matchFills, toSymbol, splitPair, quoteFee, SPOT_QUOTES, marketCache, cacheGet, cachePut } from './common.js';
+
+const candleCache = marketCache('binance:candles');
+const fillCache = marketCache('binance:fills');
 
 /**
  * Binance USDT-M 合约只读接入。
@@ -290,5 +293,76 @@ export const binance = {
       });
     }
     return { balances, positions };
+  },
+
+  // 行情 K 线（公共接口）。行 = [开盘时间, 开, 高, 低, 收, ...]，升序。
+  async fetchCandles({ symbol, market = 'futures', fromMs, toMs }) {
+    const instId = String(symbol || '').replace('/', '').toUpperCase();
+    if (!instId) return { bar: '1h', candles: [], truncated: false };
+    const bars = [
+      ['1m', 60_000], ['3m', 180_000], ['5m', 300_000], ['15m', 900_000], ['30m', 1_800_000],
+      ['1h', 3_600_000], ['2h', 7_200_000], ['4h', 14_400_000], ['6h', 21_600_000],
+      ['12h', 43_200_000], ['1d', 86_400_000],
+    ];
+    const dur = Math.max(0, Number(toMs) - Number(fromMs));
+    let bar = '1d', barMs = 86_400_000;
+    for (const [name, ms] of bars) {
+      if (dur / ms <= 90) { bar = name; barMs = ms; break; }
+    }
+    const cacheKey = `bc|${instId}|${market}|${bar}|${Math.floor(fromMs / barMs)}|${Math.floor(toMs / barMs)}`;
+    const hit = cacheGet(candleCache, cacheKey);
+    if (hit) return hit;
+
+    const base = market === 'spot' ? BASE_SAPI : BASE;
+    const path = market === 'spot' ? '/api/v3/klines' : '/fapi/v1/klines';
+    const q = new URLSearchParams({
+      symbol: instId, interval: bar, limit: '1000',
+      startTime: String(Math.max(0, Number(fromMs))), endTime: String(Number(toMs)),
+    });
+    const res = await requestJson(`${base}${path}?${q}`, { method: 'GET' });
+    if (!Array.isArray(res.json)) throw new Error(`Binance K 线返回异常（HTTP ${res.status}）`);
+    const out = res.json
+      .map((r) => ({ t: Number(r[0]), o: num(r[1]), h: num(r[2]), l: num(r[3]), c: num(r[4]) }))
+      .filter((k) => k.t >= Number(fromMs) && k.t <= Number(toMs))
+      .sort((a, b) => a.t - b.t);
+    const result = { bar, candles: out.slice(0, 300), truncated: out.length >= 300 };
+    return cachePut(candleCache, cacheKey, result);
+  },
+
+  // 某个回合的逐笔成交（需签名）
+  async fetchEpisodeFills({ creds, symbol, market = 'futures', fromMs, toMs, limit }) {
+    const instId = String(symbol || '').replace('/', '').toUpperCase();
+    if (!instId) return { fills: [] };
+    const cap = Math.max(50, Number(limit) || 300);
+    const cacheKey = `bf|${instId}|${market}|${fromMs}|${toMs}`;
+    const hit = cacheGet(fillCache, cacheKey);
+    if (hit) return hit;
+
+    const base = market === 'spot' ? BASE_SAPI : BASE;
+    const path = market === 'spot' ? '/api/v3/myTrades' : '/fapi/v1/userTrades';
+    const out = [];
+    for (let page = 0; page < 3 && out.length < cap; page++) {
+      const q = new URLSearchParams({
+        symbol: instId, limit: '1000',
+        startTime: String(Math.max(0, Number(fromMs))), endTime: String(Number(toMs)),
+        ...(page && out.length ? { fromId: String(out[out.length - 1].billId + 1) } : {}),
+      });
+      const rows = await call(`${path}?${q}`, creds, { baseUrl: base });
+      if (!Array.isArray(rows) || !rows.length) break;
+      for (const r of rows) {
+        const quoteFeeCcy = ['USDT', 'BUSD', 'USDC', 'FDUSD'].includes(String(r.commissionAsset || '').toUpperCase());
+        out.push({
+          t: Number(r.time || 0),
+          side: String(r.side).toUpperCase() === 'BUY' ? 'buy' : 'sell',
+          price: num(r.price), qty: num(r.qty),
+          fee: quoteFeeCcy ? -Math.abs(num(r.commission)) : 0,
+          feeCcy: r.commissionAsset || '', billId: r.id,
+        });
+      }
+      if (rows.length < 1000) break;
+    }
+    out.sort((a, b) => a.t - b.t);
+    const result = { fills: out.slice(0, cap) };
+    return cachePut(fillCache, cacheKey, result);
   },
 };

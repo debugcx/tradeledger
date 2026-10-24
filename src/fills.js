@@ -151,3 +151,96 @@ export function matchFills(fills, source, { longOnly = false } = {}) {
 
   return out;
 }
+
+/**
+ * 净头寸回合配对：同一品种从净持仓 0 → 0 记为一个回合（与 OKX 仓位历史同口径），
+ * 回合内的开仓、加仓、减仓、清零都归属同一条记录。
+ * 开/平价 = 各腿加权均价；盈亏按「减仓腿 × 当时移动开仓均价」累计（含手续费）。
+ * 与 matchFills 的区别：不会把一次持仓拆成多条手数记录。
+ */
+export function matchEpisodes(fills, source) {
+  const sorted = [...fills].filter((f) => f && f.time && f.symbol && f.qty > 0 && f.price > 0)
+    .sort((a, b) => a.time - b.time);
+  const books = new Map(); // symbol -> { pos, avgPx, legs: [...] }
+  const out = [];
+  const seen = new Map();
+
+  const emit = (symbol, legs) => {
+    if (legs.length < 2) return;
+    let pos = 0;
+    let avg = 0;
+    let openQty = 0, closeQty = 0, openFee = 0, closeFee = 0;
+    let openNotional = 0, closeNotional = 0, pnl = 0;
+    let openTime = Infinity, closeTime = 0;
+    for (const f of legs) {
+      const dir = f.side === 'buy' ? 1 : -1;
+      const before = pos;
+      pos += dir * f.qty;
+      const reducing = Math.abs(pos) < Math.abs(before) - 1e-12;
+      if (reducing) {
+        const legQty = Math.min(f.qty, Math.abs(before));
+        pnl += (f.price - avg) * legQty * (before > 0 ? 1 : -1);
+        closeQty += legQty;
+        closeNotional += f.price * legQty;
+        closeFee += f.fee;
+      } else {
+        avg = (avg * Math.abs(before) + f.price * f.qty) / Math.abs(pos);
+        openQty += f.qty;
+        openNotional += f.price * f.qty;
+        openFee += f.fee;
+      }
+      openTime = Math.min(openTime, f.time);
+      closeTime = Math.max(closeTime, f.time);
+    }
+    if (openQty <= 1e-12 || closeQty <= 1e-12) return;
+    const side = legs[0].side === 'buy' ? 'long' : 'short';
+    const trade = {
+      symbol,
+      side,
+      order_type: normalizeOrderType(legs[0].orderType),
+      size: openQty,
+      notional: openNotional,
+      entry_price: openNotional / openQty,
+      exit_price: closeNotional / closeQty,
+      open_time: new Date(openTime).toISOString(),
+      close_time: new Date(closeTime).toISOString(),
+      pnl: pnl + openFee + closeFee, // 减仓腿已计入平仓费，这里补开仓费
+      fee: openFee + closeFee,
+      funding: 0,
+      source: 'api',
+    };
+    let externalId = `${source}:ep:${fingerprintTrade(trade)}`;
+    if (seen.has(externalId)) {
+      const n = seen.get(externalId) + 1;
+      seen.set(externalId, n);
+      externalId = `${externalId}:${n}`;
+    } else {
+      seen.set(externalId, 1);
+    }
+    out.push({ ...trade, external_id: externalId });
+  };
+
+  for (const fill of sorted) {
+    const qty = Math.abs(num(fill.qty));
+    const dir = fill.side === 'buy' ? 1 : -1;
+    let book = books.get(fill.symbol) || { pos: 0, avgPx: 0, legs: [] };
+    const before = book.pos;
+    book.pos += dir * qty;
+    book.legs.push({ ...fill, qty });
+    // 一腿直接穿越零轴：减仓部分结束当前回合，剩余反向开新回合
+    if (Math.abs(before) > 1e-12 && Math.sign(book.pos) !== Math.sign(before) && Math.abs(book.pos) > 1e-12) {
+      const carried = Math.abs(book.pos);
+      emit(fill.symbol, book.legs);
+      books.set(fill.symbol, { pos: book.pos, avgPx: 0, legs: [{ ...fill, qty: carried }] });
+      continue;
+    }
+    if (Math.abs(book.pos) <= 1e-12) {
+      emit(fill.symbol, book.legs);
+      books.delete(fill.symbol);
+    } else {
+      books.set(fill.symbol, book);
+    }
+  }
+  // 窗口结束时仍未清零的持仓不产出回合（等清零后的批次补齐）
+  return out;
+}

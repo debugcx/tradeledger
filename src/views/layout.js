@@ -6,7 +6,7 @@ const NAV = [
   { href: '/dashboard/journal', label: '交易记录', key: 'journal' },
   { href: '/dashboard/transfers', label: '资金流水', key: 'transfers' },
   { href: '/dashboard/spot', label: '现货', key: 'spot' },
-  { href: '/dashboard/reconcile', label: '对账', key: 'reconcile' },
+  { href: '/dashboard/bots', label: '策略机器人', key: 'bots' },
   { href: '/dashboard/notes', label: '笔记', key: 'notes' },
   { href: '/dashboard/review', label: '周期报告', key: 'review' },
 ];
@@ -15,6 +15,7 @@ const SETTINGS_NAV = [
   { href: '/dashboard/settings', label: '常规与备份', key: 'settings', tab: 'general' },
   { href: '/dashboard/import', label: '数据导入', key: 'import', tab: 'import' },
   { href: '/dashboard/accounts', label: '交易所', key: 'accounts', tab: 'accounts' },
+  { href: '/dashboard/reconcile', label: '对账', key: 'reconcile' },
   { href: '/dashboard/tags', label: '标签', key: 'tags', tab: 'tags' },
   { href: '/dashboard/settings/ai', label: 'AI 模型', key: 'ai-settings', tab: 'ai' },
 ];

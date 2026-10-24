@@ -271,11 +271,45 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; fo
 
 .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 18px; }
 .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
-.chart-box { background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); padding: 14px 16px; overflow: hidden; }
+.chart-box { background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); padding: 14px 16px; overflow: visible; }
 .chart-box h3 { font-size: 13px; color: var(--text-2); font-weight: 500; margin-bottom: 8px; }
 .chart { width: 100%; height: auto; display: block; }
 .chart-empty { padding: 40px 0; text-align: center; color: var(--muted); font-size: 13px; }
 .chart-note { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+
+/* 折线图悬浮：十字线 + 数值气泡（public/app.js initChartHover） */
+.chart-hover-tip {
+  position: absolute; z-index: 6; pointer-events: none; opacity: 0;
+  background: var(--panel-3); border: 1px solid var(--border);
+  color: var(--text); font-size: 12px; line-height: 1.4;
+  padding: 4px 9px; border-radius: 7px; white-space: nowrap;
+  transform: translate(-50%, -135%); transition: opacity 0.12s;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.38);
+}
+.chart-hover-cross {
+  position: absolute; top: 0; bottom: 0; width: 1px;
+  background: rgba(148, 163, 184, 0.45); pointer-events: none; opacity: 0;
+  transition: opacity 0.12s;
+}
+.chart-hover-dot {
+  position: absolute; width: 10px; height: 10px; border-radius: 50%;
+  border: 2px solid var(--text); background: var(--panel-2);
+  box-shadow: 0 0 0 3px rgba(125, 162, 255, 0.18);
+  pointer-events: none; opacity: 0; transition: opacity 0.12s;
+}
+
+/* 优先复盘队列的快捷标签按钮 */
+.quick-tag-form { display: inline-block; margin: 0; }
+.quick-tag-form .tag-pill {
+  cursor: pointer; font: inherit; font-size: 11px;
+  padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--text-2);
+}
+.quick-tag-form .tag-pill:hover { border-color: #7da2ff; color: var(--text); }
+.quick-tag-form .tag-pill.active {
+  background: rgba(125, 162, 255, 0.16); border-color: #7da2ff; color: var(--text); font-weight: 600;
+}
+.quick-tag-cell { white-space: normal; line-height: 2; }
 .axis-label { fill: var(--muted); font-size: 10px; font-family: inherit; }
 .donut { display: block; }
 .donut-label { fill: var(--text); font-size: 13px; font-weight: 600; }
@@ -398,6 +432,8 @@ td.tags-cell .tag-pill { margin: 0 2px 3px 0; }
 .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .field > span { font-size: 12px; color: var(--text-2); }
 .field input, .field select, .field textarea,
+.notes-search input, .notes-search select,
+.account-picker select,
 .filter-bar input, .filter-bar select {
   width: 100%;
   padding: 9px 11px;
@@ -409,6 +445,8 @@ td.tags-cell .tag-pill { margin: 0 2px 3px 0; }
   font-family: inherit;
 }
 .field input:focus, .field select:focus, .field textarea:focus,
+.notes-search input:focus, .notes-search select:focus,
+.account-picker select:focus,
 .filter-bar input:focus, .filter-bar select:focus {
   outline: none;
   border-color: #7da2ff;
@@ -539,6 +577,13 @@ td.tags-cell .tag-pill { margin: 0 2px 3px 0; }
 .notes-tabs a { padding: 7px 12px; border-radius: 8px; color: var(--text-2); font-size: 13px; }
 .notes-tabs a:hover { background: var(--panel-2); color: var(--text); }
 .notes-tabs a.active { background: var(--panel-3); color: var(--text); font-weight: 600; }
+.notes-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
+}
+.notes-toolbar .page-actions { margin-bottom: 0; }
+.notes-search { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.notes-search input[name="q"] { min-width: 200px; width: auto; }
 .note-cell { min-width: 220px; }
 .note-cell form { display: flex; gap: 6px; align-items: center; }
 .note-cell input { min-width: 120px; }
@@ -549,12 +594,24 @@ td.tags-cell .tag-pill { margin: 0 2px 3px 0; }
 .progress span { display: block; height: 100%; background: #7da2ff; transition: width 0.4s ease; }
 .progress-cell { min-width: 150px; }
 
-.market-tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+.market-tabs { display: flex; gap: 6px; margin-bottom: 0; flex-wrap: wrap; }
 .market-tabs a {
   padding: 6px 14px; border-radius: 999px; border: 1px solid var(--border);
   color: var(--text-2); font-size: 13px; background: var(--panel);
 }
 .market-tabs a.active { background: #7da2ff1f; border-color: #7da2ff; color: #9db8ff; font-weight: 600; }
+
+/* 仪表盘：市场页签 + 账户选择器同一行 */
+.dash-filter {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
+}
+.account-picker { display: flex; gap: 8px; align-items: center; }
+.account-picker select { min-width: 180px; width: auto; }
+
+/* 宽表格在窄屏横向滚动，不再挤压换行 */
+.table-wrap { overflow-x: auto; }
+.table-wrap .table { min-width: 720px; }
 .live-subhead {
   display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
   margin: 22px 0 10px; padding-top: 14px; border-top: 1px solid var(--border-soft);
@@ -642,22 +699,6 @@ td.tags-cell .tag-pill { margin: 0 2px 3px 0; }
 .ai-result { margin-top: 16px; }
 .ai-result:empty { display: none; }
 .rate { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
-
-/* ---------------- quick note ---------------- */
-
-.quick-note, .spot-note { display: flex; gap: 6px; min-width: 150px; max-width: 175px; }
-.spot-note { min-width: 220px; max-width: 300px; }
-.quick-note input, .spot-note input {
-  flex: 1;
-  min-width: 70px;
-  padding: 5px 8px;
-  border-radius: 7px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--text);
-  font-size: 12px;
-}
-.quick-note.saved input, .spot-note.saved input { border-color: rgba(74, 222, 128, 0.5); }
 
 /* ---------------- auth ---------------- */
 

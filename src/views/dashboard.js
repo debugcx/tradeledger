@@ -31,6 +31,77 @@ function kpiBar(s) {
   </section>`;
 }
 
+/** 行为诊断：把「胜率 × 盈亏比 → 期望」的关系翻译成可执行的结论 */
+function diagnosisPanel(s) {
+  const b = s.behavior || {};
+  const payoffOk = b.payoffRatio >= b.breakevenRatio;
+  const pf = Number.isFinite(b.profitFactor) ? `${b.profitFactor.toFixed(2)}x` : '∞';
+  const holdRatio = b.winDurationMs > 0 ? b.lossDurationMs / b.winDurationMs : 0;
+  const verdict = s.expectancy >= 0
+    ? `当前组合为正期望：每笔平均 ${fmtMoney(s.expectancy)}。`
+    : `当前组合为负期望：每笔平均 ${fmtMoney(s.expectancy)}。`;
+  const advice = payoffOk
+    ? '盈亏比已越过保本线，保持并继续提高单笔质量。'
+    : `${fmtPct(s.winRate, 1)} 的胜率需要盈亏比 ≥ ${b.breakevenRatio.toFixed(3)} 才能保本，实际只有 ${b.payoffRatio.toFixed(3)} —— 亏损单平均是盈利单的 ${(1 / Math.max(b.payoffRatio, 1e-9)).toFixed(1)} 倍，优先解决「亏大钱」而不是继续提高胜率。`;
+  return `<section class="panel">
+    <div class="panel-head"><h2>行为诊断</h2>
+      <span class="muted small">胜率本身不决定盈亏，胜率 × 盈亏比才是</span></div>
+    <div class="grid-4">
+      <div class="mini-stat"><span>盈亏比（均盈 / 均亏）</span><b class="${payoffOk ? 'pos' : 'neg'}">${b.payoffRatio.toFixed(3)}</b>
+        <div class="muted small">保本线 ${b.breakevenRatio.toFixed(3)}（由 ${fmtPct(s.winRate, 1)} 胜率决定）</div></div>
+      <div class="mini-stat"><span>利润因子</span><b class="${b.profitFactor >= 1 ? 'pos' : 'neg'}">${pf}</b>
+        <div class="muted small">总盈利 ÷ 总亏损，大于 1 才赚钱</div></div>
+      <div class="mini-stat"><span>最差 5% 的亏损</span><b class="neg">${fmtMoney(-b.bigLossSum, { sign: false })}</b>
+        <div class="muted small">${fmtNum(b.bigLossCount)} 笔，抵消总盈利的 ${b.bigLossVsProfit !== null ? fmtPct(b.bigLossVsProfit, 1) : '—'}</div></div>
+      <div class="mini-stat"><span>亏损单持仓 vs 盈利单</span>
+        <b class="${holdRatio > 1.5 ? 'neg' : 'flat'}" style="font-size:14px">${e(fmtDuration(b.lossDurationMs))} / ${e(fmtDuration(b.winDurationMs))}</b>
+        <div class="muted small">${holdRatio > 1.5 ? '亏损单拿得明显更久：止损偏晚' : '两侧持仓时长基本对称'}</div></div>
+    </div>
+    <p class="chart-note">${e(verdict)} ${e(advice)}</p>
+  </section>`;
+}
+
+/** 优先复盘队列：还没写复盘的大亏交易，支持行内快捷打标签 */
+function reviewQueuePanel(queue, quickTags, backQuery) {
+  if (!queue || !queue.length) {
+    return `<section class="panel">
+      <div class="panel-head"><h2>优先复盘</h2>
+        <span class="muted small">亏损超过阈值且还没写复盘的交易</span></div>
+      <div class="chart-empty">大亏交易都已写过复盘 ✓</div>
+    </section>`;
+  }
+  const tagBtn = (tradeId, name, active) =>
+    `<form method="post" action="/dashboard/journal/${tradeId}/tag" class="inline quick-tag-form">
+      <input type="hidden" name="tag" value="${e(name)}">
+      <input type="hidden" name="back" value="/dashboard${backQuery}">
+      <button class="tag-pill ${active ? 'active' : ''}" type="submit">${e(name)}</button>
+    </form>`;
+  const rows = queue.map((t) => {
+    const current = new Set(t.tags || []);
+    return `<tr>
+      <td class="small">${e(fmtDateTime(t.close_time))}</td>
+      <td><a href="/dashboard/journal/${t.id}"><b>${e(t.symbol)}</b></a>
+        <span class="muted small">${e(t.account_name || '')}</span></td>
+      <td class="neg strong">${fmtMoney(t.pnl)}</td>
+      <td class="small">${e(fmtDuration(Date.parse(t.close_time) - Date.parse(t.open_time)))}</td>
+      <td class="quick-tag-cell">
+        ${quickTags.map((x) => tagBtn(t.id, x.name, current.has(x.name))).join(' ')}
+        <a class="muted small" href="/dashboard/journal/${t.id}">写复盘 →</a>
+      </td>
+    </tr>`;
+  }).join('');
+  return `<section class="panel">
+    <div class="panel-head"><h2>优先复盘</h2>
+      <span class="muted small">按亏损从大到小 · 点标签快速归类，进详情页写复盘</span></div>
+    <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>平仓时间</th><th>交易对</th><th>净盈亏</th><th>持仓</th><th>快捷标签</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    </div>
+  </section>`;
+}
+
 function statPanel(s) {
   const item = (label, value, cls = '') =>
     `<div class="stat-item"><span class="stat-label">${e(label)}</span><span class="stat-value ${cls}">${value}</span></div>`;
@@ -152,7 +223,7 @@ function analysisPanel(s) {
   </section>`;
 }
 
-function feesPanel(s, funding) {
+function feesPanel(s, funding, rebates = null) {
   return `<section class="panel">
     <div class="panel-head"><h2>资金费与手续费</h2></div>
     <div class="grid-4">
@@ -160,10 +231,13 @@ function feesPanel(s, funding) {
       <div class="mini-stat"><span>支付的资金费</span><b class="${s.funding.paid ? 'neg' : ''}">${fmtMoney(-s.funding.paid, { sign: false })}</b></div>
       <div class="mini-stat"><span>净资金费</span><b class="${sign(s.funding.net)}">${fmtMoney(s.funding.net)}</b></div>
       <div class="mini-stat"><span>净手续费</span><b class="${sign(s.fees.net)}">${fmtMoney(s.fees.net)}</b></div>
-      <div class="mini-stat"><span>做市返佣</span><b class="pos">${fmtMoney(s.fees.makerRebate)}</b></div>
+      <div class="mini-stat"><span>做市返佣</span><b class="pos">${fmtMoney(s.fees.makerRebate)}</b>
+        <div class="muted small">成交记录里的正手续费（负费率）</div></div>
       <div class="mini-stat"><span>支付的手续费</span><b class="neg">${fmtMoney(-s.fees.marketFee, { sign: false })}</b></div>
       ${funding ? `<div class="mini-stat"><span>资金费流水（单独拉取）</span><b>${fmtNum(funding.events)} 条</b>
         <div class="muted small">未匹配 ${fmtNum(funding.unallocated)} 条 · ${fmtMoney(funding.unallocatedAmount)}</div></div>` : ''}
+      ${rebates?.count ? `<div class="mini-stat"><span>账单返佣（邀请/活动）</span><b class="pos">${fmtMoney(rebates.usdt)}</b>
+        <div class="muted small">${fmtNum(rebates.count)} 条入账${rebates.others ? ` · ${fmtNum(rebates.others)} 条非 USDT 未计入` : ''} · 明细见资金流水</div></div>` : ''}
     </div>
   </section>`;
 }
@@ -270,7 +344,7 @@ function fmtRate(v) {
   return `${(Number(v) * 100).toFixed(4)}%`;
 }
 
-function livePositionsPanel({ accounts, balances, positions, spotBalances = [], spotHoldings = [] }) {
+function livePositionsPanel({ accounts, balances, positions, spotBalances = [], spotHoldings = [], accountId = null }) {
   const real = accounts.filter((a) => !a.is_demo && a.exchange !== 'manual');
   if (!real.length) {
     return `<section class="panel" data-live-panel>
@@ -295,7 +369,7 @@ function livePositionsPanel({ accounts, balances, positions, spotBalances = [], 
     <td class="small muted">${p.next_funding_time ? e(fmtDateTime(p.next_funding_time)) : '—'}</td>
   </tr>`).join('');
 
-  return `<section class="panel" data-live-panel>
+  return `<section class="panel" data-live-panel${accountId ? ` data-live-account="${accountId}"` : ''}>
     <div class="panel-head">
       <h2>实时持仓 <span class="muted small" data-live-updated>${updatedAt ? `更新于 ${e(fmtDateTime(updatedAt))}` : '等待首次刷新'}</span></h2>
       <div class="head-actions">
@@ -317,7 +391,7 @@ function livePositionsPanel({ accounts, balances, positions, spotBalances = [], 
       <span class="muted small">市值按当前价格估算；没有价格时只显示数量</span>
     </div>
     <div class="mini-strip" style="margin-bottom:12px">
-      <div class="mini-stat"><span>现货资产种类</span><b data-live-spot-count>${spotBalances.length}</b></div>
+      <div class="mini-stat"><span>现货持仓币种</span><b data-live-spot-count>${spotHoldings.length}</b></div>
       <div class="mini-stat"><span>现货市值</span><b data-live-spot-value>${fmtMoney(spotHoldings.reduce((a, h) => a + (Number(h.value) || 0), 0), { sign: false })}</b></div>
     </div>
     <table class="table">
@@ -338,13 +412,25 @@ function livePositionsPanel({ accounts, balances, positions, spotBalances = [], 
   </section>`;
 }
 
-export function dashboardPage({ user, stats, trades, market = 'all', accounts, balances = [], positions = [], spotBalances = [], spotHoldings = [], funding = null, demo, notice, error }) {
+export function dashboardPage({ user, stats, trades, market = 'all', accounts = [], accountId = null, balances = [], positions = [], spotBalances = [], spotHoldings = [], funding = null, rebates = null, reviewQueue = [], quickTags = [], demo, notice, error }) {
+  const tabHref = (m) => `/dashboard?market=${m}${accountId ? `&account_id=${accountId}` : ''}`;
+  const accountOptions = ['<option value="all">全部账户（聚合）</option>']
+    .concat(accounts.map((a) => `<option value="${a.id}" ${accountId && String(accountId) === String(a.id) ? 'selected' : ''}>${e(a.name)}（${e(a.exchange)}${a.is_demo ? ' · 演示' : ''}）</option>`))
+    .join('');
   const body = `
-    <div class="market-tabs">
-      <a class="${market === 'all' ? 'active' : ''}" href="/dashboard?market=all">全部</a>
-      <a class="${market === 'futures' ? 'active' : ''}" href="/dashboard?market=futures">合约</a>
-      <a class="${market === 'spot' ? 'active' : ''}" href="/dashboard?market=spot">现货</a>
+    <div class="dash-filter">
+      <div class="market-tabs">
+        <a class="${market === 'all' ? 'active' : ''}" href="${tabHref('all')}">全部</a>
+        <a class="${market === 'futures' ? 'active' : ''}" href="${tabHref('futures')}">合约</a>
+        <a class="${market === 'spot' ? 'active' : ''}" href="${tabHref('spot')}">现货</a>
+      </div>
+      ${accounts.length > 1 ? `<form method="get" action="/dashboard" class="account-picker" data-autosubmit>
+        <input type="hidden" name="market" value="${e(market)}">
+        <select name="account_id" aria-label="按账户查看">${accountOptions}</select>
+        <button class="btn btn-ghost small" type="submit">切换账户</button>
+      </form>` : ''}
     </div>
+    ${accountId ? `<p class="chart-note" style="margin:-4px 0 12px">正在查看单个账户的数据；切换上方选项回到全部账户聚合视图。</p>` : ''}
     <div class="mini-strip">
       <div class="mini-stat"><span>总盈亏</span><b class="${sign(stats.totalPnl)}">${fmtMoney(stats.totalPnl)}</b></div>
       <div class="mini-stat"><span>交易预期</span><b class="${sign(stats.expectancy)}">${fmtMoney(stats.expectancy)}</b></div>
@@ -359,13 +445,15 @@ export function dashboardPage({ user, stats, trades, market = 'all', accounts, b
       </form>
     </div>` : ''}
     ${kpiBar(stats)}
+    ${diagnosisPanel(stats)}
+    ${reviewQueuePanel(reviewQueue, quickTags, `?market=${market}${accountId ? `&account_id=${accountId}` : ''}`)}
     ${statPanel(stats)}
-    ${livePositionsPanel({ accounts, balances, positions, spotBalances, spotHoldings })}
+    ${livePositionsPanel({ accounts, balances, positions, spotBalances, spotHoldings, accountId })}
     ${sideRow('多单', stats.longs, 'green')}
     ${sideRow('空单', stats.shorts, 'red')}
     ${analysisPanel(stats)}
     ${weekHourPanel(stats)}
-    ${feesPanel(stats, funding)}
+    ${feesPanel(stats, funding, rebates)}
     ${orderPanel(stats)}
     ${sizePanel(stats)}
     ${tagPanel(stats)}

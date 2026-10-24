@@ -1,5 +1,8 @@
 import { requestJson } from '../http-client.js';
-import { num, matchFills, isSupportedSpotSymbol, SPOT_QUOTES } from './common.js';
+import { num, matchFills, isSupportedSpotSymbol, SPOT_QUOTES, marketCache, cacheGet, cachePut } from './common.js';
+
+const candleCache = marketCache('hyperliquid:candles');
+const fillCache = marketCache('hyperliquid:fills');
 
 /**
  * Hyperliquid 只读接入。
@@ -218,5 +221,64 @@ export const hyperliquid = {
       });
     }
     return { balances, positions };
+  },
+
+  // 行情 K 线（公共接口）。行 = [秒级时间, 开, 收, 高, 低, 成交量, 笔数]，注意 o/c/h/l 顺序。
+  async fetchCandles({ symbol, market = 'futures', fromMs, toMs }) {
+    const coin = String(symbol || '').split('/')[0].toUpperCase();
+    if (!coin) return { bar: '1h', candles: [], truncated: false };
+    const bars = [
+      ['1m', 60_000], ['3m', 180_000], ['5m', 300_000], ['15m', 900_000], ['30m', 1_800_000],
+      ['1h', 3_600_000], ['2h', 7_200_000], ['4h', 14_400_000], ['8h', 28_800_000],
+      ['12h', 43_200_000], ['1d', 86_400_000],
+    ];
+    const dur = Math.max(0, Number(toMs) - Number(fromMs));
+    let bar = '1d', barMs = 86_400_000;
+    for (const [name, ms] of bars) {
+      if (dur / ms <= 90) { bar = name; barMs = ms; break; }
+    }
+    const cacheKey = `hc|${coin}|${bar}|${Math.floor(fromMs / barMs)}|${Math.floor(toMs / barMs)}`;
+    const hit = cacheGet(candleCache, cacheKey);
+    if (hit) return hit;
+
+    const rows = await info({
+      type: 'candleSnapshot',
+      req: { coin, interval: bar, startTime: Number(fromMs), endTime: Number(toMs) },
+    });
+    const out = (Array.isArray(rows) ? rows : [])
+      .map((r) => ({ t: Number(r[0]) * 1000, o: num(r[1]), c: num(r[2]), h: num(r[3]), l: num(r[4]) }))
+      .filter((k) => k.t >= Number(fromMs) && k.t <= Number(toMs))
+      .sort((a, b) => a.t - b.t);
+    const result = { bar, candles: out.slice(0, 300), truncated: out.length >= 300 };
+    return cachePut(candleCache, cacheKey, result);
+  },
+
+  // 某个回合的逐笔成交（公共接口，只需钱包地址）
+  async fetchEpisodeFills({ creds, symbol, market = 'futures', fromMs, toMs, limit }) {
+    const coin = String(symbol || '').split('/')[0].toUpperCase();
+    if (!coin || !creds?.wallet) return { fills: [] };
+    const cap = Math.max(50, Number(limit) || 300);
+    const cacheKey = `hf|${creds.wallet}|${coin}|${fromMs}|${toMs}`;
+    const hit = cacheGet(fillCache, cacheKey);
+    if (hit) return hit;
+
+    const rows = await info({
+      type: 'userFillsByTime',
+      user: creds.wallet,
+      startTime: Math.max(0, Number(fromMs)),
+      endTime: Number(toMs),
+    });
+    const out = (Array.isArray(rows) ? rows : [])
+      .filter((r) => String(r.coin || '').toUpperCase() === coin)
+      .map((r) => ({
+        t: Number(r.time || 0),
+        side: String(r.side || '').toUpperCase() === 'B' ? 'buy' : 'sell',
+        price: num(r.px), qty: num(r.sz),
+        fee: -Math.abs(num(r.fee)), feeCcy: 'USDC', billId: r.tid || '',
+      }))
+      .filter((f) => f.t >= Number(fromMs) && f.t <= Number(toMs))
+      .sort((a, b) => a.t - b.t);
+    const result = { fills: out.slice(0, cap) };
+    return cachePut(fillCache, cacheKey, result);
   },
 };

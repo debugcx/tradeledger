@@ -3,9 +3,65 @@ import {
 } from '../http.js';
 import { tradeBreakdown } from '../breakdown.js';
 import { renderMarkdown } from '../markdown.js';
+import { lineChart, PALETTE } from '../charts.js';
 import { shell } from './layout.js';
 
 const sign = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : 'flat');
+
+/** 持仓期间浮盈亏曲线：K 线收盘价 × 方向 × 数量，不含手续费与资金费 */
+function curvePanel(trade, curve) {
+  if (!curve) return '';
+  if (curve.unsupported) {
+    return `<section class="panel">
+      <div class="panel-head"><h2>持仓盈亏曲线（开仓 → 平仓）</h2></div>
+      <div class="chart-empty">${e(curve.unsupported)}</div>
+    </section>`;
+  }
+  const dir = trade.side === 'long' ? 1 : -1;
+  const entry = Number(trade.entry_price) || 0;
+  const size = Number(trade.size) || 0;
+  const multiDay = Date.parse(trade.close_time) - Date.parse(trade.open_time) > 86_400_000;
+  const label = (v) => {
+    const d = new Date(v);
+    const p = (n) => String(n).padStart(2, '0');
+    return multiDay
+      ? `${p(d.getMonth() + 1)}-${p(d.getDate())}`
+      : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  };
+  const points = [{ x: label(trade.open_time), value: 0 }];
+  for (const k of curve.candles) points.push({ x: label(k.t), value: (k.c - entry) * dir * size });
+  const exit = Number(trade.exit_price) || 0;
+  const final = exit ? (exit - entry) * dir * size : points[points.length - 1].value;
+  points.push({ x: `${label(trade.close_time)} 平仓`, value: final });
+
+  let peak = -Infinity, trough = Infinity;
+  for (const p of points) {
+    if (p.value > peak) peak = p.value;
+    if (p.value < trough) trough = p.value;
+  }
+  const giveback = Math.max(0, peak - final);
+
+  return `<section class="panel">
+    <div class="panel-head"><h2>持仓盈亏曲线（开仓 → 平仓）</h2>
+      <span class="muted small">按 ${e(curve.bar)} K 线收盘价估算 · 不含手续费与资金费</span></div>
+    <div class="mini-strip">
+      <div class="mini-stat"><span>浮盈峰值</span><b class="${sign(peak)}">${fmtMoney(peak)}</b></div>
+      <div class="mini-stat"><span>最大浮亏</span><b class="${trough < 0 ? 'neg' : 'flat'}">${fmtMoney(trough)}</b></div>
+      <div class="mini-stat"><span>平仓价格毛盈亏</span><b class="${sign(final)}">${fmtMoney(final)}</b></div>
+      <div class="mini-stat"><span>利润回吐</span><b class="${giveback > 0 ? 'neg' : 'flat'}">${fmtMoney(giveback, { sign: false })}</b>
+        <div class="muted small">浮盈峰值到平仓的回落幅度</div></div>
+    </div>
+    <div class="chart-box">
+      ${lineChart({
+        points,
+        color: final >= 0 ? PALETTE.green : PALETTE.red,
+        yFormat: (v) => fmtMoney(v, { sign: false }),
+        xFormat: (v) => String(v),
+      })}
+    </div>
+    <p class="chart-note">曲线 = （K 线收盘价 − 开仓价） × 方向 × 数量，即未实现毛盈亏；手续费与资金费的结算时点交易所未提供，未计入曲线，最终净盈亏以上表为准。${curve.truncated ? '持仓时间过长，仅展示最近 300 根 K 线。' : ''}</p>
+  </section>`;
+}
 
 function buildQuery(filters, pageNo) {
   const p = new URLSearchParams();
@@ -42,10 +98,14 @@ function pager(filters, pagination) {
   </div>`;
 }
 
-function filterBar(filters, symbols, tags) {
+function filterBar(filters, symbols, tags, accounts = []) {
   const opt = (value, label, current) =>
     `<option value="${e(value)}" ${String(current) === String(value) ? 'selected' : ''}>${e(label)}</option>`;
   return `<form method="get" action="/dashboard/journal" class="filter-bar">
+    ${accounts.length > 1 ? `<select name="account_id">
+      ${opt('all', '全部账户', filters.account_id)}
+      ${accounts.map((a) => opt(String(a.id), `${a.name}${a.is_demo ? '（演示）' : ''}`, filters.account_id)).join('')}
+    </select>` : ''}
     <select name="market">
       ${opt('all', '全部市场', filters.market)}
       ${opt('futures', '合约', filters.market)}
@@ -94,7 +154,7 @@ function filterBar(filters, symbols, tags) {
   </form>`;
 }
 
-export function journalPage({ user, trades, filters, tags, symbols, pagination, noteCoverage, notice, error }) {
+export function journalPage({ user, trades, filters, tags, symbols, pagination, noteCoverage, accounts = [], notice, error }) {
   const rows = trades.map((t) => `<tr>
     <td>${fmtDateTime(t.close_time)}</td>
     <td><a href="/dashboard/journal/${t.id}"><b>${e(t.symbol)}</b></a>
@@ -122,7 +182,7 @@ export function journalPage({ user, trades, filters, tags, symbols, pagination, 
     ${coverage}
     <section class="panel">
       <div class="panel-head"><h2>筛选</h2></div>
-      ${filterBar(filters, symbols, tags)}
+      ${filterBar(filters, symbols, tags, accounts)}
     </section>
     <section class="panel">
       <div class="panel-head">
@@ -166,7 +226,6 @@ function tagPicker(tags, selected = []) {
 function tradeForm({ action, trade = {}, accounts, tags, error, submitLabel }) {
   const selectedAccount = trade.account_id || accounts[0]?.id;
   return `<section class="panel">
-    ${error ? `<div class="alert alert-error">${e(error)}</div>` : ''}
     <form method="post" action="${action}" class="form grid-form">
       <label class="field"><span>币种</span><input name="symbol" required value="${e(trade.symbol || '')}" placeholder="BTC/USDT"></label>
       <label class="field"><span>方向</span>
@@ -222,15 +281,73 @@ export function journalEditPage({ user, trade, accounts, tags, error }) {
     active: 'journal', user,
     title: `编辑 ${trade.symbol}`,
     subtitle: '来源与外部 ID 不会被修改，避免重复导入',
+    error,
     body: tradeForm({
       action: `/dashboard/journal/${trade.id}/edit`,
-      trade, accounts, tags, error,
+      trade, accounts, tags,
       submitLabel: '保存修改',
     }),
   });
 }
 
-export function tradeDetailPage({ user, trade, notice, error }) {
+/** 操作明细：该回合的逐笔成交（含加仓、减仓、做T），按时间归属同一记录 */
+function opsPanel(trade, ops) {
+  if (!ops) return '';
+  if (ops.unsupported) {
+    return `<section class="panel">
+      <div class="panel-head"><h2>操作明细（开仓 → 平仓）</h2></div>
+      <div class="chart-empty">${e(ops.unsupported)}</div>
+    </section>`;
+  }
+  const fmtQty = (v) => {
+    const n = Math.abs(Number(v) || 0);
+    return (n < 1e-10 ? 0 : n).toLocaleString('en-US', { maximumFractionDigits: 6 });
+  };
+  let pos = 0;
+  const rows = ops.fills.map((f) => {
+    const before = pos;
+    const opened = Math.abs(before) < 1e-9;
+    pos += f.side === 'buy' ? f.qty : -f.qty;
+    const flat = Math.abs(pos) < 1e-9;
+    const grew = Math.abs(pos) > Math.abs(before) + 1e-9;
+    const op = opened ? '首次开仓' : flat ? '平仓（清零）' : grew ? '加仓' : '减仓 / 做T';
+    return `<tr>
+      <td class="small">${e(fmtDateTime(new Date(f.t).toISOString()))}</td>
+      <td>${op}</td>
+      <td>${f.side === 'buy' ? '<span class="pos">买入</span>' : '<span class="neg">卖出</span>'}</td>
+      <td>${fmtPrice(f.price)}</td>
+      <td>${fmtQty(f.qty)}</td>
+      <td class="${f.fee <= 0 ? 'neg' : 'pos'}">${f.fee ? `${fmtQty(Math.abs(f.fee))} ${e(f.feeCcy)}` : '—'}</td>
+      <td class="strong">${fmtQty(pos)}</td>
+    </tr>`;
+  }).join('');
+  let buy = 0, sell = 0;
+  const fees = new Map();
+  for (const f of ops.fills) {
+    if (f.side === 'buy') buy += f.qty; else sell += f.qty;
+    if (f.fee) fees.set(f.feeCcy || '—', (fees.get(f.feeCcy || '—') || 0) + Math.abs(f.fee));
+  }
+  const feeText = [...fees.entries()].map(([ccy, v]) => `${fmtQty(v)} ${e(ccy)}`).join(' + ') || '—';
+  return `<section class="panel">
+    <div class="panel-head"><h2>操作明细（开仓 → 平仓）</h2>
+      <span class="muted small">同一回合的开仓、加仓、减仓、做T 全部归属这条记录 · 共 ${fmtNum(ops.fills.length)} 笔成交</span></div>
+    <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>时间</th><th>操作</th><th>方向</th><th>价格</th><th>数量</th><th>手续费</th><th>本笔后持仓</th></tr></thead>
+      <tbody>
+        ${rows}
+        <tr><td colspan="4" class="strong">合计</td>
+          <td class="strong">买 ${fmtQty(buy)} / 卖 ${fmtQty(sell)}</td>
+          <td>${feeText}</td>
+          <td class="strong">${Math.abs(pos) < 1e-9 ? '归零' : fmtQty(pos)}</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="chart-note">数量为币本位（合约已按面值换算成币）；「本笔后持仓」为净头寸。头部统计里的「数量」是按毛盈亏反推的等效值，多腿回合以本表为准。</p>
+  </section>`;
+}
+
+export function tradeDetailPage({ user, trade, curve = null, ops = null, notice, error }) {
   const b = tradeBreakdown(trade);
   const pnlCls = sign(trade.pnl);
   const tags = (trade.tags || []).map((x) => `<span class="tag-pill">${e(x)}</span>`).join(' ');
@@ -278,6 +395,10 @@ export function tradeDetailPage({ user, trade, notice, error }) {
       </div>
       ${tags ? `<div class="tag-row" style="margin-top:12px">${tags}</div>` : ''}
     </section>
+
+    ${curvePanel(trade, curve)}
+
+    ${opsPanel(trade, ops)}
 
     <section class="panel">
       <div class="panel-head"><h2>盈亏是怎么算出来的</h2>

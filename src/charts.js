@@ -46,9 +46,13 @@ export function lineChart({
   const span = max - min;
   const ys = values.map((v) => padT + h - ((v - min) / span) * h);
 
-  const line = xs.map((x, i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ');
-  const area = `${line} L${xs[xs.length - 1].toFixed(1)},${(padT + h).toFixed(1)} L${xs[0].toFixed(1)},${(padT + h).toFixed(1)} Z`;
+  // xs 是绘图区内的相对横坐标（0..w），绘制时统一加 padL，与网格线/悬浮定位对齐
+  const px = (i) => (padL + xs[i]).toFixed(1);
+  const line = xs.map((_, i) => `${i === 0 ? 'M' : 'L'}${px(i)},${ys[i].toFixed(1)}`).join(' ');
+  const area = `${line} L${px(xs.length - 1)},${(padT + h).toFixed(1)} L${px(0)},${(padT + h).toFixed(1)} Z`;
   const gradId = `lg${Math.random().toString(36).slice(2, 9)}`;
+  // 悬浮提示数据：[时间标签, 格式化值, viewBox Y 坐标]，由 public/app.js 的十字线气泡消费
+  const hoverData = points.map((p, i) => [String(p.x ?? i), yFormat(values[i]), +ys[i].toFixed(1)]);
 
   let grid = '';
   for (let i = 0; i <= 4; i++) {
@@ -61,16 +65,17 @@ export function lineChart({
   const step = Math.max(1, Math.ceil(points.length / 6));
   let xlabels = '';
   for (let i = 0; i < points.length; i += step) {
-    xlabels += `<text x="${xs[i].toFixed(1)}" y="${(padT + h + 18).toFixed(1)}" text-anchor="middle" class="axis-label">${e(xFormat(points[i].x ?? i))}</text>`;
+    xlabels += `<text x="${px(i)}" y="${(padT + h + 18).toFixed(1)}" text-anchor="middle" class="axis-label">${e(xFormat(points[i].x ?? i))}</text>`;
   }
 
   let dots = '';
   if (points.length <= 80) {
-    dots = xs.map((x, i) =>
-      `<circle cx="${x.toFixed(1)}" cy="${ys[i].toFixed(1)}" r="2.3" fill="${color}"><title>${e(String(points[i].x ?? i))}: ${e(yFormat(values[i]))}</title></circle>`).join('');
+    dots = xs.map((_, i) =>
+      `<circle cx="${px(i)}" cy="${ys[i].toFixed(1)}" r="2.3" fill="${color}"><title>${e(String(points[i].x ?? i))}: ${e(yFormat(values[i]))}</title></circle>`).join('');
   }
 
-  return `<svg viewBox="0 0 ${width} ${height}" class="chart" preserveAspectRatio="none" role="img">
+  return `<svg viewBox="0 0 ${width} ${height}" class="chart" preserveAspectRatio="none" role="img"
+    data-line-points="${e(JSON.stringify(hoverData))}" data-pl="${padL}" data-pr="${padR}" data-vbw="${width}" data-vbh="${height}">
     <defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="${color}" stop-opacity="0.34"/>
       <stop offset="100%" stop-color="${color}" stop-opacity="0"/>

@@ -12,6 +12,18 @@ import { num, msToIso, toSymbol, splitPair, quoteFee, isSupportedSpotSymbol, SPO
 
 const BASE = process.env.OKX_API_BASE || 'https://www.okx.com';
 
+// K 线缓存：key = instId|bar|起止桶，值 6 小时内复用（历史 K 线不可变）
+const candleCache = new Map();
+// 逐笔成交缓存 + 合约面值缓存（instId → 每张合约对应的币数量，不可变）
+const fillCache = new Map();
+const ctValCache = new Map();
+
+function instIdOf(symbol, market) {
+  const [base, quote = 'USDT'] = String(symbol || '').split('/');
+  if (!base) return '';
+  return market === 'spot' ? `${base}-${quote}` : `${base}-${quote}-SWAP`;
+}
+
 async function call(path, { apiKey, apiSecret, passphrase }, opts = {}) {
   const ts = new Date().toISOString();
   const res = await requestJson(BASE + path, {
@@ -94,7 +106,10 @@ function toTrade(row) {  const openMs = Number(row.openTime || row.cTime || 0);
   }
 
   return {
-    external_id: `okx:${row.posId || `${row.instId}:${openMs}:${closeMs}`}`,
+    // OKX 的 posId 会被跨回合复用（同一合约同方向的多个独立持仓共用一个 posId，
+    // 用户实测一个 posId 下有多达上百条记录），部分平仓还会原地更新同一行。
+    // 因此行身份 = posId + 开仓毫秒；同步侧对已存在行做 upsert 拿到最终状态。
+    external_id: row.posId ? `okx:${row.posId}:${openMs}` : `okx:${row.instId}:${openMs}:${closeMs}`,
     symbol: toSymbol(row.instId, 'USDT'),
     side,
     order_type: 'other',
@@ -114,7 +129,9 @@ function toTrade(row) {  const openMs = Number(row.openTime || row.cTime || 0);
 export const okx = {
   id: 'okx',
   name: 'OKX',
-  maxLookbackDays: 90,
+  // positions-history 实测可返回约 2 年数据（文档口径 3 个月偏保守）；
+  // posId 跨回合复用 + 行原地更新，短窗口会让历史回合永久缺失，故放宽到 730 天
+  maxLookbackDays: 730,
   maxSpotLookbackDays: 90,
   fields: [
     { key: 'api_key', label: 'API Key' },
@@ -192,6 +209,220 @@ export const okx = {
     await pull('/api/v5/asset/deposit-history', 'depId', 'dep');
     await pull('/api/v5/asset/withdrawal-history', 'wdId', 'wd');
     return { transfers: out.slice(0, cap), nextCursor: null };
+  },
+
+  // 策略机器人（网格）已结束回合：合约网格 + 现货网格各拉历史，
+  // 每个机器人一条交易记录。盈亏用 totalPnl（网格利润 + 浮动盈亏），
+  // 投资额记入名义价值使「收益率」有意义；价格/数量对网格无意义，保持 0。
+  async fetchBots({ creds, fromMs, toMs, limit }) {
+    const cap = Math.max(20, Number(limit) || 200);
+    const out = [];
+    const pull = async (algoOrdType, market) => {
+      let after = null;
+      for (let page = 0; page < 3 && out.length < cap; page++) {
+        const q = new URLSearchParams({ algoOrdType, limit: '100' });
+        if (after) q.set('after', after);
+        const rows = await call(`/api/v5/tradingBot/grid/orders-algo-history?${q}`, creds);
+        if (!Array.isArray(rows) || !rows.length) break;
+        for (const row of rows) {
+          const start = Number(row.cTime || 0);
+          const end = Number(row.uTime || 0);
+          if (!start || !end || end < Number(fromMs) || end > Number(toMs)) continue;
+          const gridProfit = num(row.gridProfit);
+          const floatProfit = num(row.floatProfit);
+          const total = row.totalPnl !== undefined && row.totalPnl !== null
+            ? num(row.totalPnl) : gridProfit + floatProfit;
+          out.push({
+            external_id: `okx:grid:${row.algoId}`,
+            symbol: toSymbol(row.instId, 'USDT'),
+            side: String(row.direction || '').toLowerCase() === 'short' ? 'short' : 'long',
+            order_type: 'other',
+            size: 0,
+            notional: num(row.investment),
+            entry_price: 0,
+            exit_price: 0,
+            open_time: msToIso(start),
+            close_time: msToIso(end),
+            pnl: total,
+            fee: num(row.fee),
+            funding: num(row.fundingFee),
+            source: 'api',
+            market,
+            note: `策略机器人·${market === 'spot' ? '现货网格' : '合约网格'}`
+              + ` ${num(row.gridNum)} 格 · 套利 ${num(row.arbitrageNum)} 次`
+              + ` · 网格利润 ${gridProfit} · 浮动盈亏 ${floatProfit}`,
+            tags: ['策略机器人'],
+          });
+        }
+        const last = rows[rows.length - 1]?.algoId;
+        if (!last || last === after || rows.length < 100) break;
+        after = last;
+      }
+    };
+    try { await pull('contract_grid', 'futures'); } catch { /* 无合约网格数据或权限 */ }
+    try { await pull('grid', 'spot'); } catch { /* 无现货网格数据或权限 */ }
+    return { trades: out.slice(0, cap) };
+  },
+  // 资金账户账单中的返佣类账单（邀请返佣、返佣卡、Broker 奖励等）。
+  // type 代码来自 /api/v5/asset/bills 的账单类型表；只在客户端按白名单过滤，
+  // 避免依赖服务端 type 过滤参数的可用性。
+  async fetchRebates({ creds, fromMs, toMs, limit }) {
+    const labels = {
+      68: '手续费返佣（返佣卡）',
+      150: '邀请返佣',
+      151: '推荐奖励',
+      152: 'Broker 奖励',
+      172: '子合伙人返佣',
+      173: '邀请返佣（交易手续费）',
+      223: '带单分润（合约）',
+      226: '带单分润（现货）',
+      233: 'Broker 返佣补偿',
+      263: '策略机器人分红',
+      265: '信号收益',
+      299: '邀请推荐返佣',
+      300: '手续费折扣返还',
+      354: '跟单/网格收益',
+    };
+    const cap = Math.max(100, Number(limit) || 2000);
+    const out = [];
+    const seen = new Set();
+    const pull = async (path) => {
+      let after = String(Number(toMs) + 1);
+      for (let page = 0; page < 10 && out.length < cap; page++) {
+        const q = new URLSearchParams({ limit: '100', after });
+        const rows = await call(`${path}?${q}`, creds);
+        if (!Array.isArray(rows) || !rows.length) break;
+        for (const row of rows) {
+          const time = Number(row.ts || 0);
+          const amt = num(row.balChg ?? row.amt);
+          if (!time || !labels[Number(row.type)] || !(amt > 0)) continue;
+          const id = row.billId || `${row.type}:${time}:${amt}`;
+          if (seen.has(id)) continue;
+          seen.add(id);
+          out.push({
+            external_id: `okx:rebate:${id}`,
+            type: 'rebate',
+            asset: row.ccy || '',
+            amount: amt,
+            fee: 0,
+            tx_time: new Date(time).toISOString(),
+            tx_id: '',
+            chain: '',
+            counterparty: '',
+            note: row.notes || labels[Number(row.type)],
+          });
+        }
+        const oldest = Math.min(...rows.map((r) => Number(r.ts || 0)).filter(Boolean));
+        if (!oldest || oldest <= fromMs) break;
+        after = String(oldest);
+      }
+    };
+    await pull('/api/v5/asset/bills');
+    // asset/bills 只覆盖近一个月；窗口更早时补充拉取 bills-history（2021 年起）
+    if (Number(fromMs) < Date.now() - 31 * 24 * 3600_000) {
+      try { await pull('/api/v5/asset/bills-history'); } catch { /* 历史账单接口不可用时保留近月数据 */ }
+    }
+    return { transfers: out.slice(0, cap), nextCursor: null };
+  },
+
+  // 行情 K 线（公共接口，无需鉴权）。用于交易详情页的「开仓 → 平仓」浮盈亏曲线。
+  // bar 按持仓时长自适应，目标一页（100 根）内覆盖；K 线不可变，进程内缓存 6 小时。
+  async fetchCandles({ symbol, market = 'futures', fromMs, toMs }) {
+    const instId = instIdOf(symbol, market);
+    if (!instId) return { bar: '1H', candles: [], truncated: false };
+    const bars = [
+      ['1m', 60_000], ['3m', 180_000], ['5m', 300_000], ['15m', 900_000], ['30m', 1_800_000],
+      ['1H', 3_600_000], ['2H', 7_200_000], ['4H', 14_400_000], ['6H', 21_600_000],
+      ['12H', 43_200_000], ['1D', 86_400_000],
+    ];
+    const dur = Math.max(0, Number(toMs) - Number(fromMs));
+    let bar = '1D', barMs = 86_400_000;
+    for (const [name, ms] of bars) {
+      if (dur / ms <= 90) { bar = name; barMs = ms; break; }
+    }
+    const cacheKey = `${instId}|${bar}|${Math.floor(fromMs / barMs)}|${Math.floor(toMs / barMs)}`;
+    const hit = candleCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < 6 * 3600_000) return hit;
+
+    const out = [];
+    let after = String(Number(toMs) + 1);
+    for (let page = 0; page < 3 && out.length < 300; page++) {
+      const q = new URLSearchParams({ instId, bar, after, limit: '100' });
+      const rows = await publicGet(`/api/v5/market/history-candles?${q}`);
+      if (!Array.isArray(rows) || !rows.length) break;
+      for (const r of rows) {
+        const t = Number(r[0]);
+        if (Number.isFinite(t) && t >= Number(fromMs)) {
+          out.push({ t, o: num(r[1]), h: num(r[2]), l: num(r[3]), c: num(r[4]) });
+        }
+      }
+      const oldest = Number(rows[rows.length - 1][0]);
+      if (!Number.isFinite(oldest) || oldest <= Number(fromMs) || rows.length < 100) break;
+      after = String(oldest);
+    }
+    out.sort((a, b) => a.t - b.t);
+    const result = { bar, candles: out, truncated: out.length >= 300 };
+    if (candleCache.size >= 300) candleCache.delete(candleCache.keys().next().value);
+    candleCache.set(cacheKey, { ...result, at: Date.now() });
+    return result;
+  },
+
+  // 某个持仓回合的逐笔成交（需签名的私有接口）。用于交易详情页「操作明细」：
+  // 同一回合的开仓、加仓、减仓、做T 全部归属这条记录。成交不可变，缓存 6 小时。
+  async fetchEpisodeFills({ creds, symbol, market = 'futures', fromMs, toMs, limit }) {
+    const instId = instIdOf(symbol, market);
+    if (!instId) return { fills: [] };
+    const cap = Math.max(50, Number(limit) || 300);
+    const cacheKey = `fills|${instId}|${fromMs}|${toMs}`;
+    const hit = fillCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < 6 * 3600_000) return hit;
+
+    // SWAP 的 fillSz 单位是「张」，按合约面值换算成币；现货本身就是币
+    let ctVal = 1;
+    if (market !== 'spot') {
+      if (!ctValCache.has(instId)) {
+        const q = new URLSearchParams({ instType: 'SWAP', instId });
+        const rows = await publicGet(`/api/v5/public/instruments?${q}`);
+        ctValCache.set(instId, num(rows?.[0]?.ctVal) || 1);
+      }
+      ctVal = ctValCache.get(instId);
+    }
+
+    const out = [];
+    let after = null;
+    for (let page = 0; page < 3 && out.length < cap; page++) {
+      const q = new URLSearchParams({
+        instType: market === 'spot' ? 'SPOT' : 'SWAP',
+        instId,
+        limit: '100',
+        begin: String(Math.max(0, Number(fromMs) - 1)),
+        end: String(Number(toMs)),
+      });
+      if (after) q.set('after', after);
+      const rows = await call(`/api/v5/trade/fills-history?${q}`, creds);
+      if (!Array.isArray(rows) || !rows.length) break;
+      for (const row of rows) {
+        const t = Number(row.ts || 0);
+        if (!t || t < Number(fromMs) || t > Number(toMs)) continue;
+        out.push({
+          t,
+          side: String(row.side).toLowerCase() === 'buy' ? 'buy' : 'sell',
+          price: num(row.fillPx),
+          qty: num(row.fillSz) * ctVal,
+          fee: num(row.fee),
+          feeCcy: row.feeCcy || '',
+          billId: row.billId || '',
+        });
+      }
+      const next = rows[rows.length - 1]?.billId;
+      if (!next || next === after || rows.length < 100) break;
+      after = next;
+    }
+    out.sort((a, b) => a.t - b.t);
+    const result = { fills: out.slice(0, cap) };
+    if (fillCache.size >= 300) fillCache.delete(fillCache.keys().next().value);
+    fillCache.set(cacheKey, { ...result, at: Date.now() });
+    return result;
   },
 
   async fetchSpotTrades({ creds, fromMs, toMs, limit }) {

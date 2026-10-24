@@ -216,6 +216,23 @@ CREATE TABLE IF NOT EXISTS transfers (
 );
 CREATE INDEX IF NOT EXISTS ix_transfers_time ON transfers(tx_time);
 
+-- 交易详情页缓存：K 线坐标点与逐笔成交（历史数据不可变，落库后重启无需重拉）。
+-- inputs 记录生成时的关键字段指纹，交易被交易所 amend 后指纹变化自动失效重拉。
+CREATE TABLE IF NOT EXISTS trade_curves (
+  trade_id INTEGER PRIMARY KEY REFERENCES trades(id) ON DELETE CASCADE,
+  inputs TEXT NOT NULL,
+  bar TEXT NOT NULL,
+  candles TEXT NOT NULL,
+  truncated INTEGER NOT NULL DEFAULT 0,
+  fetched_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS trade_fills_cache (
+  trade_id INTEGER PRIMARY KEY REFERENCES trades(id) ON DELETE CASCADE,
+  inputs TEXT NOT NULL,
+  fills TEXT NOT NULL,
+  fetched_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -268,8 +285,93 @@ function migrate(db) {
   addNote('market', 'TEXT');
   addNote('account_id', 'INTEGER');
   db.exec("CREATE INDEX IF NOT EXISTS ix_notes_category ON notes(category, updated_at DESC)");
+  db.exec("CREATE INDEX IF NOT EXISTS ix_notes_spot_lookup ON notes(category, account_id, subject)");
+  db.exec("CREATE INDEX IF NOT EXISTS ix_trades_symbol ON trades(symbol)");
   db.exec("DROP INDEX IF EXISTS ux_notes_symbol");
   db.exec("DROP INDEX IF EXISTS ux_notes_spot");
+
+  // 一次性迁移：OKX 外部 ID 从 okx:<posId> 升级为 okx:<posId>:<开仓毫秒>。
+  // 原因：posId 会被跨回合复用（旧格式导致同 posId 的后续回合被去重丢弃），
+  // 且部分平仓时 OKX 会原地更新同一行（新格式让 upsert 能命中同一行）。
+  const migratedFlag = db.prepare("SELECT value FROM meta WHERE key = 'okx_ext_id_v2'").get();
+  if (!migratedFlag) {
+    const rows = db.prepare("SELECT id, external_id, open_time FROM trades WHERE external_id LIKE 'okx:%'").all();
+    const upd = db.prepare('UPDATE trades SET external_id = ? WHERE id = ?');
+    let rewritten = 0;
+    db.exec('BEGIN');
+    try {
+      for (const row of rows) {
+        const m = /^okx:(\d+)$/.exec(String(row.external_id || ''));
+        const openMs = Date.parse(row.open_time || '');
+        if (!m || !Number.isFinite(openMs)) continue; // 回退格式 / 异常数据保持原样
+        upd.run(`okx:${m[1]}:${openMs}`, row.id);
+        rewritten++;
+      }
+      db.prepare("INSERT INTO meta (key, value) VALUES ('okx_ext_id_v2', ?)").run(String(rewritten));
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  // 一次性迁移 v3：合并 OKX openTime 补写造成的重复回合。
+  // OKX 偶尔会把行的 openTime 从 cTime 兜底值精化为实际成交时间，
+  // 使同一回合生成新外部 ID 而重复入库（数值完全相同，仅时间字段微调）。
+  // 合并规则：同账户同 posId、盈亏/数量完全一致、开平时间相差 < 180s 的行视为同一回合；
+  // 保留带笔记/标签的那行（无则保留 close_time 较新的），把用户内容补过去后删除其余。
+  const dedupeFlag = db.prepare("SELECT value FROM meta WHERE key = 'okx_dedupe_episodes'").get();
+  if (!dedupeFlag) {
+    const rows = db.prepare(
+      "SELECT id, account_id, external_id, symbol, open_time, close_time, pnl, size, note"
+        + " FROM trades WHERE source = 'api' AND external_id LIKE 'okx:%'",
+    ).all();
+    const tagCount = db.prepare('SELECT COUNT(*) AS c FROM trade_tags WHERE trade_id = ?');
+    const byGroup = new Map();
+    for (const r of rows) {
+      const m = /^okx:(\d+):\d+$/.exec(String(r.external_id || ''));
+      if (!m) continue;
+      const k = `${r.account_id}|${m[1]}|${r.symbol}|${Number(r.pnl).toFixed(10)}|${Number(r.size).toFixed(10)}`;
+      if (!byGroup.has(k)) byGroup.set(k, []);
+      byGroup.get(k).push(r);
+    }
+    const del = db.prepare('DELETE FROM trades WHERE id = ?');
+    const moveNote = db.prepare('UPDATE trades SET note = COALESCE(note, ?) WHERE id = ?');
+    const moveTags = db.prepare(
+      'INSERT OR IGNORE INTO trade_tags (trade_id, tag_id) SELECT ?, tag_id FROM trade_tags WHERE trade_id = ?',
+    );
+    let merged = 0;
+    const deleted = new Set();
+    db.exec('BEGIN');
+    try {
+      for (const list of byGroup.values()) {
+        for (let i = 0; i < list.length; i++) {
+          for (let j = i + 1; j < list.length; j++) {
+            const a = list[i], b = list[j];
+            if (deleted.has(a.id) || deleted.has(b.id)) continue;
+            if (Math.abs(Date.parse(a.open_time) - Date.parse(b.open_time)) >= 180_000) continue;
+            if (Math.abs(Date.parse(a.close_time) - Date.parse(b.close_time)) >= 180_000) continue;
+            const aHas = Boolean(a.note) || tagCount.get(a.id).c > 0;
+            const bHas = Boolean(b.note) || tagCount.get(b.id).c > 0;
+            let keep = a, drop = b;
+            if (bHas && !aHas) { keep = b; drop = a; }
+            else if (aHas === bHas
+              && Date.parse(b.close_time) > Date.parse(a.close_time)) { keep = b; drop = a; }
+            if (drop.note && !keep.note) moveNote.run(drop.note, keep.id);
+            moveTags.run(keep.id, drop.id);
+            del.run(drop.id);
+            deleted.add(drop.id);
+            merged++;
+          }
+        }
+      }
+      db.prepare("INSERT INTO meta (key, value) VALUES ('okx_dedupe_episodes', ?)").run(String(merged));
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+  }
 }
 
 let handle = null;

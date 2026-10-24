@@ -11,9 +11,9 @@ import * as store from './store.js';
 import * as backup from './backup.js';
 import { analyze, filterTrades } from './stats.js';
 import { renderMarkdown } from './markdown.js';
-import { aiPage, aiSettingsPage } from './views/ai.js';
+import { aiSettingsPage } from './views/ai.js';
 import {
-  getLlmConfig, saveLlmConfig, callLlm, buildAiContext, LLM_PRESETS,
+  getLlmConfig, saveLlmConfig, callLlm, LLM_PRESETS,
 } from './llm.js';
 import {
   parseCsvSmart, autoMap, mappingFromForm, buildTrades, buildTradesFromFills,
@@ -30,6 +30,7 @@ import { accountsPage, accountNewPage, accountEditPage } from './views/accounts.
 import { reconcilePage } from './views/reconcile.js';
 import { reportPage, savedReportPage, aiReportsPage } from './views/review.js';
 import { transfersPage } from './views/transfers.js';
+import { botsPage } from './views/bots.js';
 import { spotPage } from './views/spot.js';
 import { spotSymbolPage } from './views/spot-symbol.js';
 import { tagsPage } from './views/tags.js';
@@ -40,7 +41,7 @@ import { syncAccount, isSyncing } from './sync.js';
 import { refreshLive, liveSnapshot } from './live.js';
 import { reconcileTrades } from './reconcile.js';
 import {
-  buildWeeklyReview, buildPeriodReview, reviewMarkdown, reportPrompt, parseWeek, formatWeek, isoWeekOf, shiftWeek,
+  buildPeriodReview, reviewMarkdown, reportPrompt, formatWeek, isoWeekOf, shiftWeek,
   parsePeriod, periodRange, shiftMonth, monthOf, yearOf,
 } from './review.js';
 
@@ -298,7 +299,10 @@ function accountProgress() {
 
 route('GET', '/dashboard', (ctx) => requireUser(ctx, (c) => {
   const market = ['all', 'futures', 'spot'].includes(c.query.market) ? c.query.market : 'all';
-  const all = allTrades();
+  const accounts = store.listAccounts();
+  const accountId = accounts.some((a) => String(a.id) === String(c.query.account_id || '')) ? Number(c.query.account_id) : null;
+  let all = allTrades();
+  if (accountId) all = all.filter((t) => t.account_id === accountId);
   const trades = market === 'all' ? all : all.filter((t) => (t.market || 'futures') === market);
   const stats = analyze(trades);
   return html(page({
@@ -309,12 +313,26 @@ route('GET', '/dashboard', (ctx) => requireUser(ctx, (c) => {
       stats,
       trades,
       market,
-      accounts: store.listAccounts(),
-      balances: store.listBalances(),
-      positions: store.listPositions(),
-      spotBalances: store.listSpotBalances(),
-      spotHoldings: store.listSpotHoldings(),
-      funding: store.fundingSummary(),
+      accountId,
+      accounts,
+      balances: store.listBalances(accountId),
+      positions: store.listPositions(accountId),
+      spotBalances: store.listSpotBalances(accountId),
+      spotHoldings: store.listSpotHoldings(accountId),
+      funding: store.fundingSummary(accountId),
+      rebates: store.rebateSummary(accountId),
+      reviewQueue: store.listReviewQueue({
+        threshold: -Math.max(30, (stats.avgLoss || 0) * 1.5),
+        accountId,
+        limit: 8,
+      }),
+      quickTags: (() => {
+        const used = store.listTagsWithCounts();
+        const names = used.map((x) => x.name);
+        const defaults = ['追高', '逆势', '扛单', '计划内', '计划外'].filter((x) => !names.includes(x));
+        return [...used.slice(0, 6).map((x) => ({ name: x.name, count: x.count, used: true })),
+          ...defaults.slice(0, Math.max(0, 6 - used.length)).map((name) => ({ name, count: 0, used: false }))];
+      })(),
       demo: store.demoStatus(),
       notice: c.query.notice || '',
       error: c.query.error || '',
@@ -330,14 +348,21 @@ route('GET', '/dashboard/calendar', (ctx) => requireUser(ctx, (c) => {
   const now = new Date();
   const year = Math.min(Math.max(Number(c.query.year) || now.getFullYear(), 2000), 2100);
   const month = Math.min(Math.max(Number(c.query.month) || (now.getMonth() + 1), 1), 12);
+  const accounts = store.listAccounts();
+  const accountId = accounts.some((a) => String(a.id) === String(c.query.account_id || ''))
+    ? Number(c.query.account_id) : null;
+  let trades = allTrades();
+  if (accountId) trades = trades.filter((t) => t.account_id === accountId);
   return html(page({
     title: '盈亏日历 | TradeLedger',
     user: c.user,
     body: calendarPage({
       user: c.user,
-      trades: allTrades(),
+      trades,
       year,
       month,
+      accounts,
+      accountId,
       notice: c.query.notice || '',
       error: c.query.error || '',
     }),
@@ -349,9 +374,14 @@ route('GET', '/dashboard/calendar', (ctx) => requireUser(ctx, (c) => {
  * ========================================================= */
 
 route('GET', '/dashboard/journal', (ctx) => requireUser(ctx, (c) => {
-  const all = allTrades();
-  const stats = analyze(all);
+  const accounts = store.listAccounts();
+  const accountId = accounts.some((a) => String(a.id) === String(c.query.account_id || '')) ? Number(c.query.account_id) : null;
+  let all = allTrades();
+  if (accountId) all = all.filter((t) => t.account_id === accountId);
+  const notedCount = all.filter((t) => t.note && String(t.note).trim()).length;
+  const stats = { noteCoverage: { total: all.length, noted: notedCount, ratio: all.length ? notedCount / all.length : 0 } };
   const filters = {
+    account_id: accountId ? String(accountId) : 'all',
     market: c.query.market || 'all',
     side: c.query.side || 'all',
     result: c.query.result || 'all',
@@ -380,6 +410,7 @@ route('GET', '/dashboard/journal', (ctx) => requireUser(ctx, (c) => {
       user: c.user,
       trades,
       filters,
+      accounts,
       tags: store.listTags(),
       symbols,
       pagination: { page: pageNo, pageSize: PAGE_SIZE, totalPages, total: filtered.length },
@@ -467,15 +498,85 @@ route('POST', '/dashboard/journal/new', (ctx) => requireUser(ctx, async (c) => {
   }
 }));
 
-route('GET', '/dashboard/journal/:id', (ctx) => requireUser(ctx, (c) => {
+/** 交易详情缓存的关键字段指纹：交易被 amend（价格/数量/时间变化）后缓存自动失效 */
+function detailCacheInputs(trade) {
+  return [trade.entry_price, trade.exit_price, trade.size, trade.side, trade.open_time, trade.close_time].join('|');
+}
+
+/** 交易详情页的持仓盈亏曲线：优先读库（历史 K 线不可变），未命中再拉接口并落库 */
+async function loadTradeCurve(trade) {
+  const entry = Number(trade.entry_price) || 0;
+  const size = Number(trade.size) || 0;
+  const fromMs = Date.parse(trade.open_time || '');
+  const toMs = Date.parse(trade.close_time || '');
+  if (!entry || !size || !Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) return null;
+  const inputs = detailCacheInputs(trade);
+  const cached = store.getTradeCurveCache(trade.id);
+  if (cached && cached.inputs === inputs && cached.candles?.length >= 2) {
+    return { bar: cached.bar, candles: cached.candles, truncated: cached.truncated };
+  }
+  if (trade.account_is_demo) return { unsupported: '演示账户不拉取真实行情' };
+  const adapter = getExchange(trade.account_exchange);
+  if (!adapter || typeof adapter.fetchCandles !== 'function') {
+    return { unsupported: `${adapter ? adapter.name : trade.account_exchange} 暂不支持行情拉取（当前支持 OKX）` };
+  }
+  try {
+    const res = await adapter.fetchCandles({
+      symbol: trade.symbol, market: trade.market || 'futures', fromMs, toMs,
+      creds: store.getAccountCredentials(trade.account_id), // Gate 的 K 线接口也要签名
+    });
+    if (!res?.candles || res.candles.length < 2) return { unsupported: '该持仓区间没有可用的 K 线数据' };
+    const result = { bar: res.bar, candles: res.candles, truncated: Boolean(res.truncated) };
+    store.saveTradeCurveCache(trade.id, inputs, result);
+    return result;
+  } catch (err) {
+    return { unsupported: `行情拉取失败：${String(err?.message || err).slice(0, 90)}` };
+  }
+}
+
+/** 交易详情页的操作明细：该回合的逐笔成交（开仓/加仓/减仓/做T），同样落库缓存 */
+async function loadTradeFills(trade) {
+  const fromMs = Date.parse(trade.open_time || '');
+  const toMs = Date.parse(trade.close_time || '');
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) return null;
+  const inputs = detailCacheInputs(trade);
+  const cached = store.getTradeFillsCache(trade.id);
+  if (cached && cached.inputs === inputs && cached.fills?.length) {
+    return { fills: cached.fills };
+  }
+  if (trade.account_is_demo) return { unsupported: '演示账户不拉取真实成交明细' };
+  const adapter = getExchange(trade.account_exchange);
+  if (!adapter || typeof adapter.fetchEpisodeFills !== 'function') {
+    return { unsupported: `${adapter ? adapter.name : trade.account_exchange} 暂不支持成交明细拉取（当前支持 OKX）` };
+  }
+  try {
+    const res = await adapter.fetchEpisodeFills({
+      creds: store.getAccountCredentials(trade.account_id),
+      symbol: trade.symbol,
+      market: trade.market || 'futures',
+      fromMs,
+      toMs: toMs + 60_000, // 仓位历史的平仓时间戳可能略晚于最后一笔成交
+    });
+    if (!res?.fills?.length) return { unsupported: '该区间没有拉到逐笔成交' };
+    store.saveTradeFillsCache(trade.id, inputs, res.fills);
+    return { fills: res.fills };
+  } catch (err) {
+    return { unsupported: `成交明细拉取失败：${String(err?.message || err).slice(0, 90)}` };
+  }
+}
+
+route('GET', '/dashboard/journal/:id', (ctx) => requireUser(ctx, async (c) => {
   const trade = store.getTrade(c.params.id);
   if (!trade) return redirect('/dashboard/journal?error=' + encodeURIComponent('交易记录不存在'));
+  const [curve, ops] = await Promise.all([loadTradeCurve(trade), loadTradeFills(trade)]);
   return html(page({
     title: `${trade.symbol} | TradeLedger`,
     user: c.user,
     body: tradeDetailPage({
       user: c.user,
       trade,
+      curve,
+      ops,
       notice: c.query.notice || '',
       error: c.query.error || '',
     }),
@@ -530,6 +631,17 @@ route('POST', '/dashboard/journal/:id/note', (ctx) => requireUser(ctx, async (c)
   const body = await readForm(c.req);
   store.setTradeNote(Number(c.params.id), String(val(body, 'note')));
   return redirect(`/dashboard/journal/${c.params.id}?notice=${encodeURIComponent('复盘已保存')}`);
+}));
+
+/** 快捷标签切换：仪表盘复盘队列行内按钮用，改完回到原页面 */
+route('POST', '/dashboard/journal/:id/tag', (ctx) => requireUser(ctx, async (c) => {
+  const trade = store.getTrade(c.params.id);
+  if (!trade) return redirect('/dashboard');
+  const body = await readForm(c.req);
+  const name = String(val(body, 'tag') || '').slice(0, 30).trim();
+  if (name) store.toggleTradeTag(Number(c.params.id), name);
+  const back = String(val(body, 'back') || '/dashboard');
+  return redirect(back.startsWith('/dashboard') ? back : '/dashboard');
 }));
 
 route('POST', '/api/trades/:id/note', async (ctx) => {
@@ -752,7 +864,7 @@ route('POST', '/dashboard/spot/note', (ctx) => requireUser(ctx, async (c) => {
 }));
 
 route('GET', '/dashboard/spot/symbol/:symbol', (ctx) => requireUser(ctx, (c) => {
-  const symbol = decodeURIComponent(c.params.symbol || '');
+  const symbol = String(c.params.symbol || '');
   if (!symbol) return redirect('/dashboard/spot');
   return html(page({
     title: `${symbol} 现货详情 | TradeLedger`,
@@ -766,6 +878,25 @@ route('GET', '/dashboard/spot/symbol/:symbol', (ctx) => requireUser(ctx, (c) => 
       transfers: store.listTransfers({ asset: symbol.split('/')[0] || symbol, limit: 200 }),
       archiveNote: store.getNoteByCategory('symbol', symbol),
       spotNotes: store.listNotes({ category: 'spot', subject: symbol }),
+      notice: c.query.notice || '',
+      error: c.query.error || '',
+    }),
+  }));
+}));
+
+route('GET', '/dashboard/bots', (ctx) => requireUser(ctx, (c) => {
+  const accounts = store.listAccounts();
+  const accountId = accounts.some((a) => String(a.id) === String(c.query.account_id || ''))
+    ? Number(c.query.account_id) : null;
+  const bots = store.listBotTrades(accountId);
+  return html(page({
+    title: '策略机器人 | TradeLedger',
+    user: c.user,
+    body: botsPage({
+      user: c.user,
+      bots,
+      accounts,
+      accountId,
       notice: c.query.notice || '',
       error: c.query.error || '',
     }),
@@ -990,14 +1121,41 @@ route('POST', '/dashboard/accounts/:id/sync', async (ctx) => {
  *  对账
  * ========================================================= */
 
-route('GET', '/dashboard/reconcile', (ctx) => requireUser(ctx, (c) => {
+route('GET', '/dashboard/reconcile', (ctx) => requireUser(ctx, async (c) => {
   const report = reconcileTrades(allTrades());
+  // 月度对账：应用内净盈亏 vs 交易所账本实结算（支持 fetchMonthlyLedger 的交易所）
+  const monthly = [];
+  for (const account of store.listAccounts().filter((a) => !a.is_demo)) {
+    const adapter = getExchange(account.exchange);
+    if (!adapter || typeof adapter.fetchMonthlyLedger !== 'function') continue;
+    const entry = { account: { id: account.id, name: account.name, exchange: account.exchange }, rows: [] };
+    try {
+      const trades = allTrades().filter((t) => t.account_id === account.id);
+      const byMonth = new Map();
+      for (const t of trades) {
+        const d = new Date(t.close_time);
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        byMonth.set(key, (byMonth.get(key) || 0) + Number(t.pnl || 0));
+      }
+      const creds = store.getAccountCredentials(account.id);
+      const res = await adapter.fetchMonthlyLedger({ creds, months: 6 });
+      entry.rows = (res?.months || []).map((r) => {
+        const app = byMonth.get(r.month) || 0;
+        const exchangeNet = r.pnl + r.fee + r.fund;
+        return { month: r.month, app, exchange: exchangeNet, diff: app - exchangeNet };
+      }).reverse();
+    } catch (err) {
+      entry.error = String(err?.message || err).slice(0, 90);
+    }
+    monthly.push(entry);
+  }
   return html(page({
     title: '对账 | TradeLedger',
     user: c.user,
     body: reconcilePage({
       user: c.user,
       report,
+      monthly,
       notice: c.query.notice || '',
       error: c.query.error || '',
     }),
@@ -1010,12 +1168,8 @@ route('GET', '/api/reconcile', (ctx) => {
 });
 
 /* =========================================================
- *  周报 / AI 复盘上下文
+ *  周期报告 / AI 生成
  * ========================================================= */
-
-function weekParam(raw) {
-  return parseWeek(raw) || isoWeekOf();
-}
 
 function shiftPeriod(period) {
   if (period.kind === 'month') {
@@ -1053,6 +1207,7 @@ route('GET', '/dashboard/review', (ctx) => requireUser(ctx, (c) => {
       prev: { ...shiftPeriod(period), label: periodRange(shiftPeriod(period)).label },
       next: { ...nextPeriod, label: periodRange(nextPeriod).label },
       markdownPreview: markdown.slice(0, 12000),
+      markdownTruncated: markdown.length > 12000,
       promptText: reportPrompt(review),
       savedReport: saved,
       history: store.listReportGenerations(period.kind, 20)
@@ -1088,7 +1243,9 @@ route('POST', '/dashboard/review/ai', (ctx) => requireUser(ctx, async (c) => {
 
   // 提交即返回；生成在后台跑，前端轮询 /api/review/ai/status
   const job = store.createReportJob({ periodKind: period.kind, periodLabel: range.label, promptLen: prompt.length });
-  const trades = buildPeriodReview(allTrades(), period).stats.total;
+  const periodFrom = range.from.toISOString();
+  const periodTo = range.to.toISOString();
+  const trades = allTrades().filter((t) => t.close_time >= periodFrom && t.close_time <= periodTo).length;
   (async () => {
     try {
       const text = await callLlm({ messages: [{ role: 'user', content: prompt }], config, timeout: 300_000 });
@@ -1204,24 +1361,10 @@ route('GET', '/api/review', (ctx) => {
 });
 
 /* =========================================================
- *  AI 复盘
+ *  AI 复盘（生成入口已合并到周期报告页）
  * ========================================================= */
 
-route('GET', '/dashboard/ai', (ctx) => requireUser(ctx, (c) => {
-  const wk = isoWeekOf();
-  return html(page({
-    title: 'AI 复盘 | TradeLedger',
-    user: c.user,
-    body: aiPage({
-      user: c.user,
-      config: getLlmConfig(),
-      weekLabel: formatWeek(wk),
-      noteCount: store.listNotes().length,
-      notice: c.query.notice || '',
-      error: c.query.error || '',
-    }),
-  }));
-}));
+route('GET', '/dashboard/ai', (ctx) => requireUser(ctx, () => redirect('/dashboard/review')));
 
 route('POST', '/dashboard/ai/config', (ctx) => requireUser(ctx, async (c) => {
   const body = await readForm(c.req);
@@ -1264,58 +1407,6 @@ route('POST', '/api/ai/test', async (ctx) => {
   }
 });
 
-route('POST', '/api/ai/generate', async (ctx) => {
-  if (!ctx.user) return json({ error: 'unauthorized' }, 401);
-  try {
-    const body = await readForm(ctx.req);
-    const config = getLlmConfig({ withSecret: true });
-    if (!config.hasKey && config.provider !== 'ollama') {
-      return json({ ok: false, error: '请先在 设置与数据 → AI 模型 配置 API Key' }, 400);
-    }
-    const scope = ['week', 'recent14', 'all'].includes(String(val(body, 'scope'))) ? val(body, 'scope') : 'week';
-    const week = parseWeek(val(body, 'week')) || isoWeekOf();
-    const includeNotes = ['1', 'on', 'true'].includes(String(val(body, 'include_notes')));
-    const context = buildAiContext({
-      trades: allTrades(),
-      notes: store.listNotes(),
-      week,
-      scope,
-      includeNotes,
-      instruction: String(val(body, 'instruction') || ''),
-    });
-    const text = await callLlm({
-      messages: [
-        { role: 'system', content: context.system },
-        { role: 'user', content: context.user },
-      ],
-      config,
-    });
-    return json({
-      ok: true,
-      text,
-      html: renderMarkdown(text),
-      label: context.label,
-      tradeCount: context.tradeCount,
-      truncated: context.truncated,
-    });
-  } catch (err) {
-    return json({ ok: false, error: err?.message || String(err) }, 400);
-  }
-});
-
-route('POST', '/api/ai/save-note', async (ctx) => {
-  if (!ctx.user) return json({ error: 'unauthorized' }, 401);
-  const body = await readForm(ctx.req);
-  const content = String(val(body, 'content') || '');
-  if (!content.trim()) return json({ ok: false, error: '内容为空' }, 400);
-  const id = store.saveNote({
-    id: null,
-    title: String(val(body, 'title') || 'AI 复盘').slice(0, 200),
-    content,
-  });
-  return json({ ok: true, id });
-});
-
 route('POST', '/api/markdown', async (ctx) => {
   if (!ctx.user) return json({ error: 'unauthorized' }, 401);
   const body = await readForm(ctx.req);
@@ -1350,18 +1441,29 @@ route('POST', '/dashboard/tags/delete', (ctx) => requireUser(ctx, async (c) => {
   return redirect('/dashboard/tags');
 }));
 
+const NOTES_PAGE_SIZE = 24;
+
 route('GET', '/dashboard/notes', (ctx) => requireUser(ctx, (c) => {
   const category = ['all', 'periodic', 'symbol', 'strategy', 'spot', 'ai-report', 'general'].includes(c.query.category)
     ? c.query.category
     : 'all';
+  const q = String(c.query.q || '').trim().slice(0, 100);
+  // 搜索模式下统一用卡片网格展示结果；交易对分类的专属布局只在无关键词时生效
+  const searchable = Boolean(q) || category !== 'symbol';
+  const all = store.listNotes({ category: category === 'all' ? null : category, q: q || null });
+  const totalPages = searchable ? Math.max(1, Math.ceil(all.length / NOTES_PAGE_SIZE)) : 1;
+  const pageNo = searchable ? Math.min(Math.max(Number(c.query.page) || 1, 1), totalPages) : 1;
+  const notes = searchable ? all.slice((pageNo - 1) * NOTES_PAGE_SIZE, pageNo * NOTES_PAGE_SIZE) : all;
   return html(page({
     title: '笔记 | TradeLedger',
     user: c.user,
     body: notesPage({
       user: c.user,
-      notes: store.listNotes({ category: category === 'all' ? null : category }),
+      notes,
       counts: store.noteCountsByCategory(),
       category,
+      q,
+      pagination: { page: pageNo, pageSize: NOTES_PAGE_SIZE, totalPages, total: all.length },
       symbolTradeNotes: store.listSymbolsWithTradeNotes(),
       recentTradeNotes: store.listRecentTradeNotes(20),
       currentWeek: formatWeek(isoWeekOf()),
@@ -1391,7 +1493,7 @@ route('GET', '/dashboard/notes/new', (ctx) => requireUser(ctx, (c) => {
 }));
 
 route('GET', '/dashboard/notes/symbol/:symbol', (ctx) => requireUser(ctx, (c) => {
-  const symbol = decodeURIComponent(c.params.symbol || '');
+  const symbol = String(c.params.symbol || '');
   if (!symbol) return redirect('/dashboard/notes?category=symbol');
   return html(page({
     title: `${symbol} 交易对档案 | TradeLedger`,
@@ -1466,23 +1568,45 @@ route('GET', '/media/:id', (ctx) => {
 route('POST', '/dashboard/notes/save', (ctx) => requireUser(ctx, async (c) => {
   const body = await readForm(c.req);
   const backToSpot = val(body, 'return_to') === 'spot' && val(body, 'subject');
+  const draft = {
+    id: val(body, 'id') ? Number(val(body, 'id')) : null,
+    title: val(body, 'title') || '',
+    content: val(body, 'content') || '',
+    category: val(body, 'category') || 'general',
+    subject: val(body, 'subject') || null,
+    market: val(body, 'market') || null,
+    account_id: val(body, 'account_id') || null,
+  };
   try {
-    const id = store.saveNote({
-      id: val(body, 'id') ? Number(val(body, 'id')) : null,
-      title: val(body, 'title'),
-      content: val(body, 'content'),
-      category: val(body, 'category') || 'general',
-      subject: val(body, 'subject') || null,
-      market: val(body, 'market') || null,
-      accountId: val(body, 'account_id') || null,
-    });
+    const id = store.saveNote({ ...draft, accountId: draft.account_id });
     if (backToSpot) {
       return redirect(`/dashboard/spot/symbol/${encodeURIComponent(val(body, 'subject'))}?notice=` + encodeURIComponent('现货备注已保存'));
     }
     return redirect(`/dashboard/notes/${id}`);
   } catch (err) {
-    const back = val(body, 'id') ? `/dashboard/notes/${Number(val(body, 'id'))}/edit` : '/dashboard/notes/new';
-    return redirect(`${back}?error=${encodeURIComponent(err?.message || String(err))}`);
+    // 校验失败时带着已填内容回到编辑页，不丢用户输入
+    const note = draft.id ? { ...store.getNote(draft.id), ...draft, created_at: store.getNote(draft.id)?.created_at } : null;
+    const errorMessage = err?.message || String(err);
+    let holding = null;
+    if ((draft.category === 'spot') && draft.account_id && draft.subject) {
+      holding = store.listSpotHoldings(Number(draft.account_id), draft.subject)[0] || null;
+    }
+    return html(page({
+      title: draft.id ? `编辑笔记 | TradeLedger` : '新建笔记 | TradeLedger',
+      user: c.user,
+      body: noteEditPage({
+        user: c.user,
+        note: draft.id ? { ...note, ...draft } : {
+          id: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+          ...draft,
+        },
+        category: draft.category,
+        subject: draft.subject || '',
+        symbols: store.listSymbols(),
+        holding,
+        error: errorMessage,
+      }),
+    }), 200);
   }
 }));
 
@@ -1764,8 +1888,9 @@ route('GET', '/api/docs', (ctx) => html(page({
       <tr><td>GET</td><td>/api/accounts/status</td><td>账户同步进度（供进度条轮询）</td></tr>
       <tr><td>GET</td><td>/api/positions/live</td><td>余额 / 持仓 / 资金费率快照；?force=1 立即刷新</td></tr>
       <tr><td>POST</td><td>/api/ai/test</td><td>测试已保存的 LLM 配置</td></tr>
-      <tr><td>POST</td><td>/api/ai/generate</td><td>用周报/笔记上下文生成复盘</td></tr>
-      <tr><td>POST</td><td>/api/ai/save-note</td><td>把生成结果保存为 Markdown 笔记</td></tr>
+      <tr><td>POST</td><td>/dashboard/review/ai</td><td>提交周期报告 AI 生成（后台任务）</td></tr>
+      <tr><td>GET</td><td>/api/review/ai/status?job=</td><td>查询 AI 生成任务进度</td></tr>
+      <tr><td>POST</td><td>/dashboard/review/ai/save-note</td><td>把 AI 报告写入笔记</td></tr>
       <tr><td>POST</td><td>/api/markdown</td><td>Markdown 预览渲染</td></tr>
       <tr><td>POST</td><td>/dashboard/notes/upload</td><td>上传笔记图片（PNG/JPEG/GIF/WebP，≤5MB）</td></tr>
       <tr><td>GET</td><td>/media/:id</td><td>读取笔记图片（需登录）</td></tr>

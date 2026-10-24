@@ -22,12 +22,13 @@ function buildDaily(trades) {
   return map;
 }
 
-export function calendarPage({ user, trades, year, month, notice, error }) {
+export function calendarPage({ user, trades, year, month, accounts = [], accountId = null, notice, error }) {
   const daily = buildDaily(trades);
   const first = new Date(year, month - 1, 1);
   const daysInMonth = new Date(year, month, 0).getDate();
   const startPad = first.getDay();
   const todayKey = localKey(new Date().toISOString());
+  const accParam = accountId ? `&account_id=${accountId}` : '';
 
   const cells = [];
   for (let i = 0; i < startPad; i++) cells.push(null);
@@ -57,7 +58,7 @@ export function calendarPage({ user, trades, year, month, notice, error }) {
     if (!cell) return '<div class="cal-cell empty" aria-hidden="true"></div>';
     const cls = cell.trades ? (cell.pnl > 0 ? 'pos-day' : cell.pnl < 0 ? 'neg-day' : 'flat-day') : 'no-day';
     const isToday = cell.key === todayKey ? ' today' : '';
-    return `<a class="cal-cell ${cls}${isToday}" href="/dashboard/journal?from=${cell.key}&to=${cell.key}" title="${cell.key} · ${cell.trades} 笔">
+    return `<a class="cal-cell ${cls}${isToday}" href="/dashboard/journal?from=${cell.key}&to=${cell.key}${accParam}" title="${cell.key} · ${cell.trades} 笔">
       <span class="cal-day">${cell.day}</span>
       ${cell.trades ? `<span class="cal-pnl">${fmtMoney(cell.pnl, { sign: false })}</span>
         <span class="cal-meta">${cell.trades} 笔 · ${fmtPct(cell.wins / cell.trades, 0)}</span>`
@@ -65,7 +66,19 @@ export function calendarPage({ user, trades, year, month, notice, error }) {
     </a>`;
   };
 
+  const accountOptions = ['<option value="all">全部账户（聚合）</option>']
+    .concat(accounts.map((a) => `<option value="${a.id}" ${accountId && String(accountId) === String(a.id) ? 'selected' : ''}>${e(a.name)}（${e(a.exchange)}${a.is_demo ? ' · 演示' : ''}）</option>`))
+    .join('');
+
   const body = `
+    ${accounts.length > 1 ? `<form method="get" action="/dashboard/calendar" class="filter-bar" data-autosubmit>
+      <input type="hidden" name="year" value="${year}">
+      <input type="hidden" name="month" value="${month}">
+      <select name="account_id" aria-label="按账户查看">${accountOptions}</select>
+      <button class="btn btn-primary small" type="submit">筛选</button>
+      ${accountId ? `<a class="btn btn-ghost small" href="/dashboard/calendar?year=${year}&month=${month}">清除</a>` : ''}
+    </form>
+    <p class="chart-note" style="margin:-4px 0 12px">${accountId ? '正在查看单个账户的数据 · 点击日历格跳转的交易列表也会带上账户筛选' : ''}</p>` : ''}
     <div class="mini-strip">
       <div class="mini-stat"><span>本月盈亏</span><b class="${sign(monthPnl)}">${fmtMoney(monthPnl)}</b></div>
       <div class="mini-stat"><span>交易天数</span><b>${tradingDays}</b></div>
@@ -79,9 +92,9 @@ export function calendarPage({ user, trades, year, month, notice, error }) {
       <div class="panel-head">
         <h2>${year} 年 ${month} 月</h2>
         <div class="head-actions">
-          <a class="btn btn-ghost small" href="/dashboard/calendar?year=${prev.y}&month=${prev.m}">← 上一月</a>
-          <a class="btn btn-ghost small" href="/dashboard/calendar">回到本月</a>
-          <a class="btn btn-ghost small" href="/dashboard/calendar?year=${next.y}&month=${next.m}">下一月 →</a>
+          <a class="btn btn-ghost small" href="/dashboard/calendar?year=${prev.y}&month=${prev.m}${accParam}">← 上一月</a>
+          <a class="btn btn-ghost small" href="/dashboard/calendar${accountId ? `?account_id=${accountId}` : ''}">回到本月</a>
+          <a class="btn btn-ghost small" href="/dashboard/calendar?year=${next.y}&month=${next.m}${accParam}">下一月 →</a>
         </div>
       </div>
       <div class="cal-head">

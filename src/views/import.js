@@ -170,7 +170,7 @@ function templatesPanel(templates) {
     <div class="tag-row">
       ${templates.map((t) => `<span class="tag-pill">${e(t.name)}
         <form method="post" action="/dashboard/import/templates/delete" class="inline"
-          onsubmit="return confirm('删除模板「${e(t.name)}」？')">
+          onsubmit='return confirm(${e(JSON.stringify(`删除模板「${t.name}」？`))})'>
           <input type="hidden" name="id" value="${t.id}">
           <button class="tag-del" type="submit" title="删除">×</button>
         </form></span>`).join('')}

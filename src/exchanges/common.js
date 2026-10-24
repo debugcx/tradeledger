@@ -2,7 +2,23 @@
  * 交易所适配器公共工具：成交配对、时间窗、符号归一化。
  */
 
-export { matchFills } from '../fills.js';
+export { matchFills, matchEpisodes } from '../fills.js';
+
+/** 行情/K 线类不可变数据的进程内缓存（K 线、逐笔成交），带 TTL 与容量上限 */
+const namedCaches = new Map();
+export function marketCache(name) {
+  if (!namedCaches.has(name)) namedCaches.set(name, new Map());
+  return namedCaches.get(name);
+}
+export function cacheGet(map, key, ttlMs = 6 * 3600_000) {
+  const hit = map.get(key);
+  return hit && Date.now() - hit.at < ttlMs ? hit : null;
+}
+export function cachePut(map, key, value) {
+  if (map.size >= 300) map.delete(map.keys().next().value);
+  map.set(key, { ...value, at: Date.now() });
+  return value;
+}
 
 export const num = (v) => {
   const n = Number(v);

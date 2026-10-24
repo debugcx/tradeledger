@@ -46,7 +46,7 @@ export function tagsPage({ user, tags, stats, error }) {
       <div class="tag-row">
         ${tags.map((t) => `<span class="tag-pill" style="border-color:${e(t.color)}">${e(t.name)}
           <form method="post" action="/dashboard/tags/delete" class="inline"
-            onsubmit="return confirm('删除标签「${e(t.name)}」？交易记录不会被删除。')">
+            onsubmit='return confirm(${e(JSON.stringify(`删除标签「${t.name}」？交易记录不会被删除。`))})'>
             <input type="hidden" name="id" value="${t.id}">
             <button class="tag-del" type="submit" title="删除">×</button>
           </form></span>`).join('') || '<span class="muted">还没有标签</span>'}

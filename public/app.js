@@ -60,83 +60,6 @@
     if (!dtInputs[1].value) dtInputs[1].value = fmt(now);
   }
 
-  /* 列表页行内复盘：fetch 保存，不跳页 */
-  function initQuickNotes() {
-    document.querySelectorAll('form.quick-note').forEach(function (form) {
-      form.addEventListener('submit', function (ev) {
-        ev.preventDefault();
-        var id = form.getAttribute('data-trade-id');
-        var input = form.querySelector('input[name="note"]');
-        var btn = form.querySelector('button[type="submit"]');
-        if (!id || !input || !btn) return;
-        btn.disabled = true;
-        btn.textContent = '保存中…';
-        fetch('/api/trades/' + encodeURIComponent(id) + '/note', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'content-type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ note: input.value }).toString(),
-        }).then(function (res) {
-          return res.json().then(function (data) { return { ok: res.ok && data.ok, data: data }; });
-        }).then(function (r) {
-          if (!r.ok) throw new Error((r.data && r.data.error) || '保存失败');
-          form.classList.add('saved');
-          btn.textContent = '已保存';
-          setTimeout(function () {
-            form.classList.remove('saved');
-            btn.textContent = '保存';
-            btn.disabled = false;
-          }, 1800);
-        }).catch(function (err) {
-          btn.textContent = '保存失败';
-          btn.disabled = false;
-          btn.title = err.message || '';
-        });
-      });
-    });
-  }
-
-  /* 现货持仓备注：fetch 保存，不跳页 */
-  function initSpotNotes() {
-    document.querySelectorAll('form.spot-note').forEach(function (form) {
-      form.addEventListener('submit', function (ev) {
-        ev.preventDefault();
-        var accountId = form.getAttribute('data-account-id');
-        var symbol = form.getAttribute('data-symbol');
-        var input = form.querySelector('input[name="note"]');
-        var btn = form.querySelector('button[type="submit"]');
-        if (!accountId || !symbol || !input || !btn) return;
-        btn.disabled = true;
-        btn.textContent = '保存中…';
-        fetch('/api/spot/note', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'content-type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            account_id: accountId,
-            symbol: symbol,
-            note: input.value,
-          }).toString(),
-        }).then(function (res) {
-          return res.json().then(function (data) { return { ok: res.ok && data.ok, data: data }; });
-        }).then(function (r) {
-          if (!r.ok) throw new Error((r.data && r.data.error) || '保存失败');
-          form.classList.add('saved');
-          btn.textContent = '已保存';
-          setTimeout(function () {
-            form.classList.remove('saved');
-            btn.textContent = '保存';
-            btn.disabled = false;
-          }, 1800);
-        }).catch(function (err) {
-          btn.textContent = '保存失败';
-          btn.disabled = false;
-          btn.title = err.message || '';
-        });
-      });
-    });
-  }
-
   /* 提示条：右上角关闭 + 成功/信息类自动消失 */
   function initAlerts() {
     function dismiss(el) {
@@ -297,7 +220,23 @@
       try { return new Date(iso).toLocaleString('zh-CN', { hour12: false }); } catch (e) { return '—'; }
     }
 
-    function render(data) {
+    function render(raw) {
+      var data = raw || {};
+      var acc = panel.getAttribute('data-live-account');
+      if (acc) {
+        // 仪表盘按单账户查看时，只展示该账户的快照数据
+        var pick = function (list) {
+          return (list || []).filter(function (x) { return String(x.account_id) === acc; });
+        };
+        data = {
+          updatedAt: data.updatedAt,
+          errors: data.errors,
+          balances: pick(data.balances),
+          positions: pick(data.positions),
+          spotBalances: pick(data.spotBalances),
+          spotHoldings: pick(data.spotHoldings),
+        };
+      }
       var balances = data.balances || [];
       var positions = data.positions || [];
       var equity = balances.reduce(function (a, b) { return a + (Number(b.total) || 0); }, 0);
@@ -325,12 +264,11 @@
       }).join('') || '<tr><td colspan="9" class="muted center">当前没有合约持仓</td></tr>';
 
       var spotHoldings = data.spotHoldings || [];
-      var spotBalances = data.spotBalances || [];
       var spotValue = spotHoldings.reduce(function (a, h) { return a + (Number(h.value) || 0); }, 0);
       var spotCount = document.querySelector('[data-live-spot-count]');
       var spotValueEl = document.querySelector('[data-live-spot-value]');
       var spotRows = document.querySelector('[data-live-spot-rows]');
-      if (spotCount) spotCount.textContent = String(spotBalances.length);
+      if (spotCount) spotCount.textContent = String(spotHoldings.length);
       if (spotValueEl) spotValueEl.textContent = money(spotValue);
       if (spotRows) {
         spotRows.innerHTML = spotHoldings.map(function (h) {
@@ -426,11 +364,13 @@
 
     document.querySelectorAll('[data-copy-review]').forEach(function (btn) {
       btn.addEventListener('click', async function () {
-        var week = btn.getAttribute('data-copy-review');
+        // 属性值是完整的周期查询串（如 kind=month&month=2026-10），老数据里可能只有周期标签
+        var q = btn.getAttribute('data-copy-review') || '';
+        if (!/^(kind=|week=)/.test(q)) q = 'week=' + encodeURIComponent(q);
         var original = btn.textContent;
         btn.disabled = true;
         try {
-          var res = await fetch('/api/review?week=' + encodeURIComponent(week) + '&format=md', { credentials: 'same-origin' });
+          var res = await fetch('/api/review?' + q + '&format=md', { credentials: 'same-origin' });
           if (!res.ok) throw new Error('HTTP ' + res.status);
           await copyText(await res.text());
           btn.textContent = '已复制';
@@ -504,69 +444,6 @@
           testBtn.disabled = false;
         }
       });
-    }
-
-    var genForm = document.getElementById('ai-generate-form');
-    if (genForm) {
-      var resultBox = document.querySelector('[data-ai-result]');
-      var status = document.querySelector('[data-ai-status]');
-      var actions = document.querySelector('[data-ai-actions]');
-      var lastText = '';
-
-      genForm.addEventListener('submit', async function (ev) {
-        ev.preventDefault();
-        var btn = genForm.querySelector('[data-ai-generate]');
-        if (btn) { btn.disabled = true; btn.textContent = '生成中…'; }
-        if (status) { status.textContent = '正在调用模型…'; status.className = 'muted small'; }
-        try {
-          var body = new URLSearchParams(new FormData(genForm)).toString();
-          var res = await fetch('/api/ai/generate', {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: { 'content-type': 'application/x-www-form-urlencoded' },
-            body: body,
-          });
-          var data = await res.json();
-          if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
-          lastText = data.text || '';
-          if (resultBox) resultBox.innerHTML = data.html || '';
-          if (actions) actions.style.display = 'flex';
-          if (status) status.textContent = '完成 · ' + data.tradeCount + ' 笔交易 · ' + data.label + (data.truncated ? ' · 上下文已截断' : '');
-        } catch (err) {
-          if (status) { status.textContent = '失败：' + err.message; status.className = 'muted small neg'; }
-        } finally {
-          if (btn) { btn.disabled = false; btn.textContent = '生成复盘'; }
-        }
-      });
-
-      var saveBtn = document.querySelector('[data-ai-save]');
-      if (saveBtn) {
-        saveBtn.addEventListener('click', async function () {
-          if (!lastText) return;
-          saveBtn.disabled = true;
-          try {
-            var res = await fetch('/api/ai/save-note', {
-              method: 'POST',
-              credentials: 'same-origin',
-              headers: { 'content-type': 'application/x-www-form-urlencoded' },
-              body: new URLSearchParams({
-                title: 'AI 复盘 ' + new Date().toISOString().slice(0, 10),
-                content: lastText,
-              }).toString(),
-            });
-            var data = await res.json();
-            if (!res.ok || !data.ok) throw new Error(data.error || '保存失败');
-            saveBtn.textContent = '已保存为笔记';
-          } catch (err) {
-            saveBtn.textContent = '保存失败';
-          } finally {
-            setTimeout(function () {
-              saveBtn.disabled = false;
-              saveBtn.textContent = '保存为笔记';
-            }, 1800);
-          }
-        });
-      }
     }
   }
 
@@ -693,12 +570,16 @@
         credentials: 'same-origin',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: body,
-      }).then(function (res) { return res.json(); }).then(function (data) {
-        if (data && data.ok && data.jobId) {
-          poll(data.jobId);
+      }).then(function (res) {
+        return res.json().catch(function () { return null; }).then(function (data) {
+          return { ok: res.ok, status: res.status, data: data };
+        });
+      }).then(function (r) {
+        if (r.ok && r.data && r.data.ok && r.data.jobId) {
+          poll(r.data.jobId);
         } else {
           stopProgress();
-          showProgress('提交失败：' + ((data && data.error) || 'HTTP ' + res.status));
+          showProgress('提交失败：' + ((r.data && r.data.error) || ('HTTP ' + r.status)));
           if (btn) { btn.disabled = false; btn.textContent = '调用 AI 生成解读'; }
         }
       }).catch(function (err) {
@@ -709,11 +590,85 @@
     });
   }
 
+  /* 带 data-autosubmit 的表单：下拉一改就提交（保留按钮，无 JS 也能用） */
+  function initAutoSubmit() {
+    document.querySelectorAll('form[data-autosubmit]').forEach(function (form) {
+      form.querySelectorAll('select').forEach(function (sel) {
+        sel.addEventListener('change', function () { form.submit(); });
+      });
+    });
+  }
+
+  /* 折线图悬浮：十字线 + 气泡显示该点的时间和数值（K 线数据由 SVG data 属性携带） */
+  function initChartHover() {
+    document.querySelectorAll('svg.chart[data-line-points]').forEach(function (svg) {
+      if (svg.dataset.hoverReady) return;
+      svg.dataset.hoverReady = '1';
+      var rows;
+      try { rows = JSON.parse(svg.dataset.linePoints || '[]'); } catch (err) { return; }
+      if (!Array.isArray(rows) || rows.length < 2) return;
+      var vbw = parseFloat(svg.dataset.vbw || '720');
+      var vbh = parseFloat(svg.dataset.vbh || '220');
+      var pl = parseFloat(svg.dataset.pl || '54');
+      var pr = parseFloat(svg.dataset.pr || '12');
+      var wrap = svg.parentElement;
+      if (!wrap || getComputedStyle(wrap).position === 'static') {
+        if (wrap) wrap.style.position = 'relative';
+      }
+      var tip = document.createElement('div');
+      tip.className = 'chart-hover-tip';
+      tip.setAttribute('aria-hidden', 'true');
+      var cross = document.createElement('div');
+      cross.className = 'chart-hover-cross';
+      cross.setAttribute('aria-hidden', 'true');
+      var dot = document.createElement('div');
+      dot.className = 'chart-hover-dot';
+      dot.setAttribute('aria-hidden', 'true');
+      wrap.appendChild(cross);
+      wrap.appendChild(dot);
+      wrap.appendChild(tip);
+
+      var hide = function () {
+        tip.style.opacity = '0';
+        cross.style.opacity = '0';
+        dot.style.opacity = '0';
+      };
+      svg.addEventListener('mouseleave', hide);
+      svg.addEventListener('mousemove', function (ev) {
+        var rect = svg.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        // SVG 元素没有 offsetLeft/offsetTop，全部用 rect 相对 wrap 计算
+        var wrapRect = wrap.getBoundingClientRect();
+        var xVb = (ev.clientX - rect.left) / rect.width * vbw;
+        var frac = (xVb - pl) / (vbw - pl - pr);
+        var idx = Math.round(frac * (rows.length - 1));
+        if (idx < 0) idx = 0;
+        if (idx > rows.length - 1) idx = rows.length - 1;
+        var row = rows[idx];
+        var fracI = idx / (rows.length - 1);
+        var px = rect.left - wrapRect.left + (pl + fracI * (vbw - pl - pr)) / vbw * rect.width;
+        var py = rect.top - wrapRect.top + parseFloat(row[2]) / vbh * rect.height;
+        cross.style.left = px + 'px';
+        cross.style.opacity = '1';
+        dot.style.left = (px - 5) + 'px';
+        dot.style.top = (py - 5) + 'px';
+        dot.style.opacity = '1';
+        tip.textContent = row[0] + ' · ' + row[1];
+        // 气泡默认在点上方（translate -50%,-135%），越界时钳制在容器内
+        var tipH = tip.offsetHeight || 26;
+        var half = tip.offsetWidth / 2 || 60;
+        var tipTop = Math.max(py, tipH * 1.35 + 4);
+        var tipLeft = Math.min(Math.max(px, half + 2), (wrap.clientWidth || 9999) - half - 2);
+        tip.style.left = tipLeft + 'px';
+        tip.style.top = tipTop + 'px';
+        tip.style.opacity = '1';
+      });
+    });
+  }
+
   function initPage() {
     initTheme();
     initTimeDefaults();
-    initQuickNotes();
-    initSpotNotes();
     initAlerts();
     initImportGuard();
     initSyncButtons();
@@ -724,6 +679,8 @@
     initAi();
     initReportAi();
     initMarkdown();
+    initAutoSubmit();
+    initChartHover();
   }
 
   /* ---------------- 软导航：只替换主内容，不整页刷新 ---------------- */

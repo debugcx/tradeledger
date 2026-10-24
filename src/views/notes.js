@@ -24,9 +24,41 @@ const DESCRIPTIONS = {
   general: '不属于以上分类的随手记录',
 };
 
-function tabs(active, counts) {
+function tabs(active, counts, q = '') {
+  const suffix = q ? `&q=${encodeURIComponent(q)}` : '';
   return `<div class="notes-tabs">
-    ${CATEGORIES.map((c) => `<a href="/dashboard/notes?category=${c.key}" class="${c.key === active ? 'active' : ''}">${e(c.label)}${counts[c.key] ? ` <span class="muted">${counts[c.key]}</span>` : ''}</a>`).join('')}
+    ${CATEGORIES.map((c) => `<a href="/dashboard/notes?category=${c.key}${suffix}" class="${c.key === active ? 'active' : ''}">${e(c.label)}${counts[c.key] ? ` <span class="muted">${counts[c.key]}</span>` : ''}</a>`).join('')}
+  </div>`;
+}
+
+function notePager(category, q, pagination) {
+  const { page, totalPages, total, pageSize } = pagination;
+  if (!totalPages || totalPages <= 1) return '';
+  const link = (n, label, cls = '') => {
+    const p = new URLSearchParams();
+    if (category !== 'all') p.set('category', category);
+    if (q) p.set('q', q);
+    if (n > 1) p.set('page', String(n));
+    const s = p.toString();
+    return `<a class="pager-item ${cls}" href="/dashboard/notes${s ? `?${s}` : ''}">${label}</a>`;
+  };
+  const first = total ? (page - 1) * pageSize + 1 : 0;
+  const last = Math.min(page * pageSize, total);
+  const nums = [...new Set([1, totalPages, page - 1, page, page + 1].filter((n) => n >= 1 && n <= totalPages))];
+  const items = nums.sort((a, b) => a - b).flatMap((n, i, arr) => {
+    const prev = arr[i - 1];
+    const els = [];
+    if (prev && n - prev > 1) els.push('<span class="pager-dots">…</span>');
+    els.push(link(n, String(n), n === page ? 'active' : ''));
+    return els;
+  }).join('');
+  return `<div class="pager">
+    <span class="muted small">第 ${fmtNum(first)}–${fmtNum(last)} 篇 / 共 ${fmtNum(total)} 篇</span>
+    <div class="pager-links">
+      ${page > 1 ? link(page - 1, '上一页') : '<span class="pager-item disabled">上一页</span>'}
+      ${items}
+      ${page < totalPages ? link(page + 1, '下一页') : '<span class="pager-item disabled">下一页</span>'}
+    </div>
   </div>`;
 }
 
@@ -51,13 +83,21 @@ function newHref(category, currentWeek) {
   return `/dashboard/notes/new?category=${category === 'all' ? 'general' : category}`;
 }
 
-export function notesPage({ user, notes, counts, category = 'all', symbolTradeNotes = [], recentTradeNotes = [], currentWeek = '', notice, error }) {
-  const symbolNotes = notes.filter((n) => n.category === 'symbol');
+export function notesPage({ user, notes, counts, category = 'all', q = '', pagination = null, symbolTradeNotes = [], recentTradeNotes = [], currentWeek = '', notice, error }) {
+  const searching = Boolean(q);
+  const symbolNotes = searching ? [] : notes.filter((n) => n.category === 'symbol');
   const archiveSymbols = new Set(symbolNotes.map((n) => n.subject));
   const gaps = symbolTradeNotes.filter((s) => !archiveSymbols.has(s.symbol));
 
   let content = '';
-  if (category === 'symbol') {
+  let pagerHtml = '';
+  if (searching) {
+    const cards = notes.map(noteCard).join('');
+    content = cards
+      ? `<div class="notes-grid">${cards}</div>`
+      : `<div class="panel muted center">没有匹配「${e(q)}」的笔记。换个关键词，或<a href="/dashboard/notes">清除搜索</a>。</div>`;
+    pagerHtml = pagination ? notePager(category, q, pagination) : '';
+  } else if (category === 'symbol') {
     const archiveCards = symbolNotes.map((n) => `<article class="note-card">
       <div class="note-card-top">${categoryBadge('symbol')}<span class="note-subject">${e(n.subject || '')}</span></div>
       <h3><a href="/dashboard/notes/symbol/${encodeURIComponent(n.subject || '')}">${e(n.title)}</a></h3>
@@ -99,15 +139,25 @@ export function notesPage({ user, notes, counts, category = 'all', symbolTradeNo
     content = cards
       ? `<div class="notes-grid">${cards}</div>`
       : `<div class="panel muted center">${e(DESCRIPTIONS[category] || '还没有笔记。')} 点右上角新建一篇。</div>`;
+    pagerHtml = pagination ? notePager(category, q, pagination) : '';
   }
 
   const body = `
-    ${tabs(category, counts)}
-    <div class="page-actions">
-      <a class="btn btn-primary" href="${newHref(category, currentWeek)}">${category === 'spot' ? '去现货页写备注' : category === 'symbol' ? '+ 新建交易对档案' : category === 'periodic' ? '+ 新建本周复盘' : '+ 新建笔记'}</a>
+    ${tabs(category, counts, q)}
+    <div class="notes-toolbar">
+      <form method="get" action="/dashboard/notes" class="notes-search" role="search">
+        <input type="hidden" name="category" value="${e(category)}">
+        <input name="q" value="${e(q)}" placeholder="搜索标题、内容、交易对" maxlength="100" aria-label="搜索笔记">
+        <button class="btn btn-primary small" type="submit">搜索</button>
+        ${searching ? `<a class="btn btn-ghost small" href="/dashboard/notes?category=${e(category)}">清除</a>` : ''}
+      </form>
+      <div class="page-actions">
+        <a class="btn btn-primary" href="${newHref(category, currentWeek)}">${category === 'spot' ? '去现货页写备注' : category === 'symbol' ? '+ 新建交易对档案' : category === 'periodic' ? '+ 新建本周复盘' : '+ 新建笔记'}</a>
+      </div>
     </div>
-    <p class="chart-note" style="margin:-6px 0 14px">${e(DESCRIPTIONS[category] || '')}</p>
-    ${content}`;
+    <p class="chart-note" style="margin:-6px 0 14px">${searching ? `搜索「${e(q)}」· 找到 ${fmtNum(pagination?.total ?? notes.length)} 篇` : e(DESCRIPTIONS[category] || '')}</p>
+    ${content}
+    ${pagerHtml}`;
 
   return shell({
     active: 'notes', user, title: '笔记',

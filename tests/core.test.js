@@ -236,9 +236,9 @@ test('analyze：周×小时矩阵的盈亏合计等于总盈亏', () => {
 
 test('filterTrades：筛选与排序', () => {
   const trades = [
-    trade({ id: 1, side: 'long', pnl: 10, tags: ['趋势'], note: 'ok' }),
-    trade({ id: 2, side: 'short', pnl: -5, tags: ['逆势'], note: null }),
-    trade({ id: 3, side: 'long', pnl: 20, symbol: 'ETH/USDT', tags: ['趋势'] }),
+    trade({ id: 1, side: 'long', pnl: 10, tags: ['趋势'], note: 'ok', account_id: 1 }),
+    trade({ id: 2, side: 'short', pnl: -5, tags: ['逆势'], note: null, account_id: 2 }),
+    trade({ id: 3, side: 'long', pnl: 20, symbol: 'ETH/USDT', tags: ['趋势'], account_id: 1 }),
   ];
   assert.equal(filterTrades(trades, { side: 'long' }).length, 2);
   assert.equal(filterTrades(trades, { result: 'loss' }).length, 1);
@@ -246,6 +246,9 @@ test('filterTrades：筛选与排序', () => {
   assert.equal(filterTrades(trades, { note: 'yes' }).length, 1);
   assert.equal(filterTrades(trades, { q: 'eth' }).length, 1);
   assert.equal(filterTrades(trades, { sort: 'pnl' })[0].id, 3);
+  assert.equal(filterTrades(trades, { account_id: '1' }).length, 2);
+  assert.equal(filterTrades(trades, { account_id: '2' }).length, 1);
+  assert.equal(filterTrades(trades, { account_id: 'all' }).length, 3);
 });
 
 test('dailyMap：按本地日期聚合', () => {

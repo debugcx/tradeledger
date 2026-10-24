@@ -1,6 +1,9 @@
 import { hmacHex } from '../crypto.js';
 import { requestJson } from '../http-client.js';
-import { num, windowsDescending, matchFills, toSymbol, splitPair, quoteFee, isSupportedSpotSymbol, SPOT_QUOTES } from './common.js';
+import { num, windowsDescending, matchFills, toSymbol, splitPair, quoteFee, isSupportedSpotSymbol, SPOT_QUOTES, marketCache, cacheGet, cachePut } from './common.js';
+
+const candleCache = marketCache('bybit:candles');
+const fillCache = marketCache('bybit:fills');
 
 /**
  * Bybit V5 只读接入。
@@ -307,5 +310,76 @@ export const bybit = {
       });
     }
     return { balances, positions };
+  },
+
+  // 行情 K 线（公共接口）。Bybit 的粒度用分钟数字符串；行 = [开始时间, 开, 高, 低, 收]，倒序。
+  async fetchCandles({ symbol, market = 'futures', fromMs, toMs }) {
+    const instId = String(symbol || '').replace('/', '').toUpperCase();
+    if (!instId) return { bar: '60', candles: [], truncated: false };
+    const bars = [
+      ['1', 60_000], ['3', 180_000], ['5', 300_000], ['15', 900_000], ['30', 1_800_000],
+      ['60', 3_600_000], ['120', 7_200_000], ['240', 14_400_000], ['360', 21_600_000],
+      ['720', 43_200_000], ['D', 86_400_000],
+    ];
+    const dur = Math.max(0, Number(toMs) - Number(fromMs));
+    let bar = 'D', barMs = 86_400_000;
+    for (const [name, ms] of bars) {
+      if (dur / ms <= 90) { bar = name; barMs = ms; break; }
+    }
+    const cacheKey = `yc|${instId}|${market}|${bar}|${Math.floor(fromMs / barMs)}|${Math.floor(toMs / barMs)}`;
+    const hit = cacheGet(candleCache, cacheKey);
+    if (hit) return hit;
+
+    const category = market === 'spot' ? 'spot' : 'linear';
+    const q = new URLSearchParams({
+      category, symbol: instId, interval: bar, limit: '1000',
+      start: String(Math.max(0, Number(fromMs))), end: String(Number(toMs)),
+    });
+    const res = await requestJson(`${BASE}/v5/market/kline?${q}`, { method: 'GET' });
+    const body = res.json;
+    if (!body || body.retCode !== 0) throw new Error(`Bybit K 线返回异常：${body?.retMsg || res.status}`);
+    const out = (body.result?.list || [])
+      .map((r) => ({ t: Number(r[0]), o: num(r[1]), h: num(r[2]), l: num(r[3]), c: num(r[4]) }))
+      .filter((k) => k.t >= Number(fromMs) && k.t <= Number(toMs))
+      .sort((a, b) => a.t - b.t);
+    const result = { bar, candles: out.slice(0, 300), truncated: out.length >= 300 };
+    return cachePut(candleCache, cacheKey, result);
+  },
+
+  // 某个回合的逐笔成交（需签名）
+  async fetchEpisodeFills({ creds, symbol, market = 'futures', fromMs, toMs, limit }) {
+    const instId = String(symbol || '').replace('/', '').toUpperCase();
+    if (!instId) return { fills: [] };
+    const cap = Math.max(50, Number(limit) || 300);
+    const cacheKey = `yf|${instId}|${market}|${fromMs}|${toMs}`;
+    const hit = cacheGet(fillCache, cacheKey);
+    if (hit) return hit;
+
+    const category = market === 'spot' ? 'spot' : 'linear';
+    const out = [];
+    let cursor = null;
+    for (let page = 0; page < 3 && out.length < cap; page++) {
+      const result = await call('/v5/execution/list', {
+        category, symbol: instId, limit: '100',
+        startTime: String(Math.max(0, Number(fromMs))), endTime: String(Number(toMs)),
+        ...(cursor ? { cursor } : {}),
+      }, creds);
+      const rows = result?.list || [];
+      if (!rows.length) break;
+      for (const r of rows) {
+        out.push({
+          t: Number(r.execTime || 0),
+          side: String(r.side || '').toLowerCase() === 'buy' ? 'buy' : 'sell',
+          price: num(r.execPrice), qty: num(r.execQty),
+          fee: -Math.abs(num(r.execFee)), feeCcy: r.feeTokenCurrency || 'USDT',
+          billId: r.execId || '',
+        });
+      }
+      cursor = result.nextPageCursor;
+      if (!cursor) break;
+    }
+    out.sort((a, b) => a.t - b.t);
+    const fills = { fills: out.slice(0, cap) };
+    return cachePut(fillCache, cacheKey, fills);
   },
 };

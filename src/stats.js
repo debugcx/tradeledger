@@ -102,6 +102,27 @@ export function analyze(trades) {
   const avgLoss = losses.length ? Math.abs(sum(losses, (t) => t.pnl)) / losses.length : 0;
   const expectancy = winRate * avgWin - (1 - winRate) * avgLoss;
 
+  /* ---------- 行为诊断 ---------- */
+  const grossWin = sum(wins, (t) => t.pnl);
+  const grossLoss = Math.abs(sum(losses, (t) => t.pnl));
+  const behavior = {
+    payoffRatio: avgLoss > 0 ? avgWin / avgLoss : 0,
+    // 该胜率下保本所需的盈亏比：(1-胜率)/胜率
+    breakevenRatio: winRate > 0 && winRate < 1 ? (1 - winRate) / winRate : 0,
+    profitFactor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : 0),
+    // 最差 5% 的亏损集中度
+    bigLossCount: losses.length ? Math.max(1, Math.ceil(losses.length * 0.05)) : 0,
+    bigLossSum: 0,
+    bigLossVsProfit: grossWin > 0 ? 0 : null,
+    lossDurationMs: losses.length ? mean(losses, durationOf) : 0,
+    winDurationMs: wins.length ? mean(wins, durationOf) : 0,
+  };
+  {
+    const worst = [...losses].sort((a, b) => a.pnl - b.pnl).slice(0, behavior.bigLossCount);
+    behavior.bigLossSum = Math.abs(sum(worst, (t) => t.pnl));
+    if (grossWin > 0) behavior.bigLossVsProfit = behavior.bigLossSum / grossWin;
+  }
+
   const totalPnl = sum(sorted, (t) => t.pnl);
   const totalVolume = sum(sorted, (t) => t.notional);
   const avgDuration = mean(sorted, durationOf);
@@ -295,8 +316,10 @@ export function analyze(trades) {
       })),
   };
 
-  const longs = sorted.filter((t) => t.side === 'long');
-  const shorts = sorted.filter((t) => t.side === 'short');
+  // 账本回填等降级记录没有方向（size=0），不计入多空统计
+  const sided = sorted.filter((t) => Number(t.size) > 0 || Number(t.notional) > 0);
+  const longs = sided.filter((t) => t.side === 'long');
+  const shorts = sided.filter((t) => t.side === 'short');
 
   return {
     total,
@@ -306,6 +329,7 @@ export function analyze(trades) {
     expectancy,
     avgWin,
     avgLoss,
+    behavior,
     totalPnl,
     totalVolume,
     avgDuration,
@@ -342,6 +366,7 @@ export function analyze(trades) {
 /** 列表页的筛选与排序（纯函数） */
 export function filterTrades(trades, q = {}) {
   let list = trades || [];
+  if (q.account_id && q.account_id !== 'all') list = list.filter((t) => String(t.account_id) === String(q.account_id));
   if (q.market && q.market !== 'all') list = list.filter((t) => (t.market || 'futures') === q.market);
   if (q.side && q.side !== 'all') list = list.filter((t) => t.side === q.side);
   if (q.result && q.result !== 'all') {

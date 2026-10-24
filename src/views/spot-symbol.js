@@ -7,9 +7,10 @@ const TYPE_LABEL = {
   withdraw: '提现',
   internal_in: '内部转入',
   internal_out: '内部转出',
+  rebate: '返佣',
   other: '其他',
 };
-const IN_TYPES = new Set(['deposit', 'internal_in']);
+const IN_TYPES = new Set(['deposit', 'internal_in', 'rebate']);
 
 function holdingStart(fills) {
   const sorted = [...fills].sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
