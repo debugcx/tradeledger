@@ -689,8 +689,11 @@
       var heading = panel ? panel.querySelector('.panel-head h2') : null;
       box.querySelector('.tl-lightbox-title').textContent =
         (heading ? heading.textContent + ' · ' : '') + '点击空白处或按 Esc 关闭';
-      inner.appendChild(svg.cloneNode(true));
+      var clone = svg.cloneNode(true);
+      clone.removeAttribute('data-hover-ready'); // 让悬浮逻辑在大图里重新绑定
+      inner.appendChild(clone);
       box.classList.add('open');
+      initChartHover(); // 大图里的坐标点同样支持悬浮弹窗
     });
   }
 

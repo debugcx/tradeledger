@@ -109,8 +109,9 @@ export function barChart({
   items.forEach((it, i) => {
     const v = Number(it.value) || 0;
     const x = padL + gap * i + (gap - bw) / 2;
-    const y = v >= 0 ? padT + h - ((v - min) / span) * h : zeroY;
-    const bh = Math.max(1, Math.abs(((v - min) / span) * h));
+    const vY = padT + h - ((v - min) / span) * h; // 该数值在坐标轴上的位置
+    const y = v >= 0 ? vY : zeroY;                // 正柱从数值位置画到零线，负柱从零线画到数值位置
+    const bh = Math.max(1, Math.abs(zeroY - vY));
     const fill = it.color || (v >= 0 ? color : PALETTE.red);
     bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="2" fill="${fill}" opacity="0.86"><title>${e(labelFormat(it.label))}: ${e(yFormat(v))}</title></rect>`;
     if (i % labelEvery === 0) {

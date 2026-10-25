@@ -200,11 +200,11 @@ function analysisPanel(s) {
     <div class="panel-head"><h2>分析</h2></div>
     <div class="grid-2">
       <div class="chart-box"><h3>按天交易盈亏</h3>
-        ${lineChart({ points: dailyPnl, color: PALETTE.green, xFormat: (v) => String(v).slice(5) })}</div>
+        ${lineChart({ points: dailyPnl, color: PALETTE.green, xFormat: (v) => String(v) })}</div>
       <div class="chart-box"><h3>累计盈亏</h3>
-        ${lineChart({ points: cumPnl, color: PALETTE.blue, xFormat: (v) => String(v).slice(5) })}</div>
+        ${lineChart({ points: cumPnl, color: PALETTE.blue, xFormat: (v) => String(v) })}</div>
       <div class="chart-box"><h3>回撤（滚动峰值）</h3>
-        ${lineChart({ points: ddSeries, color: PALETTE.red, xFormat: (v) => String(v).slice(5) })}
+        ${lineChart({ points: ddSeries, color: PALETTE.red, xFormat: (v) => String(v) })}
         <div class="chart-note">最大回撤 <b class="neg">${fmtMoney(s.drawdown.maxDrawdown, { sign: false })}</b>
           ${s.drawdown.maxDrawdownPct ? `（${fmtPct(s.drawdown.maxDrawdownPct)}）` : ''}
           <span class="muted">· 曲线从 0 起算，百分比为回撤 ÷ 盈利峰值；亏损超过峰值利润时可能大于 100%</span></div></div>
