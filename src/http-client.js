@@ -4,6 +4,8 @@
  * - 优先使用 HTTPS_PROXY / HTTP_PROXY；
  * - 未配置时自动探测本机常见代理端口（7890/7897/10809/1080），
  *   避免国内网络直连交易所超时；可用 TRADELEDGER_AUTO_PROXY=0 关闭；
+ * - 按交易所分流：EXCHANGE_PROXY_HOSTS 列出的域名强制走 EXCHANGE_PROXY；
+ *   其余域名直连被拒（地区封锁/风控页）时自动改走 EXCHANGE_PROXY 并记住；
  * - 本地地址（localhost / 内网）永远直连，不经过代理；
  * - 429 / 5xx 自动重试一次；
  * - 返回 { status, headers, text, json }。
@@ -22,6 +24,28 @@ const PROXY_CANDIDATES = [
 ];
 let proxyCache = { value: undefined, at: 0 };
 const PROXY_TTL = 60_000;
+
+// 直连被拒后自动改走 EXCHANGE_PROXY 的域名（进程内记忆）
+const adaptiveProxied = new Set();
+
+/** 域名后缀匹配：fapi.binance.com 匹配 binance.com */
+export function hostMatchesSuffix(host, suffix) {
+  const h = String(host || '').toLowerCase();
+  const s = String(suffix || '').toLowerCase().trim();
+  if (!s) return false;
+  return h === s || h.endsWith('.' + s);
+}
+
+/** 识别地区封锁/风控拦截页：HTTP 451/418、HTML 错误页、币安 "restricted location" JSON */
+export function wantsFallback(res) {
+  if (!res) return true;
+  if (res.status === 451 || res.status === 418) return true;
+  const text = String(res.text || '');
+  if (res.status === 403 && /<html|text\/html/i.test(text + (res.headers?.['content-type'] || ''))) return true;
+  if (/<html|<!DOCTYPE/i.test(text.slice(0, 400))) return true;
+  if (/restricted location|地区不可用/i.test(text)) return true;
+  return false;
+}
 
 function explicitProxy() {
   return process.env.HTTPS_PROXY || process.env.https_proxy
@@ -171,22 +195,8 @@ function requestViaProxy(proxy, target, { method, headers, body, timeout }) {
         return;
       }
 
-      // CONNECT 只建立了到目标的 TCP 隧道；HTTPS 必须再套一层 TLS。
-      // 这里直接在这条 TLS 流上手写 HTTP/1.1，避免 Agent 重复 connect 导致挂起。
-      tlsSocket = tls.connect({ socket, servername: target.hostname, rejectUnauthorized: true });
-      const chunks = [];
-      tlsSocket.on('data', (c) => { if (!settled) chunks.push(c); });
-      tlsSocket.on('error', (err) => finish(err));
-      tlsSocket.setTimeout(timeout, () => finish(new Error(`请求超时（${timeout}ms）`)));
-      tlsSocket.on('end', () => {
-        try { finish(null, parseTunnelResponse(Buffer.concat(chunks))); } catch (err) { finish(err); }
-      });
-      tlsSocket.on('close', () => {
-        if (!settled) {
-          try { finish(null, parseTunnelResponse(Buffer.concat(chunks))); } catch (err) { finish(err); }
-        }
-      });
-      tlsSocket.on('secureConnect', () => {
+      // https 目标在隧道上套 TLS；http 目标直接在隧道上发明文 HTTP。
+      const writeRequest = () => {
         const payload = body ? String(body) : '';
         const lines = [
           `${method} ${target.pathname}${target.search} HTTP/1.1`,
@@ -200,9 +210,34 @@ function requestViaProxy(proxy, target, { method, headers, body, timeout }) {
         if (payload) lines.push(`Content-Length: ${Buffer.byteLength(payload)}`);
         lines.push('Accept-Encoding: identity');
         lines.push('Connection: close');
-        tlsSocket.write(lines.join('\r\n') + '\r\n\r\n');
-        if (payload) tlsSocket.write(payload);
-      });
+        active.write(lines.join('\r\n') + '\r\n\r\n');
+        if (payload) active.write(payload);
+      };
+      let active = socket;
+      const chunks = [];
+      const onData = (c) => { if (!settled) chunks.push(c); };
+      const onError = (err) => finish(err);
+      const onTimeout = () => finish(new Error(`请求超时（${timeout}ms）`));
+      const onEnd = () => {
+        try { finish(null, parseTunnelResponse(Buffer.concat(chunks))); } catch (err) { finish(err); }
+      };
+      const onClose = () => {
+        if (!settled) {
+          try { finish(null, parseTunnelResponse(Buffer.concat(chunks))); } catch (err) { finish(err); }
+        }
+      };
+      if (target.protocol === 'https:') {
+        tlsSocket = tls.connect({ socket, servername: target.hostname, rejectUnauthorized: true });
+        active = tlsSocket;
+        tlsSocket.on('secureConnect', writeRequest);
+      } else {
+        writeRequest();
+      }
+      active.on('data', onData);
+      active.on('error', onError);
+      active.setTimeout(timeout, onTimeout);
+      active.on('end', onEnd);
+      active.on('close', onClose);
     });
     connectReq.on('timeout', () => {
       connectReq.destroy();
@@ -220,26 +255,65 @@ export async function requestRaw(url, { method = 'GET', headers = {}, body, time
   if (payload) finalHeaders['content-length'] = Buffer.byteLength(payload);
   else if (method === 'POST') finalHeaders['content-length'] = '0';
 
-  const proxy = target.protocol === 'http:' ? '' : await resolveProxy(target.hostname);
-  const run = () => (proxy
-    ? requestViaProxy(new URL(proxy), target, { method, headers: finalHeaders, body: payload, timeout })
-    : requestDirect(target, { method, headers: finalHeaders, body: payload, timeout }));
+  // 按交易所分流：EXCHANGE_PROXY_HOSTS 列出的域名（后缀匹配）强制走 EXCHANGE_PROXY，
+  // 其余域名若直连被拒（地区封锁/风控页），自动改走 EXCHANGE_PROXY 并记住该域名。
+  const exchangeProxy = process.env.EXCHANGE_PROXY || '';
+  const forcedHosts = (process.env.EXCHANGE_PROXY_HOSTS || '').split(/[,\s;]+/).filter(Boolean);
+  const isForced = exchangeProxy && forcedHosts.some((s) => hostMatchesSuffix(target.hostname, s));
+  const isAdaptive = exchangeProxy && !isForced && adaptiveProxied.has(target.hostname);
 
-  let lastErr;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const res = await run();
-      if ((res.status === 429 || res.status >= 500) && attempt < retries) {
-        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
-        continue;
+  let proxy = '';
+  if (isForced || isAdaptive) proxy = exchangeProxy;
+  else if (target.protocol === 'https:') proxy = await resolveProxy(target.hostname);
+  const attemptWith = (p) => {
+    const run = () => (p
+      ? requestViaProxy(new URL(p), target, { method, headers: finalHeaders, body: payload, timeout })
+      : requestDirect(target, { method, headers: finalHeaders, body: payload, timeout }));
+    return (async () => {
+      let lastErr;
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+          const res = await run();
+          if ((res.status === 429 || res.status >= 500) && attempt < retries) {
+            await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+            continue;
+          }
+          return res;
+        } catch (err) {
+          lastErr = err;
+          if (attempt < retries) await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+        }
       }
-      return res;
-    } catch (err) {
-      lastErr = err;
-      if (attempt < retries) await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
-    }
+      throw lastErr;
+    })();
+  };
+
+  let res;
+  let hadError = false;
+  try {
+    res = await attemptWith(proxy);
+  } catch (err) {
+    hadError = true;
+    res = err; // 供下方回退判断使用
   }
-  throw lastErr;
+
+  // 本机出口无法访问（网络失败或地区封锁/风控页）且有备用代理：切换重试并记住域名。
+  // 本地地址不走回退。
+  const canFallback = exchangeProxy && proxy !== exchangeProxy && !isForced && !isAdaptive
+    && !isLocalHost(target.hostname)
+    && (hadError || wantsFallback(res));
+  if (canFallback) {
+    try {
+      const res2 = await attemptWith(exchangeProxy);
+      adaptiveProxied.add(target.hostname);
+      console.warn(`[http] ${target.hostname} 本机出口无法访问，已自动改走 EXCHANGE_PROXY`);
+      if (hadError) return res2;
+      if (!wantsFallback(res2)) return res2;
+      return res; // 代理出口同样被拒，返回直连原结果
+    } catch { if (hadError) throw res; /* 保留直连原结果 */ }
+  }
+  if (hadError) throw res;
+  return res;
 }
 
 export async function requestJson(url, options = {}) {
