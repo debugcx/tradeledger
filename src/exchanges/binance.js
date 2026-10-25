@@ -41,9 +41,10 @@ async function call(path, creds, opts = {}) {
   }
   const baseUrl = opts.baseUrl || BASE;
   const attempt = async () => {
-    const sep = path.includes('?') ? '&' : '?';
-    const query = `${path.split('?')[1] ? `${path.split('?')[1]}&` : ''}recvWindow=5000&timestamp=${Math.round(Date.now() + timeOffsetMs)}`;
-    const url = `${baseUrl}${path.split('?')[0]}${sep}${query}&signature=${hmacHex(creds.apiSecret, query)}`;
+    // 路径里可能已带查询串：统一拼成 path?原有参数&签名参数
+    const [plainPath, existingQuery] = path.split('?');
+    const query = `${existingQuery ? `${existingQuery}&` : ''}recvWindow=5000&timestamp=${Math.round(Date.now() + timeOffsetMs)}`;
+    const url = `${baseUrl}${plainPath}?${query}&signature=${hmacHex(creds.apiSecret, query)}`;
     const res = await requestJson(url, {
       method: 'GET',
       timeout: opts.timeout,
