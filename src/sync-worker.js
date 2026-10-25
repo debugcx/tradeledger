@@ -8,10 +8,50 @@
 import { config } from './config.js';
 import * as store from './store.js';
 import { syncAccount, isSyncing } from './sync.js';
+import { classifyOrderType } from './fills.js';
 
 let timer = null;
 let busy = false;
 const backoff = new Map(); // accountId -> { until, attempts }
+
+/**
+ * 空闲回填：给未分类（order_type=other）的回合补吃挂分类。
+ * 每次只处理 1 笔（OKX 为一次 fills-history 请求），温和限速；
+ * 回填近 85 天内的回合，更早的超出交易所成交保留期、保持 other。
+ */
+async function enrichIdle() {
+  const accounts = store.listAccounts().filter((a) => !a.is_demo && a.exchange !== 'manual');
+  for (const account of accounts) {
+    if (isSyncing(account.id)) continue;
+    const adapter = (await import('./exchanges/index.js')).getExchange(account.exchange);
+    if (!adapter || typeof adapter.fetchEpisodeFills !== 'function') continue;
+    const pending = store.listUnclassifiedEpisodes(account.id, 1);
+    if (!pending.length) continue;
+    const episode = pending[0];
+    try {
+      const creds = store.getAccountCredentials(account.id);
+      const res = await adapter.fetchEpisodeFills({
+        creds, symbol: episode.symbol, market: episode.market || 'futures',
+        fromMs: Date.parse(episode.open_time),
+        toMs: Date.parse(episode.close_time) + 60_000,
+      });
+      if (res?.fills?.length) {
+        const orderType = classifyOrderType(res.fills);
+        if (orderType !== 'other') {
+          store.setTradeOrderType(episode.id, orderType);
+          // 指纹与 routes.detailCacheInputs 一致，详情页可直接命中缓存
+          const inputs = [episode.entry_price, episode.exit_price, episode.size, episode.side,
+            episode.open_time, episode.close_time].join('|');
+          store.saveTradeFillsCache(episode.id, inputs, res.fills);
+        }
+      }
+    } catch (err) {
+      console.error(`[enrich] ${episode.symbol}#${episode.id}: ${err?.message || err}`);
+    }
+    return true; // 处理了一笔
+  }
+  return false;
+}
 
 async function tick() {
   if (busy) return;
@@ -43,6 +83,8 @@ async function tick() {
         console.error(`[sync-worker] ${account.name}: ${err?.message || err}`);
       }
     }
+    // 逐笔回填吃挂分类（每 tick 最多 1 笔，enrichIdle 内部跳过正在同步的账户）
+    await enrichIdle();
   } finally {
     busy = false;
   }

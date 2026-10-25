@@ -244,7 +244,7 @@ function feesPanel(s, funding, rebates = null) {
 
 function orderPanel(s) {
   const rows = s.orderTypes.map((o) => `<tr>
-    <td>${o.key === 'market' ? '市价单' : o.key === 'limit' ? '限价单' : '其他'}</td>
+    <td>${o.key === 'market' ? '市价（吃单）' : o.key === 'limit' ? '限价（挂单）' : o.key === 'mixed' ? '混合（吃挂均有）' : '其他/未知'}</td>
     <td>${fmtNum(o.count)}</td><td>${fmtPct(o.ratio)}</td>
     <td class="${sign(o.pnl)}">${fmtMoney(o.pnl)}</td><td>${fmtPct(o.winRate)}</td>
     <td>${fmtMoney(o.avgWin)}</td><td>${fmtMoney(-o.avgLoss, { sign: false })}</td>

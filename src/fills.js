@@ -11,9 +11,24 @@ const num = (v) => {
 function normalizeOrderType(raw) {
   const s = String(raw || '').toLowerCase();
   if (!s) return 'other';
-  if (s.includes('market') || s.includes('市价')) return 'market';
-  if (s.includes('limit') || s.includes('限价')) return 'limit';
+  if (s.includes('market') || s.includes('市价') || s === 't' || s === 'taker') return 'market';
+  if (s.includes('limit') || s.includes('限价') || s === 'm' || s === 'maker') return 'limit';
   return 'other';
+}
+
+/**
+ * 从逐笔成交聚合整个回合的委托类型：
+ * 全部挂单 → limit（限价/挂单）；全部吃单 → market（市价/吃单）；
+ * 吃挂均有 → mixed（混合）；字段缺失 → other。
+ */
+export function classifyOrderType(fills) {
+  const types = (fills || [])
+    .map((f) => normalizeOrderType(f.orderType ?? f.execType))
+    .filter((t) => t !== 'other');
+  if (!types.length) return 'other';
+  if (types.every((t) => t === 'limit')) return 'limit';
+  if (types.every((t) => t === 'market')) return 'market';
+  return 'mixed';
 }
 
 /** 64 位 FNV 风格指纹（两个 32 位哈希拼接），用于无外部 ID 时去重 */
@@ -106,10 +121,13 @@ export function matchFills(fills, source, { longOnly = false } = {}) {
       const dir = closeSide === 'long' ? 1 : -1;
       const openFee = lot.fee * (take / lot.qty);
       const closeFee = fee * (take / qty);
+      const openType = lot.type || 'other';
+      const closeType = normalizeOrderType(fill.orderType);
+      const known = [openType, closeType].filter((t) => t !== 'other');
       const trade = {
         symbol: fill.symbol,
         side: closeSide,
-        order_type: normalizeOrderType(fill.orderType),
+        order_type: known.length ? classifyOrderType(known.map((t) => ({ orderType: t }))) : 'other',
         size: take,
         notional: lot.price * take,
         entry_price: lot.price,
@@ -144,7 +162,7 @@ export function matchFills(fills, source, { longOnly = false } = {}) {
       const openSide = side === 'buy' ? 'long' : 'short';
       const key = `${fill.symbol}|${openSide}`;
       const arr = lots.get(key) || [];
-      arr.push({ qty: remain, price, time, fee: fee * (remain / qty) });
+      arr.push({ qty: remain, price, time, fee: fee * (remain / qty), type: normalizeOrderType(fill.orderType) });
       lots.set(key, arr);
     }
   }
@@ -197,7 +215,7 @@ export function matchEpisodes(fills, source) {
     const trade = {
       symbol,
       side,
-      order_type: normalizeOrderType(legs[0].orderType),
+      order_type: classifyOrderType(legs),
       size: openQty,
       notional: openNotional,
       entry_price: openNotional / openQty,

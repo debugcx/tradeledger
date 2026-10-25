@@ -38,6 +38,7 @@ import { notesPage, noteViewPage, noteEditPage, symbolNotePage } from './views/n
 import { settingsPage } from './views/settings.js';
 import { exchangeMeta, getExchange } from './exchanges/index.js';
 import { syncAccount, isSyncing } from './sync.js';
+import { classifyOrderType } from './fills.js';
 import { refreshLive, liveSnapshot } from './live.js';
 import { reconcileTrades } from './reconcile.js';
 import {
@@ -559,6 +560,11 @@ async function loadTradeFills(trade) {
     });
     if (!res?.fills?.length) {
       return { unsupported: res?.reason || '该区间没有拉到逐笔成交' };
+    }
+    // 顺手用逐笔的吃挂标记给回合分类（OKX execType / 币安 maker / HL crossed）
+    if (trade.order_type === 'other' && res.fills.some((f) => f.execType || f.orderType)) {
+      const orderType = classifyOrderType(res.fills);
+      if (orderType !== 'other') store.setTradeOrderType(trade.id, orderType);
     }
     store.saveTradeFillsCache(trade.id, inputs, res.fills);
     return { fills: res.fills };

@@ -38,7 +38,8 @@ function toFill(row) {
     // HL 的 fee 是正数支出
     fee: -Math.abs(num(row.fee)),
     time: Number(row.time || 0),
-    orderType: 'other',
+    // crossed=true → 吃单（taker），false → 挂单（maker）
+    orderType: row.crossed === true || String(row.crossed) === 'true' ? 'market' : 'limit',
   };
 }
 

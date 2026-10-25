@@ -412,6 +412,7 @@ export const okx = {
           fee: num(row.fee),
           feeCcy: row.feeCcy || '',
           billId: row.billId || '',
+          execType: String(row.execType || '').toUpperCase(), // T=吃单 M=挂单
         });
       }
       const next = rows[rows.length - 1]?.billId;

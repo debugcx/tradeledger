@@ -938,8 +938,28 @@ export function toggleTradeTag(tradeId, name) {
   return { tag: tag.name, attached: true };
 }
 
-/** 优先复盘队列：还没写复盘笔记的大亏交易（按亏损从大到小） */
-export function listReviewQueue({ threshold = 0, accountId = null, limit = 8 } = {}) {
+/** 更新一笔交易的委托类型（limit=纯挂单 market=纯吃单 mixed=吃挂均有 other=未知） */
+export function setTradeOrderType(tradeId, orderType) {
+  const allowed = ['limit', 'market', 'mixed', 'other'];
+  if (!allowed.includes(orderType)) return;
+  run('UPDATE trades SET order_type = ?, updated_at = ? WHERE id = ?', orderType, nowIso(), Number(tradeId));
+}
+
+/** 未分类（other）的 API 回合，最新优先——供后台逐笔补充吃挂分类。
+ *  只取近 85 天：交易所逐笔成交保留期最长约 3 个月，更早的已无法分类 */
+export function listUnclassifiedEpisodes(accountId = null, limit = 1) {
+  const params = [new Date(Date.now() - 85 * 86400_000).toISOString()];
+  let sql = `SELECT tr.id, tr.symbol, tr.market, tr.side, tr.entry_price, tr.exit_price, tr.size,
+      tr.open_time, tr.close_time, a.exchange
+    FROM trades tr JOIN accounts a ON a.id = tr.account_id
+    WHERE tr.source = 'api' AND tr.order_type = 'other' AND tr.close_time >= ?`;
+  if (accountId) { sql += ' AND tr.account_id = ?'; params.push(Number(accountId)); }
+  sql += ' ORDER BY tr.close_time DESC LIMIT ?';
+  params.push(Math.max(1, Math.min(50, Number(limit) || 1)));
+  return all(sql, ...params);
+}
+
+/** 优先复盘队列：还没写复盘笔记的大亏交易（按亏损从大到小） */export function listReviewQueue({ threshold = 0, accountId = null, limit = 8 } = {}) {
   const params = [Number(threshold)];
   let sql = `SELECT tr.*, a.name AS account_name, a.exchange AS account_exchange
     FROM trades tr JOIN accounts a ON a.id = tr.account_id

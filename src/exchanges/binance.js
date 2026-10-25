@@ -84,6 +84,8 @@ function toFill(row) {
     side: String(row.side).toUpperCase() === 'BUY' ? 'buy' : 'sell',
     price: num(row.price),
     qty: num(row.qty),
+    // maker=true → 挂单（限价），false → 吃单（市价）
+    orderType: row.maker === true || String(row.maker) === 'true' ? 'limit' : 'market',
     fee,
     time: Number(row.time || 0),
     orderType: 'other',

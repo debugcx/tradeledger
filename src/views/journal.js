@@ -160,7 +160,7 @@ export function journalPage({ user, trades, filters, tags, symbols, pagination, 
     <td><a href="/dashboard/journal/${t.id}"><b>${e(t.symbol)}</b></a>
       <div class="muted small">${t.market === 'spot' ? '现货' : '合约'} · <a href="/dashboard/notes/symbol/${encodeURIComponent(t.symbol)}">档案</a></div></td>
     <td><span class="side-tag ${t.side}">${t.side === 'long' ? '做多' : '做空'}</span></td>
-    <td>${t.order_type === 'limit' ? '限价' : t.order_type === 'market' ? '市价' : '其他'}</td>
+    <td>${t.order_type === 'limit' ? '挂单' : t.order_type === 'market' ? '吃单' : t.order_type === 'mixed' ? '混合' : '—'}</td>
     <td>${fmtPrice(t.entry_price)} → ${fmtPrice(t.exit_price)}</td>
     <td>${fmtMoney(t.notional, { sign: false })}</td>
     <td class="${sign(t.pnl)} strong">${fmtMoney(t.pnl)}</td>
@@ -236,7 +236,7 @@ function tradeForm({ action, trade = {}, accounts, tags, error, submitLabel }) {
       </label>
       <label class="field"><span>订单类型</span>
         <select name="order_type">
-          ${['market', 'limit', 'other'].map((v) => `<option value="${v}" ${(trade.order_type || 'market') === v ? 'selected' : ''}>${v === 'market' ? '市价单' : v === 'limit' ? '限价单' : '其他'}</option>`).join('')}
+          ${['market', 'limit', 'mixed', 'other'].map((v) => `<option value="${v}" ${(trade.order_type || 'market') === v ? 'selected' : ''}>${v === 'market' ? '市价单（吃单）' : v === 'limit' ? '限价单（挂单）' : v === 'mixed' ? '混合' : '其他'}</option>`).join('')}
         </select>
       </label>
       <label class="field"><span>账户</span>
@@ -384,7 +384,7 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, notice,
           <div class="stat-item"><span class="stat-label">开仓 → 平仓</span><span class="stat-value">${fmtPrice(trade.entry_price)} → ${fmtPrice(trade.exit_price)}</span></div>
           <div class="stat-item"><span class="stat-label">数量</span><span class="stat-value">${fmtNum(trade.size, 6)}</span></div>
           <div class="stat-item"><span class="stat-label">名义价值</span><span class="stat-value">${fmtMoney(trade.notional, { sign: false })}</span></div>
-          <div class="stat-item"><span class="stat-label">订单类型</span><span class="stat-value">${trade.order_type === 'limit' ? '限价单' : trade.order_type === 'market' ? '市价单' : '其他'}</span></div>
+          <div class="stat-item"><span class="stat-label">订单类型</span><span class="stat-value">${trade.order_type === 'limit' ? '限价（纯挂单）' : trade.order_type === 'market' ? '市价（纯吃单）' : trade.order_type === 'mixed' ? '混合（吃挂均有）' : '其他/未知'}</span></div>
         </div>
         <div class="stat-col">
           <div class="stat-item"><span class="stat-label">开仓时间</span><span class="stat-value small">${e(fmtDateTime(trade.open_time))}</span></div>
