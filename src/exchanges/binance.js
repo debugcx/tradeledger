@@ -28,7 +28,8 @@ async function syncTimeOffset() {
   const rtt = Date.now() - t0;
   const server = Number(res.json?.serverTime);
   if (!Number.isFinite(server)) throw new Error('Binance 服务器时间返回异常');
-  timeOffsetMs = server - (t0 + rtt / 2);
+  // 四舍五入：时间戳必须是整数毫秒，小数会导致币安报 -1102 malformed
+  timeOffsetMs = Math.round(server - (t0 + rtt / 2));
   timeSyncedAt = Date.now();
   console.error(`[binance] 时钟偏差 ${timeOffsetMs >= 0 ? '+' : ''}${timeOffsetMs}ms，已对齐`);
   return timeOffsetMs;
@@ -41,7 +42,7 @@ async function call(path, creds, opts = {}) {
   const baseUrl = opts.baseUrl || BASE;
   const attempt = async () => {
     const sep = path.includes('?') ? '&' : '?';
-    const query = `${path.split('?')[1] ? `${path.split('?')[1]}&` : ''}recvWindow=5000&timestamp=${Date.now() + timeOffsetMs}`;
+    const query = `${path.split('?')[1] ? `${path.split('?')[1]}&` : ''}recvWindow=5000&timestamp=${Math.round(Date.now() + timeOffsetMs)}`;
     const url = `${baseUrl}${path.split('?')[0]}${sep}${query}&signature=${hmacHex(creds.apiSecret, query)}`;
     const res = await requestJson(url, {
       method: 'GET',

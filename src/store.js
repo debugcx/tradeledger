@@ -974,6 +974,10 @@ export function listUnclassifiedEpisodes(accountId = null, limit = 1) {
 /* ---------------- 网络代理配置（设置页可改，15s 生效） ---------------- */
 
 let netCfgCache = { at: 0, proxy: '', hosts: '' };
+/** 保存代理设置后立即失效缓存，下次请求即用新值 */
+export function resetNetProxyCache() {
+  netCfgCache = { at: 0, proxy: '', hosts: '' };
+}
 setExchangeProxyProvider(() => {
   if (Date.now() - netCfgCache.at > 15000) {
     netCfgCache = {

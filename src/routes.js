@@ -1675,6 +1675,7 @@ route('POST', '/dashboard/settings/net-proxy', (ctx) => requireUser(ctx, async (
   const body = await readForm(c.req);
   store.setMeta('net_exchange_proxy', String(val(body, 'proxy')).trim().slice(0, 300));
   store.setMeta('net_exchange_proxy_hosts', String(val(body, 'hosts')).trim().slice(0, 500));
+  store.resetNetProxyCache();
   return redirect('/dashboard/settings?notice=' + encodeURIComponent('代理设置已保存，约 15 秒内生效'));
 }));
 
