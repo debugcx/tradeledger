@@ -206,7 +206,8 @@ function analysisPanel(s) {
       <div class="chart-box"><h3>回撤（滚动峰值）</h3>
         ${lineChart({ points: ddSeries, color: PALETTE.red, xFormat: (v) => String(v).slice(5) })}
         <div class="chart-note">最大回撤 <b class="neg">${fmtMoney(s.drawdown.maxDrawdown, { sign: false })}</b>
-          ${s.drawdown.maxDrawdownPct ? `（${fmtPct(s.drawdown.maxDrawdownPct)}）` : ''}</div></div>
+          ${s.drawdown.maxDrawdownPct ? `（${fmtPct(s.drawdown.maxDrawdownPct)}）` : ''}
+          <span class="muted">· 曲线从 0 起算，百分比为回撤 ÷ 盈利峰值；亏损超过峰值利润时可能大于 100%</span></div></div>
       <div class="chart-box"><h3>按小时交易盈亏</h3>${barChart({ items: hourItems, color: PALETTE.blue })}</div>
       <div class="chart-box"><h3>按星期交易盈亏</h3>${barChart({ items: weekdayItems, color: PALETTE.yellow })}</div>
       <div class="chart-box"><h3>持仓时长分布（笔数）</h3>${barChart({ items: durationCount, color: PALETTE.purple })}</div>

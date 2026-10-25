@@ -666,6 +666,34 @@
     });
   }
 
+  /* 图表点击大图：委托监听（软导航安全），克隆 SVG 进全屏遮罩 */
+  function initChartZoom() {
+    if (document.getElementById('tl-lightbox')) return;
+    var box = document.createElement('div');
+    box.id = 'tl-lightbox';
+    box.innerHTML = '<div class="tl-lightbox-inner"><div class="tl-lightbox-title">点击空白处或按 Esc 关闭</div></div><div class="tl-lightbox-close">×</div>';
+    document.body.appendChild(box);
+
+    var close = function () { box.classList.remove('open'); var inner = box.querySelector('.tl-lightbox-inner svg'); if (inner) inner.remove(); };
+    box.addEventListener('click', function (ev) {
+      if (ev.target === box || ev.target.classList.contains('tl-lightbox-close') || ev.target.classList.contains('tl-lightbox-inner')) close();
+    });
+    document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') close(); });
+    document.addEventListener('click', function (ev) {
+      var svg = ev.target.closest && ev.target.closest('svg.chart, svg.heatmap, svg.donut');
+      if (!svg || box.classList.contains('open')) return;
+      var inner = box.querySelector('.tl-lightbox-inner');
+      var old = inner.querySelector('svg');
+      if (old) old.remove();
+      var panel = svg.closest('.panel');
+      var heading = panel ? panel.querySelector('.panel-head h2') : null;
+      box.querySelector('.tl-lightbox-title').textContent =
+        (heading ? heading.textContent + ' · ' : '') + '点击空白处或按 Esc 关闭';
+      inner.appendChild(svg.cloneNode(true));
+      box.classList.add('open');
+    });
+  }
+
   function initPage() {
     initTheme();
     initTimeDefaults();
@@ -681,6 +709,7 @@
     initMarkdown();
     initAutoSubmit();
     initChartHover();
+    initChartZoom();
   }
 
   /* ---------------- 软导航：只替换主内容，不整页刷新 ---------------- */

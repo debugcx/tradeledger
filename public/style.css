@@ -298,6 +298,30 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; fo
   pointer-events: none; opacity: 0; transition: opacity 0.12s;
 }
 
+/* 图表点击大图 */
+svg.chart, svg.heatmap, svg.donut { cursor: zoom-in; }
+#tl-lightbox {
+  position: fixed; inset: 0; z-index: 10000;
+  background: rgba(6, 10, 18, 0.88); backdrop-filter: blur(3px);
+  display: none; align-items: center; justify-content: center; padding: 18px;
+  cursor: zoom-out;
+}
+#tl-lightbox.open { display: flex; }
+#tl-lightbox .tl-lightbox-inner {
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 14px 16px; max-width: 96vw; max-height: 92vh; overflow: auto;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
+}
+#tl-lightbox .tl-lightbox-inner svg { width: min(92vw, 1500px); height: auto; max-height: 82vh; display: block; }
+#tl-lightbox .tl-lightbox-title {
+  color: var(--text-2); font-size: 12px; margin-bottom: 8px; text-align: right;
+}
+#tl-lightbox .tl-lightbox-close {
+  position: absolute; top: 14px; right: 18px; font-size: 26px; color: var(--text-2);
+  cursor: pointer; user-select: none; line-height: 1;
+}
+#tl-lightbox .tl-lightbox-close:hover { color: var(--text); }
+
 /* 优先复盘队列的快捷标签按钮 */
 .quick-tag-form { display: inline-block; margin: 0; }
 .quick-tag-form .tag-pill {
@@ -743,6 +767,10 @@ td.tags-cell .tag-pill { margin: 0 2px 3px 0; }
   .cal-cell { min-height: 64px; padding: 6px; }
   .cal-pnl { font-size: 11px; }
   .cal-meta { display: none; }
+  /* 宽表格在手机上横向滚动，不撑破布局 */
+  .panel { overflow-x: auto; }
+  .panel .table { min-width: 620px; }
+  .chart-box, .heatmap-box { padding: 10px; }
 }
 
 @media (max-width: 620px) {
