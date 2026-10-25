@@ -1647,6 +1647,10 @@ route('GET', '/dashboard/settings', (ctx) => requireUser(ctx, async (c) => {
       overview: store.statsOverview(),
       dbBytes: dbSizeBytes(),
       seededAt: store.getMeta('seeded_at', ''),
+      net: {
+        proxy: store.getMeta('net_exchange_proxy', ''),
+        hosts: store.getMeta('net_exchange_proxy_hosts', ''),
+      },
       notice: c.query.notice || '',
       error: c.query.error || '',
       backup: {
@@ -1665,6 +1669,13 @@ route('POST', '/dashboard/settings', (ctx) => requireUser(ctx, async (c) => {
   if (body.display_name !== undefined) store.setMeta('display_name', String(val(body, 'display_name')).slice(0, 60));
   if (body.bio !== undefined) store.setMeta('bio', String(val(body, 'bio')).slice(0, 500));
   return redirect('/dashboard/settings?notice=' + encodeURIComponent('已保存'));
+}));
+
+route('POST', '/dashboard/settings/net-proxy', (ctx) => requireUser(ctx, async (c) => {
+  const body = await readForm(c.req);
+  store.setMeta('net_exchange_proxy', String(val(body, 'proxy')).trim().slice(0, 300));
+  store.setMeta('net_exchange_proxy_hosts', String(val(body, 'hosts')).trim().slice(0, 500));
+  return redirect('/dashboard/settings?notice=' + encodeURIComponent('代理设置已保存，约 15 秒内生效'));
 }));
 
 route('POST', '/dashboard/settings/clear-demo', (ctx) => requireUser(ctx, (c) => {

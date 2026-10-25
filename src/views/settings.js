@@ -122,7 +122,7 @@ function backupSection({ config = {}, local = [], remote = null, remoteError = '
   </section>`;
 }
 
-export function settingsPage({ user, overview, dbBytes, seededAt, notice, error, backup = {} }) {
+export function settingsPage({ user, overview, dbBytes, seededAt, notice, error, backup = {}, net = {} }) {
   const demoBox = overview.demoAccounts
     ? `<div class="danger-row">
         <div><b>清除演示数据</b><p class="muted small">删除 ${overview.demoAccounts} 个演示账户及其全部交易，保留真实交易、笔记和标签。</p></div>
@@ -168,6 +168,19 @@ export function settingsPage({ user, overview, dbBytes, seededAt, notice, error,
     </section>
 
     ${backupSection(backup)}
+    <div class="panel-head" style="margin-top:18px"><h2>交易所网络代理</h2></div>
+    <form method="post" action="/dashboard/settings/net-proxy" class="form">
+      <label class="field"><span>代理地址（留空 = 不使用；支持 http:// 与 socks5://，可带账号密码 user:pass@host:port）</span>
+        <input name="proxy" value="${e(net.proxy || '')}" placeholder="例如 socks5://127.0.0.1:7891 或 http://127.0.0.1:7891">
+      </label>
+      <label class="field"><span>生效域名（逗号分隔的后缀，这些域名的流量强制走代理；其余域名直连失败时也会自动回退到代理）</span>
+        <input name="hosts" value="${e(net.hosts || '')}" placeholder="例如 binance.com,bybit.com">
+      </label>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">保存代理设置</button>
+        <span class="muted small">保存后约 15 秒内生效，无需重启；留空则恢复默认（不使用专用代理）</span>
+      </div>
+    </form>
 
     <section class="panel">
       <div class="panel-head"><h2>交易所凭据</h2></div>

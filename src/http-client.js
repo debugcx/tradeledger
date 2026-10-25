@@ -14,6 +14,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import tls from 'node:tls';
+import net from 'node:net';
 
 const TIMEOUT_MS = 15_000;
 const PROXY_CANDIDATES = [
@@ -23,6 +24,19 @@ const PROXY_CANDIDATES = [
   'http://127.0.0.1:1080',
 ];
 let proxyCache = { value: undefined, at: 0 };
+
+// 交易所专用代理的运行时配置提供器（由 store 注册，读 meta；env 作为兜底）
+let exchangeProxyProvider = null;
+export function setExchangeProxyProvider(fn) { exchangeProxyProvider = fn; }
+function exchangeProxyConfig() {
+  if (exchangeProxyProvider) {
+    try {
+      const cfg = exchangeProxyProvider() || {};
+      if (cfg.proxy || cfg.hosts) return { proxy: cfg.proxy || '', hosts: cfg.hosts || '' };
+    } catch { /* 配置读取失败时回落 env */ }
+  }
+  return { proxy: process.env.EXCHANGE_PROXY || '', hosts: process.env.EXCHANGE_PROXY_HOSTS || '' };
+}
 const PROXY_TTL = 60_000;
 
 // 直连被拒后自动改走 EXCHANGE_PROXY 的域名（进程内记忆）
@@ -158,21 +172,9 @@ function parseTunnelResponse(buf) {
   return { status, headers, text: chunked ? decodeChunked(bodyBuf) : bodyBuf.toString('utf8') };
 }
 
-function requestViaProxy(proxy, target, { method, headers, body, timeout }) {
+/** HTTP 代理：CONNECT 建立隧道，返回裸 socket */
+function connectThroughHttpProxy(proxy, target, timeout) {
   return new Promise((resolve, reject) => {
-    let tlsSocket = null;
-    let settled = false;
-    const finish = (err, value) => {
-      if (settled) return;
-      settled = true;
-      if (err) {
-        try { tlsSocket?.destroy(); } catch { /* 忽略 */ }
-        reject(err);
-      } else {
-        resolve(value);
-      }
-    };
-
     const proxyTransport = proxy.protocol === 'https:' ? https : http;
     const auth = proxy.username
       ? `Basic ${Buffer.from(`${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`).toString('base64')}`
@@ -191,61 +193,164 @@ function requestViaProxy(proxy, target, { method, headers, body, timeout }) {
     connectReq.on('connect', (res, socket) => {
       if (res.statusCode !== 200) {
         socket.destroy();
-        finish(new Error(`代理 CONNECT 失败：HTTP ${res.statusCode}`));
+        reject(new Error(`代理 CONNECT 失败：HTTP ${res.statusCode}`));
         return;
       }
-
-      // https 目标在隧道上套 TLS；http 目标直接在隧道上发明文 HTTP。
-      const writeRequest = () => {
-        const payload = body ? String(body) : '';
-        const lines = [
-          `${method} ${target.pathname}${target.search} HTTP/1.1`,
-          `Host: ${target.hostname}`,
-        ];
-        for (const [key, value] of Object.entries(headers)) {
-          if (/^(host|connection|content-length|transfer-encoding|accept-encoding)$/i.test(key)) continue;
-          if (Array.isArray(value)) value.forEach((v) => lines.push(`${key}: ${v}`));
-          else lines.push(`${key}: ${value}`);
-        }
-        if (payload) lines.push(`Content-Length: ${Buffer.byteLength(payload)}`);
-        lines.push('Accept-Encoding: identity');
-        lines.push('Connection: close');
-        active.write(lines.join('\r\n') + '\r\n\r\n');
-        if (payload) active.write(payload);
-      };
-      let active = socket;
-      const chunks = [];
-      const onData = (c) => { if (!settled) chunks.push(c); };
-      const onError = (err) => finish(err);
-      const onTimeout = () => finish(new Error(`请求超时（${timeout}ms）`));
-      const onEnd = () => {
-        try { finish(null, parseTunnelResponse(Buffer.concat(chunks))); } catch (err) { finish(err); }
-      };
-      const onClose = () => {
-        if (!settled) {
-          try { finish(null, parseTunnelResponse(Buffer.concat(chunks))); } catch (err) { finish(err); }
-        }
-      };
-      if (target.protocol === 'https:') {
-        tlsSocket = tls.connect({ socket, servername: target.hostname, rejectUnauthorized: true });
-        active = tlsSocket;
-        tlsSocket.on('secureConnect', writeRequest);
-      } else {
-        writeRequest();
-      }
-      active.on('data', onData);
-      active.on('error', onError);
-      active.setTimeout(timeout, onTimeout);
-      active.on('end', onEnd);
-      active.on('close', onClose);
+      resolve(socket);
     });
     connectReq.on('timeout', () => {
       connectReq.destroy();
-      finish(new Error(`代理连接超时（${timeout}ms）`));
+      reject(new Error(`代理连接超时（${timeout}ms）`));
     });
-    connectReq.on('error', (err) => finish(err));
+    connectReq.on('error', reject);
     connectReq.end();
   });
+}
+
+/** SOCKS5 代理（RFC 1928）：支持无认证与账号密码，域名由代理端解析（socks5h 语义） */
+function connectThroughSocks5(proxy, target, timeout) {
+  return new Promise((resolve, reject) => {
+    const port = Number(target.port || (target.protocol === 'https:' ? 443 : 80));
+    const host = target.hostname;
+    const socket = net.connect({ host: proxy.hostname, port: Number(proxy.port || 1080) });
+    socket.setTimeout(timeout);
+    const chunks = [];
+    let stage = 'greet';
+    const creds = proxy.username
+      ? { user: decodeURIComponent(proxy.username), pass: decodeURIComponent(proxy.password || '') }
+      : null;
+    const fail = (msg) => { socket.destroy(); reject(new Error(msg)); };
+    const onTimeout = () => fail(`SOCKS5 连接超时（${timeout}ms）`);
+    const sendConnect = () => {
+      const isV4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+      const addr = isV4
+        ? Buffer.concat([Buffer.from([1]), Buffer.from(host.split('.').map(Number))])
+        : (() => { const b = Buffer.from(host, 'utf8'); return Buffer.concat([Buffer.from([3, b.length]), b]); })();
+      socket.write(Buffer.concat([Buffer.from([5, 1, 0]), addr, Buffer.from([(port >> 8) & 0xff, port & 0xff])]));
+    };
+    const onData = (d) => {
+      chunks.push(d);
+      const buf = Buffer.concat(chunks);
+      if (stage === 'greet') {
+        if (buf.length < 2) return;
+        if (buf[0] !== 5) return fail('SOCKS5 握手异常：代理未返回 SOCKS5 响应');
+        if (buf[1] === 0) { stage = 'connect'; chunks.length = 0; sendConnect(); }
+        else if (buf[1] === 2 && creds) {
+          stage = 'auth'; chunks.length = 0;
+          const u = Buffer.from(creds.user, 'utf8');
+          const p = Buffer.from(creds.pass, 'utf8');
+          socket.write(Buffer.concat([Buffer.from([1, u.length]), u, Buffer.from([p.length]), p]));
+        } else return fail(creds ? 'SOCKS5 代理拒绝了账号密码认证' : 'SOCKS5 代理要求账号密码认证（代理地址请带 user:pass@）');
+      } else if (stage === 'auth') {
+        if (buf.length < 2) return;
+        if (buf[1] !== 0) return fail('SOCKS5 账号或密码错误');
+        stage = 'connect'; chunks.length = 0; sendConnect();
+      } else if (stage === 'connect') {
+        if (buf.length < 2) return;
+        const rep = buf[1];
+        if (rep !== 0) {
+          const msgs = { 1: '一般性失败', 2: '规则不允许', 3: '网络不可达', 4: '目标主机不可达', 5: '连接被拒绝', 6: 'TTL 超时', 7: '命令不支持', 8: '目标地址类型不支持' };
+          return fail(`SOCKS5 连接目标失败：${msgs[rep] || '错误码 ' + rep}`);
+        }
+        socket.setTimeout(0);
+        socket.off('data', onData);
+        socket.off('error', fail);
+        socket.off('timeout', onTimeout);
+        resolve(socket);
+      }
+    };
+    socket.on('data', onData);
+    socket.on('error', (e) => fail(`SOCKS5 连接失败：${e.message}`));
+    socket.on('timeout', onTimeout);
+    socket.write(creds ? Buffer.from([5, 2, 0, 2]) : Buffer.from([5, 1, 0]));
+  });
+}
+
+function requestViaProxy(proxyStr, target, { method, headers, body, timeout }) {
+  const proxy = new URL(proxyStr);
+  const scheme = proxy.protocol.replace(':', '');
+  const isSocks = scheme === 'socks5' || scheme === 'socks5h' || scheme === 'socks';
+  const openTunnel = () => (isSocks
+    ? connectThroughSocks5(proxy, target, timeout)
+    : connectThroughHttpProxy(proxy, target, timeout));
+
+  return openTunnel().then((socket) => new Promise((resolve, reject) => {
+    let tlsSocket = null;
+    let settled = false;
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      if (err) {
+        try { tlsSocket?.destroy(); } catch { /* 忽略 */ }
+        reject(err);
+      } else {
+        resolve(value);
+      }
+    };
+
+    // https 目标在隧道上套 TLS；http 目标直接在隧道上发明文 HTTP。
+    const writeRequest = () => {
+      const payload = body ? String(body) : '';
+      const lines = [
+        `${method} ${target.pathname}${target.search} HTTP/1.1`,
+        `Host: ${target.hostname}`,
+      ];
+      for (const [key, value] of Object.entries(headers)) {
+        if (/^(host|connection|content-length|transfer-encoding|accept-encoding)$/i.test(key)) continue;
+        if (Array.isArray(value)) value.forEach((v) => lines.push(`${key}: ${v}`));
+        else lines.push(`${key}: ${value}`);
+      }
+      if (payload) lines.push(`Content-Length: ${Buffer.byteLength(payload)}`);
+      lines.push('Accept-Encoding: identity');
+      lines.push('Connection: close');
+      active.write(lines.join('\r\n') + '\r\n\r\n');
+      if (payload) active.write(payload);
+    };
+    let active = socket;
+    const chunks = [];
+    const onData = (c) => {
+      if (settled) return;
+      chunks.push(c);
+      // 响应头完整且 body 达到 Content-Length（或 chunked 终止块到达）即提前完成，
+      // 不依赖服务器响应 Connection: close
+      const buf = Buffer.concat(chunks);
+      const sep = buf.indexOf('\r\n\r\n');
+      if (sep < 0) return;
+      const head = buf.slice(0, sep).toString('latin1');
+      if (/transfer-encoding:\s*chunked/i.test(head)) {
+        if (buf.slice(sep + 4).toString('latin1').endsWith('0\r\n\r\n')) {
+          try { finish(null, parseTunnelResponse(buf)); } catch (err) { finish(err); }
+        }
+        return;
+      }
+      const cl = /content-length:\s*(\d+)/i.exec(head);
+      if (cl && buf.length >= sep + 4 + Number(cl[1])) {
+        try { finish(null, parseTunnelResponse(buf)); } catch (err) { finish(err); }
+      }
+    };
+    const onError = (err) => finish(err);
+    const onTimeout = () => finish(new Error(`请求超时（${timeout}ms）`));
+    const onEnd = () => {
+      try { finish(null, parseTunnelResponse(Buffer.concat(chunks))); } catch (err) { finish(err); }
+    };
+    const onClose = () => {
+      if (!settled) {
+        try { finish(null, parseTunnelResponse(Buffer.concat(chunks))); } catch (err) { finish(err); }
+      }
+    };
+    if (target.protocol === 'https:') {
+      tlsSocket = tls.connect({ socket, servername: target.hostname, rejectUnauthorized: true });
+      active = tlsSocket;
+      tlsSocket.on('secureConnect', writeRequest);
+    } else {
+      writeRequest();
+    }
+    active.on('data', onData);
+    active.on('error', onError);
+    active.setTimeout(timeout, onTimeout);
+    active.on('end', onEnd);
+    active.on('close', onClose);
+  }));
 }
 
 export async function requestRaw(url, { method = 'GET', headers = {}, body, timeout = TIMEOUT_MS, retries = 1 } = {}) {

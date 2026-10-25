@@ -6,6 +6,7 @@ import { all, get, run, tx } from './db.js';
 import { nowIso } from './http.js';
 import { encryptSecret, decryptSecret, hintKey } from './crypto.js';
 import { remainingLots } from './fills.js';
+import { setExchangeProxyProvider } from './http-client.js';
 
 /* ---------------- 账户 ---------------- */
 
@@ -969,6 +970,20 @@ export function listUnclassifiedEpisodes(accountId = null, limit = 1) {
   params.push(Math.max(1, Math.min(20, Number(limit) || 8)));
   return attachTagsToRows(all(sql, ...params));
 }
+
+/* ---------------- 网络代理配置（设置页可改，15s 生效） ---------------- */
+
+let netCfgCache = { at: 0, proxy: '', hosts: '' };
+setExchangeProxyProvider(() => {
+  if (Date.now() - netCfgCache.at > 15000) {
+    netCfgCache = {
+      at: Date.now(),
+      proxy: getMeta('net_exchange_proxy', ''),
+      hosts: getMeta('net_exchange_proxy_hosts', ''),
+    };
+  }
+  return netCfgCache;
+});
 
 /* ---------------- 笔记 ---------------- */
 
