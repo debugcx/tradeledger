@@ -1,6 +1,6 @@
 import { hmacHex512, sha512Hex } from '../crypto.js';
 import { requestJson } from '../http-client.js';
-import { num, matchFills, matchEpisodes, toSymbol, splitPair, quoteFee, SPOT_QUOTES, windowsDescending, marketCache, cacheGet, cachePut } from './common.js';
+import { num, matchFills, matchEpisodes, toSymbol, splitPair, quoteFee, isSupportedSpotSymbol, SPOT_QUOTES, windowsDescending, marketCache, cacheGet, cachePut } from './common.js';
 
 const ledgerCache = marketCache('gate:monthly-ledger');
 
@@ -302,44 +302,57 @@ export const gate = {
       } catch { /* 拿不到余额就不猜交易对 */ }
     }
 
+    const errors = [];
+    const seen = new Set();
     for (const pair of [...new Set(pairs)]) {
       if (fills.length >= cap) break;
       for (const w of windowsDescending(fromMs, toMs, 30 * 86400_000)) {
-        for (let offset = 0; offset < 5000 && fills.length < cap; offset += 1000) {
+        // Gate v4 现货 my_trades 用 page 分页（offset 会被忽略），每页最多 1000 笔
+        for (let page = 1; page <= 20 && fills.length < cap; page++) {
+          const fromSec = Math.floor(w.from / 1000);
+          // 四舍五入到秒可能把跨度撑过 30 天，这里钳住上限
+          const toSec = Math.min(fromSec + 30 * 86400, Math.ceil(w.to / 1000));
           try {
             const rows = await call('/api/v4/spot/my_trades', {
               currency_pair: pair,
-              from: String(Math.floor(w.from / 1000)),
-              to: String(Math.ceil(w.to / 1000)),
+              from: String(fromSec),
+              to: String(toSec),
               limit: '1000',
-              offset: String(offset),
+              page: String(page),
             }, creds);
-          if (!Array.isArray(rows) || !rows.length) break;
-          for (const row of rows) {
-            const symbol = toSymbol(row.currency_pair);
-            const { base, quote } = splitPair(symbol);
-            const price = num(row.price);
-            const fee = quoteFee(row.fee, row.fee_currency, base, quote, price);
-            fills.push({
-              id: row.id,
-              symbol,
-              side: String(row.side).toLowerCase() === 'buy' ? 'buy' : 'sell',
-              price,
-              qty: num(row.amount),
-              fee: -fee,
-              time: Number(row.create_time || 0) * 1000,
-              orderType: 'other',
-            });
+            if (!Array.isArray(rows) || !rows.length) break;
+            for (const row of rows) {
+              const key = `${pair}:${row.id}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              const symbol = toSymbol(row.currency_pair);
+              if (!isSupportedSpotSymbol(symbol)) continue;
+              const { base, quote } = splitPair(symbol);
+              const price = num(row.price);
+              const fee = quoteFee(row.fee, row.fee_currency, base, quote, price);
+              fills.push({
+                id: row.id,
+                symbol,
+                side: String(row.side).toLowerCase() === 'buy' ? 'buy' : 'sell',
+                price,
+                qty: num(row.amount),
+                fee: -fee,
+                time: Number(row.create_time || 0) * 1000,
+                orderType: 'other',
+              });
+              if (fills.length >= cap) break;
+            }
+            if (rows.length < 1000) break;
+          } catch (err) {
+            errors.push(`${pair}: ${err?.message || err}`);
+            break;
           }
-          if (rows.length < 1000) break;
-        } catch {
-          break;
-        }
         }
         if (fills.length >= cap) break;
       }
     }
-    return { fills: fills.slice(0, cap), nextCursor: null };
+    if (!fills.length && errors.length) throw new Error(errors[0]);
+    return { fills: fills.slice(0, cap), nextCursor: null, errors };
   },
 
   async fetchSpotLive(creds) {

@@ -890,6 +890,26 @@ export function listTagsWithCounts() {
   );
 }
 
+/** 仪表盘「优先复盘」的快捷标签；null 表示未配置，按最常用自动挑 */
+export function getQuickTags() {
+  const raw = getMeta('quick_tags', '');
+  if (!raw) return null;
+  try {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return null;
+    const clean = arr.map((x) => String(x).trim()).filter(Boolean);
+    return clean.length ? clean : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setQuickTags(names) {
+  const clean = [...new Set((names || []).map((x) => String(x).trim().slice(0, 40)).filter(Boolean))].slice(0, 12);
+  setMeta('quick_tags', clean.length ? JSON.stringify(clean) : '');
+  return clean;
+}
+
 export function getOrCreateTag(name) {
   const clean = String(name || '').trim().slice(0, 40);
   if (!clean) throw new Error('标签名不能为空');

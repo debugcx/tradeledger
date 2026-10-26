@@ -16,6 +16,11 @@ const fillCache = marketCache('binance:fills');
 const BASE = process.env.BINANCE_FAPI_BASE || 'https://fapi.binance.com';
 const BASE_SAPI = process.env.BINANCE_SAPI_BASE || 'https://api.binance.com';
 const WINDOW_MS = 7 * 86400_000;
+// 现货 myTrades 的 startTime/endTime 跨度不能超过 24 小时，留 1 小时余量
+const SPOT_WINDOW_MS = 23 * 3600_000;
+// 深回溯用 fromId 升序翻页，每页 1000 笔
+const SPOT_PAGE = 1000;
+const SPOT_MAX_PAGES = 50;
 
 // 本机时钟与币安服务器的偏差（ms）。币安要求 timestamp 不超过服务器时间 1 秒，
 // 本机走快就会报 -1021；用公共接口 /fapi/v1/time 对齐，偏差每 30 分钟刷新一次。
@@ -97,7 +102,8 @@ function toFill(row) {
 export const binance = {
   id: 'binance',
   name: 'Binance',
-  maxLookbackDays: 3650,
+  // 合约成交接口只保留约 6 个月；现货可用 fromId 翻到最早
+  maxLookbackDays: 365,
   maxSpotLookbackDays: 3650,
   fields: [
     { key: 'api_key', label: 'API Key' },
@@ -220,6 +226,8 @@ export const binance = {
   async fetchSpotTrades({ creds, fromMs, toMs, limit, symbols }) {
     const cap = Math.max(100, Number(limit) || 2000);
     const fills = [];
+    const errors = [];
+    const seen = new Set();
     let pairs = (symbols || []).map((s) => String(s).replace(/[\/_-]/g, '').toUpperCase()).filter(Boolean);
 
     // 没有显式配置时，从当前现货余额推导常见 USDT/USDC 交易对
@@ -234,36 +242,81 @@ export const binance = {
       } catch { /* 拿不到余额就不猜交易对 */ }
     }
 
+    const pushRows = (rows, pair) => {
+      for (const row of rows || []) {
+        const time = Number(row.time || 0);
+        if (time < fromMs || time > toMs) continue;
+        const key = `${pair}:${row.id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const symbol = toSymbol(row.symbol);
+        const { base, quote } = splitPair(symbol);
+        const price = num(row.price);
+        const fee = quoteFee(row.commission, row.commissionAsset, base, quote, price);
+        fills.push({
+          id: row.id,
+          symbol,
+          // 现货 myTrades 没有 side 字段，用 isBuyer 判断买卖方向
+          side: row.isBuyer === true || String(row.isBuyer) === 'true' ? 'buy' : 'sell',
+          price,
+          qty: num(row.qty),
+          fee: -fee,
+          time,
+          orderType: row.isMaker === true || String(row.isMaker) === 'true' ? 'limit' : 'market',
+        });
+        if (fills.length >= cap) break;
+      }
+    };
+
     for (const pair of [...new Set(pairs)]) {
       if (fills.length >= cap) break;
       try {
-        const q = new URLSearchParams({
-          symbol: pair,
-          startTime: String(Math.max(0, fromMs)),
-          endTime: String(toMs),
-          limit: '1000',
-        });
-        const rows = await call(`/api/v3/myTrades?${q}`, creds, { baseUrl: BASE_SAPI });
-        if (!Array.isArray(rows)) continue;
-        for (const row of rows) {
-          const symbol = toSymbol(row.symbol);
-          const { base, quote } = splitPair(symbol);
-          const price = num(row.price);
-          const fee = quoteFee(row.commission, row.commissionAsset, base, quote, price);
-          fills.push({
-            id: row.id,
-            symbol,
-            side: String(row.side).toUpperCase() === 'BUY' ? 'buy' : 'sell',
-            price,
-            qty: num(row.qty),
-            fee: -fee,
-            time: Number(row.time || 0),
-            orderType: 'other',
+        if (toMs - fromMs <= SPOT_WINDOW_MS) {
+          // 单窗口足够（增量同步走这里）
+          const q = new URLSearchParams({
+            symbol: pair,
+            startTime: String(Math.max(0, fromMs)),
+            endTime: String(toMs),
+            limit: '1000',
           });
+          pushRows(await call(`/api/v3/myTrades?${q}`, creds, { baseUrl: BASE_SAPI }), pair);
+        } else if (fromMs >= Date.now() - 3 * 86400_000) {
+          // 最近几天：按 23 小时切片
+          for (let end = toMs; end > fromMs && fills.length < cap; end -= SPOT_WINDOW_MS) {
+            const start = Math.max(fromMs, end - SPOT_WINDOW_MS);
+            const q = new URLSearchParams({
+              symbol: pair,
+              startTime: String(start),
+              endTime: String(end),
+              limit: '1000',
+            });
+            pushRows(await call(`/api/v3/myTrades?${q}`, creds, { baseUrl: BASE_SAPI }), pair);
+          }
+        } else {
+          // 深回溯：fromId=0 升序翻页，不受 24 小时窗口限制
+          let fromId = 0;
+          for (let page = 0; page < SPOT_MAX_PAGES && fills.length < cap; page++) {
+            const q = new URLSearchParams({
+              symbol: pair,
+              fromId: String(fromId),
+              limit: String(SPOT_PAGE),
+            });
+            const rows = await call(`/api/v3/myTrades?${q}`, creds, { baseUrl: BASE_SAPI });
+            if (!Array.isArray(rows) || !rows.length) break;
+            pushRows(rows, pair);
+            if (rows.length < SPOT_PAGE) break;
+            const lastId = Number(rows[rows.length - 1].id || 0);
+            if (!lastId || lastId <= fromId) break;
+            fromId = lastId;
+            if (Number(rows[rows.length - 1].time) > toMs) break;
+          }
         }
-      } catch { /* 单个交易对失败不影响其他交易对 */ }
+      } catch (err) {
+        errors.push(`${pair}: ${err?.message || err}`);
+      }
     }
-    return { fills: fills.slice(0, cap), nextCursor: null };
+    if (!fills.length && errors.length) throw new Error(errors[0]);
+    return { fills: fills.slice(0, cap), nextCursor: null, errors };
   },
 
   async fetchSpotLive(creds) {

@@ -216,9 +216,12 @@ export const bitget = {
       } catch { /* 拿不到余额就不猜交易对 */ }
     }
 
+    const errors = [];
+    const seen = new Set();
     for (const pair of [...new Set(pairs)]) {
       if (fills.length >= cap) break;
-      for (const w of windowsDescending(fromMs, toMs, 30 * 86400_000)) {
+      // 成交接口的时间跨度限制较严，统一按 7 天切片（7/30 天限制均安全）
+      for (const w of windowsDescending(fromMs, toMs, 7 * 86400_000)) {
         let idLessThan = '';
         for (let page = 0; page < 20 && fills.length < cap; page++) {
           try {
@@ -229,37 +232,43 @@ export const bitget = {
               limit: '100',
               ...(idLessThan ? { idLessThan: String(idLessThan) } : {}),
             }, creds);
-          const rows = Array.isArray(payload) ? payload : (payload?.list || []);
-          if (!rows.length) break;
-          for (const row of rows) {
-            const symbol = toSymbol(pair);
-            if (!isSupportedSpotSymbol(symbol)) continue;
-            const { base, quote } = splitPair(symbol);
-            const price = num(row.price);
-            const details = Array.isArray(row.feeDetail) ? row.feeDetail : [];
-            const feeCost = details.reduce((acc, d) => acc + quoteFee(d.totalFee ?? d.fee, d.feeCoin, base, quote, price), 0);
-            fills.push({
-              id: row.tradeId,
-              symbol,
-              side: String(row.side).toLowerCase() === 'buy' ? 'buy' : 'sell',
-              price,
-              qty: num(row.size ?? row.baseVolume),
-              fee: -feeCost,
-              time: Number(row.cTime || 0),
-              orderType: row.orderType,
-            });
+            const rows = Array.isArray(payload) ? payload : (payload?.list || []);
+            if (!rows.length) break;
+            for (const row of rows) {
+              const key = `${pair}:${row.tradeId}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              const symbol = toSymbol(pair);
+              if (!isSupportedSpotSymbol(symbol)) continue;
+              const { base, quote } = splitPair(symbol);
+              const price = num(row.price);
+              const details = Array.isArray(row.feeDetail) ? row.feeDetail : [];
+              const feeCost = details.reduce((acc, d) => acc + quoteFee(d.totalFee ?? d.fee, d.feeCoin, base, quote, price), 0);
+              fills.push({
+                id: row.tradeId,
+                symbol,
+                side: String(row.side).toLowerCase() === 'buy' ? 'buy' : 'sell',
+                price,
+                qty: num(row.size ?? row.baseVolume),
+                fee: -feeCost,
+                time: Number(row.cTime || 0),
+                orderType: row.orderType,
+              });
+              if (fills.length >= cap) break;
+            }
+            const lastId = rows[rows.length - 1]?.tradeId;
+            if (rows.length < 100 || !lastId) break;
+            idLessThan = Number(lastId);
+          } catch (err) {
+            errors.push(`${pair}: ${err?.message || err}`);
+            break;
           }
-          const lastId = rows[rows.length - 1]?.tradeId;
-          if (rows.length < 100 || !lastId) break;
-          idLessThan = Number(lastId);
-        } catch {
-          break;
-        }
         }
         if (fills.length >= cap) break;
       }
     }
-    return { fills: fills.slice(0, cap), nextCursor: null };
+    if (!fills.length && errors.length) throw new Error(errors[0]);
+    return { fills: fills.slice(0, cap), nextCursor: null, errors };
   },
 
   async fetchSpotLive(creds) {

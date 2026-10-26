@@ -1,5 +1,5 @@
 import { requestJson } from '../http-client.js';
-import { num, matchFills, isSupportedSpotSymbol, SPOT_QUOTES, marketCache, cacheGet, cachePut } from './common.js';
+import { num, windowsDescending, matchFills, isSupportedSpotSymbol, SPOT_QUOTES, marketCache, cacheGet, cachePut } from './common.js';
 
 const candleCache = marketCache('hyperliquid:candles');
 const fillCache = marketCache('hyperliquid:fills');
@@ -141,27 +141,51 @@ export const hyperliquid = {
 
   async fetchSpotTrades({ creds, fromMs, toMs, limit }) {
     const cap = Math.max(100, Number(limit) || 2000);
-    const rows = await info({
-      type: 'userFillsByTime',
-      user: creds.wallet,
-      startTime: fromMs,
-      endTime: toMs,
-      aggregateByTime: false,
-    });
     const fills = [];
-    for (const row of Array.isArray(rows) ? rows : []) {
-      const coin = String(row.coin || '').toUpperCase();
-      if (!coin.includes('/') || !isSupportedSpotSymbol(coin)) continue;
-      fills.push({
-        id: row.tid,
-        symbol: coin,
-        side: String(row.side).toUpperCase() === 'B' ? 'buy' : 'sell',
-        price: num(row.px),
-        qty: num(row.sz),
-        fee: -Math.abs(num(row.fee)),
-        time: Number(row.time || 0),
-        orderType: 'other',
+    const seen = new Set();
+    const pushRows = (rows) => {
+      for (const row of Array.isArray(rows) ? rows : []) {
+        const time = Number(row.time || 0);
+        if (time < fromMs || time > toMs) continue;
+        const tid = String(row.tid ?? `${row.coin}:${time}:${row.px}:${row.sz}`);
+        if (seen.has(tid)) continue;
+        seen.add(tid);
+        const coin = String(row.coin || '').toUpperCase();
+        if (!coin.includes('/') || !isSupportedSpotSymbol(coin)) continue;
+        fills.push({
+          id: row.tid,
+          symbol: coin,
+          side: String(row.side).toUpperCase() === 'B' ? 'buy' : 'sell',
+          price: num(row.px),
+          qty: num(row.sz),
+          fee: -Math.abs(num(row.fee)),
+          time,
+          orderType: 'other',
+        });
+        if (fills.length >= cap) return;
+      }
+    };
+    // userFillsByTime 单次最多返回 2000 笔，打满时二分时间范围继续拉
+    const fetchRange = async (from, to, depth = 0) => {
+      if (fills.length >= cap) return;
+      const rows = await info({
+        type: 'userFillsByTime',
+        user: creds.wallet,
+        startTime: from,
+        endTime: to,
+        aggregateByTime: false,
       });
+      const list = Array.isArray(rows) ? rows : [];
+      pushRows(list);
+      if (list.length >= 2000 && depth < 8 && to - from > 3600_000) {
+        const mid = Math.floor((from + to) / 2);
+        await fetchRange(from, mid, depth + 1);
+        await fetchRange(mid + 1, to, depth + 1);
+      }
+    };
+    for (const w of windowsDescending(fromMs, toMs, 30 * 86400_000)) {
+      await fetchRange(w.from, w.to);
+      if (fills.length >= cap) break;
     }
     fills.sort((a, b) => a.time - b.time);
     return { fills: fills.slice(0, cap), nextCursor: null };

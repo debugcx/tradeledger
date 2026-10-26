@@ -66,7 +66,7 @@ function reviewQueuePanel(queue, quickTags, backQuery) {
   if (!queue || !queue.length) {
     return `<section class="panel">
       <div class="panel-head"><h2>优先复盘</h2>
-        <span class="muted small">亏损超过阈值且还没写复盘的交易</span></div>
+        <span class="muted small">亏损超过阈值且还没写复盘的交易 · <a href="/dashboard/tags#quick-tags">管理快捷标签</a></span></div>
       <div class="chart-empty">大亏交易都已写过复盘 ✓</div>
     </section>`;
   }
@@ -92,7 +92,7 @@ function reviewQueuePanel(queue, quickTags, backQuery) {
   }).join('');
   return `<section class="panel">
     <div class="panel-head"><h2>优先复盘</h2>
-      <span class="muted small">按亏损从大到小 · 点标签快速归类，进详情页写复盘</span></div>
+      <span class="muted small">按亏损从大到小 · 点标签快速归类 · <a href="/dashboard/tags#quick-tags">管理快捷标签</a></span></div>
     <div class="table-wrap">
     <table class="table">
       <thead><tr><th>平仓时间</th><th>交易对</th><th>净盈亏</th><th>持仓</th><th>快捷标签</th></tr></thead>

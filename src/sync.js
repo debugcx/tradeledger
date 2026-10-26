@@ -230,6 +230,9 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
             creds, fromMs: sFrom, toMs: now, limit: 2000, symbols,
           });
           const fills = spot?.fills || [];
+          if (spot?.errors?.length) {
+            warnings.push(`现货部分交易对失败：${spot.errors.slice(0, 2).join('；')}`);
+          }
           if (fills.length) {
             spotFillsInserted = store.insertSpotFills(fills, accountId);
             store.recomputeSpotCostBasis(accountId);

@@ -259,7 +259,7 @@ function allTrades() {
   return store.listTrades();
 }
 
-/** 账户同步进度：用「已回溯到的最旧交易」占 180 天窗口的比例近似 */
+/** 账户同步进度：优先用「已回溯到的最旧交易」，没有交易时退回分页游标 */
 function accountProgress() {
   const out = {};
   for (const row of store.accountTradeStats()) {
@@ -270,7 +270,10 @@ function accountProgress() {
     if (pending && state.fromMs && state.toMs) {
       const span = Number(state.toMs) - Number(state.fromMs);
       const oldest = Date.parse(row.oldest_close || '');
+      const cursor = Number(state.cursor) || 0;
+      // 空账户没有 oldest_close，用游标位置表示已扫过的窗口，避免永远卡在 2%
       if (span > 0 && oldest) progress = Math.min(0.98, Math.max(0.02, (Number(state.toMs) - oldest) / span));
+      else if (span > 0 && cursor) progress = Math.min(0.98, Math.max(0.02, (Number(state.toMs) - cursor) / span));
       else progress = 0.02;
     }
     const pct = Math.round(progress * 100);
@@ -329,6 +332,11 @@ route('GET', '/dashboard', (ctx) => requireUser(ctx, (c) => {
       }),
       quickTags: (() => {
         const used = store.listTagsWithCounts();
+        const byName = new Map(used.map((x) => [x.name, x]));
+        const configured = store.getQuickTags();
+        if (configured) {
+          return configured.map((name) => ({ name, count: byName.get(name)?.count || 0, used: byName.has(name) }));
+        }
         const names = used.map((x) => x.name);
         const defaults = ['追高', '逆势', '扛单', '计划内', '计划外'].filter((x) => !names.includes(x));
         return [...used.slice(0, 6).map((x) => ({ name: x.name, count: x.count, used: true })),
@@ -1431,8 +1439,11 @@ route('GET', '/dashboard/tags', (ctx) => requireUser(ctx, (c) => html(page({
   body: tagsPage({
     user: c.user,
     tags: store.listTags(),
+    tagsWithCounts: store.listTagsWithCounts(),
+    quickTags: store.getQuickTags(),
     stats: analyze(allTrades()),
     error: c.query.error || '',
+    notice: c.query.notice || '',
   }),
 }))));
 
@@ -1447,6 +1458,16 @@ route('POST', '/dashboard/tags/delete', (ctx) => requireUser(ctx, async (c) => {
   const body = await readForm(c.req);
   store.deleteTag(Number(val(body, 'id')));
   return redirect('/dashboard/tags');
+}));
+
+route('POST', '/dashboard/tags/quick-tags', (ctx) => requireUser(ctx, async (c) => {
+  const body = await readForm(c.req);
+  const picked = list(body, 'tags');
+  const fresh = String(val(body, 'new_tags') || '').split(/[,，;；\s]+/).map((x) => x.trim()).filter(Boolean);
+  const names = [...new Set([...picked, ...fresh].map((x) => String(x).trim()).filter(Boolean))];
+  for (const name of names) store.getOrCreateTag(name);
+  store.setQuickTags(names);
+  return redirect('/dashboard/tags?notice=' + encodeURIComponent('快捷标签已保存') + '#quick-tags');
 }));
 
 const NOTES_PAGE_SIZE = 24;
