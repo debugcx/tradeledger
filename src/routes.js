@@ -115,6 +115,7 @@ function backupForm(body) {
     webdavDir: val(body, 'webdav_dir'),
     intervalHours: val(body, 'interval_hours'),
     keep: val(body, 'keep'),
+    backupMode: val(body, 'backup_mode'),
     passphrase: val(body, 'passphrase'),
     clearPassphrase: val(body, 'clear_passphrase') === '1',
   };
@@ -1807,7 +1808,10 @@ route('POST', '/dashboard/settings/backup/run', (ctx) => requireUser(ctx, async 
   try {
     backup.saveBackupConfig(backupForm(body));
     const r = await backup.runRemoteBackup({ reason: 'manual' });
-    return backupRedirect(`已上传 ${r.name}（${backup.fmtBytes(r.bytes)}${r.encrypted ? '，已加密' : ''}）`);
+    const size = r.mode === 'incremental'
+      ? `新增 ${backup.fmtBytes(r.uploadedBytes)}，复用 ${r.chunks?.reused ?? 0} 块（快照 ${backup.fmtBytes(r.bytes)}）`
+      : backup.fmtBytes(r.bytes);
+    return backupRedirect(`已上传 ${r.name}（${size}${r.encrypted ? '，已加密' : ''}）`);
   } catch (err) {
     return backupRedirect('', err?.message || String(err));
   }

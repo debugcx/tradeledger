@@ -21,7 +21,8 @@ function backupSection({ config = {}, local = [], remote = null, remoteError = '
   </tr>`).join('');
 
   const remoteRows = (remote || []).map((f) => `<tr>
-    <td class="small"><code>${e(f.name)}</code></td>
+    <td class="small"><code>${e(f.name)}</code>
+      ${f.format === 'chunked' ? '<span class="tag-pill">增量</span>' : ''}</td>
     <td class="small">${e(f.created_at ? fmtDateTime(f.created_at) : '—')}</td>
     <td>${fmtBytes(f.bytes)}</td>
     <td>${f.encrypted ? '已加密' : '<span class="muted">未加密</span>'}</td>
@@ -69,6 +70,7 @@ function backupSection({ config = {}, local = [], remote = null, remoteError = '
     <p class="muted small" style="margin:0 0 8px">
       支持 Nextcloud、坚果云等 WebDAV 服务。坚果云/Nextcloud 请使用「应用密码」，不要用登录密码。
       备份会先 gzip 压缩；设置备份密码后，上传前再用 AES-256-GCM 加密。
+      默认「增量」模式：快照按内容分块，只上传变化的块（首次仍会完整上传）；切回「完整」则每次上传整包。
     </p>
     <form method="post" action="/dashboard/settings/backup/webdav" class="form grid-form">
       <label class="field checkbox-field"><span>本地自动快照</span>
@@ -96,6 +98,12 @@ function backupSection({ config = {}, local = [], remote = null, remoteError = '
       </label>
       <label class="field"><span>远端保留份数</span>
         <input type="number" name="keep" min="1" max="100" value="${Number(config.keep) || 14}">
+      </label>
+      <label class="field"><span>WebDAV 备份模式</span>
+        <select name="backup_mode">
+          <option value="incremental" ${config.backupMode !== 'full' ? 'selected' : ''}>增量（分块去重，推荐）</option>
+          <option value="full" ${config.backupMode === 'full' ? 'selected' : ''}>完整（每次单个压缩包）</option>
+        </select>
       </label>
       <label class="field"><span>备份密码（可选，≥8 位）</span>
         <input type="password" name="passphrase" maxlength="200" placeholder="${config.hasPassphrase ? '已设置，留空不变' : '未设置（上传不加密）'}" autocomplete="new-password">

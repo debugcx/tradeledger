@@ -21,9 +21,14 @@ import { vacuumInto } from './db.js';
 import { fmtBytes } from './http.js';
 import { encryptSecret, decryptSecret } from './crypto.js';
 import { pendingRestoreFile } from './restore.js';
+import { chunkBuffer } from './chunker.js';
 
 const LOCAL_RE = /^tradeledger-\d{8}-\d{6}(?:-\d+)?\.db$/;
 const REMOTE_RE = /^tradeledger-\d{8}-\d{6}(?:-\d+)?\.db\.gz(?:\.enc)?$/;
+// 增量备份：逻辑名沿用快照名，后缀 .db.chunks；分块存在远端 chunks/<sha256> 下
+const CHUNKED_RE = /^tradeledger-\d{8}-\d{6}(?:-\d+)?\.db\.chunks$/;
+const CHUNK_DIR = 'chunks';
+const CHUNK_HASH_RE = /^[a-f0-9]{64}$/;
 const MAGIC = Buffer.from('TLBK1');
 const WEBDAV_TIMEOUT_MS = 30000;
 
@@ -186,6 +191,7 @@ export function getBackupConfig() {
     webdavDir: store.getMeta('backup_webdav_dir', 'TradeLedger'),
     intervalHours: clampInt(store.getMeta('backup_interval_hours', '24'), 1, 720, 24),
     keep: clampInt(store.getMeta('backup_keep', '14'), 1, 100, 14),
+    backupMode: store.getMeta('backup_mode', 'incremental') === 'full' ? 'full' : 'incremental',
     hasPassphrase: Boolean(store.getMeta('backup_passphrase_enc', '')),
 
     lastLocalAt: store.getMeta('backup_last_local_at', ''),
@@ -232,6 +238,8 @@ export function saveBackupConfig(input = {}) {
   store.setMeta('backup_webdav_dir', dir);
   store.setMeta('backup_interval_hours', String(intervalHours));
   store.setMeta('backup_keep', String(keep));
+  // 默认增量（分块去重）；显式选 full 才每次上传整包
+  store.setMeta('backup_mode', input.backupMode === 'full' ? 'full' : 'incremental');
 
   if (input.clearWebdavPassword) store.setMeta('backup_webdav_password_enc', '');
   if (input.webdavPassword) {
@@ -323,6 +331,14 @@ async function ensureRemoteDir(creds) {
   return url;
 }
 
+/** WebDAV 的 PUT 不会自动建父目录：分块上传前先确保 chunks/ 存在 */
+async function ensureRemoteSubdir(dir, name, creds) {
+  const url = appendPath(dir, name);
+  const res = await davRequest(url, { method: 'MKCOL' }, creds);
+  if (![200, 201, 204, 301, 302, 405].includes(res.status)) throw davError(res, '创建目录');
+  return url;
+}
+
 export async function testWebdavConnection() {
   const creds = webdavCredentials();
   if (!creds.webdavUrl) throw new Error('尚未配置 WebDAV 地址');
@@ -379,12 +395,117 @@ export async function listRemoteBackups() {
   const dir = await ensureRemoteDir(creds);
   const manifest = await readManifest(dir, creds);
   const files = manifest.files
-    .filter((f) => f && REMOTE_RE.test(String(f.name || '')))
+    .filter((f) => {
+      const name = String(f?.name || '');
+      return f?.format === 'chunked' ? CHUNKED_RE.test(name) : REMOTE_RE.test(name);
+    })
     .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
   return { dir, files };
 }
 
 let remoteRunning = false;
+
+/** 完整模式：整包 gzip（可选加密）后 PUT 单个文件 */
+async function uploadFull(dir, snap, creds, uploadedAt) {
+  const raw = fs.readFileSync(snap.file);
+  let payload = zlib.gzipSync(raw, { level: 9 });
+  let encrypted = false;
+  if (creds.passphrase) {
+    payload = encryptBuffer(payload, creds.passphrase);
+    encrypted = true;
+  }
+  const name = snap.name.replace(/\.db$/, encrypted ? '.db.gz.enc' : '.db.gz');
+  const res = await davRequest(appendPath(dir, name), {
+    method: 'PUT',
+    body: payload,
+    headers: { 'content-type': 'application/octet-stream' },
+  }, creds);
+  if (!res.ok) throw davError(res, '上传备份');
+  return {
+    entry: { name, bytes: payload.length, sha256: sha256Hex(payload), created_at: uploadedAt, encrypted, source: snap.name },
+    uploadedBytes: payload.length,
+  };
+}
+
+/**
+ * 增量模式：快照按内容分块，只上传清单里没有的块。
+ * 块名 = 明文 SHA-256；块内容 = gzip(明文) [+ AES-GCM]。恢复时逐块校验再拼接。
+ */
+async function uploadChunked(dir, snap, creds, manifest, uploadedAt) {
+  const raw = fs.readFileSync(snap.file);
+  const parts = chunkBuffer(raw);
+  await ensureRemoteSubdir(dir, CHUNK_DIR, creds);
+  const known = new Map(); // 明文 hash → 已存大小
+  for (const f of manifest.files) {
+    for (const c of f.chunks || []) {
+      if (c?.h && CHUNK_HASH_RE.test(String(c.h))) known.set(c.h, Number(c.s) || 0);
+    }
+  }
+  const chunks = [];
+  let uploaded = 0;
+  let reused = 0;
+  let uploadedBytes = 0;
+  for (const part of parts) {
+    const h = sha256Hex(part);
+    if (known.has(h)) {
+      chunks.push({ h, n: part.length, s: known.get(h) });
+      reused++;
+      continue;
+    }
+    let stored = zlib.gzipSync(part, { level: 9 });
+    if (creds.passphrase) stored = encryptBuffer(stored, creds.passphrase);
+    const res = await davRequest(appendPath(dir, CHUNK_DIR, h), {
+      method: 'PUT',
+      body: stored,
+      headers: { 'content-type': 'application/octet-stream' },
+    }, creds);
+    if (!res.ok) throw davError(res, '上传备份分块');
+    chunks.push({ h, n: part.length, s: stored.length });
+    known.set(h, stored.length);
+    uploaded++;
+    uploadedBytes += stored.length;
+  }
+  const entry = {
+    name: snap.name.replace(/\.db$/, '.db.chunks'),
+    format: 'chunked',
+    bytes: raw.length,
+    stored_bytes: chunks.reduce((acc, c) => acc + (Number(c.s) || 0), 0),
+    sha256: sha256Hex(raw),
+    created_at: uploadedAt,
+    encrypted: Boolean(creds.passphrase),
+    chunks,
+    source: snap.name,
+  };
+  return { entry, uploadedBytes, chunks: { total: chunks.length, uploaded, reused } };
+}
+
+/** 按 keep 裁剪远端清单：旧整包直接删文件，旧增量快照删掉不再被引用的分块 */
+async function pruneRemoteEntries(dir, manifest, keep, creds) {
+  const pruned = [];
+  if (manifest.files.length <= keep) return pruned;
+  const remaining = manifest.files.slice(0, keep);
+  const removed = manifest.files.slice(keep);
+  const referenced = new Set();
+  for (const f of remaining) {
+    for (const c of f.chunks || []) if (c?.h) referenced.add(c.h);
+  }
+  const dropChunks = new Set();
+  for (const old of removed) {
+    if (old.format === 'chunked') {
+      for (const c of old.chunks || []) {
+        if (c?.h && !referenced.has(c.h)) dropChunks.add(c.h);
+      }
+    } else {
+      await davRequest(appendPath(dir, old.name), { method: 'DELETE' }, creds).catch(() => null);
+    }
+    pruned.push(old.name);
+  }
+  for (const h of dropChunks) {
+    await davRequest(appendPath(dir, CHUNK_DIR, h), { method: 'DELETE' }, creds).catch(() => null);
+  }
+  manifest.files = remaining;
+  return pruned;
+}
 
 export async function runRemoteBackup({ reason = 'manual' } = {}) {
   if (remoteRunning) throw new Error('已有备份任务在进行中');
@@ -392,54 +513,42 @@ export async function runRemoteBackup({ reason = 'manual' } = {}) {
   try {
     const creds = webdavCredentials();
     if (!creds.webdavEnabled || !creds.webdavUrl) throw new Error('尚未启用 WebDAV 备份');
+    const mode = creds.backupMode === 'full' ? 'full' : 'incremental';
 
     const snap = (reason === 'auto' ? latestFreshSnapshot() : null) || createLocalSnapshot(reason);
-    const raw = fs.readFileSync(snap.file);
-    let payload = zlib.gzipSync(raw, { level: 9 });
-    let encrypted = false;
-    if (creds.passphrase) {
-      payload = encryptBuffer(payload, creds.passphrase);
-      encrypted = true;
-    }
-    const name = snap.name.replace(/\.db$/, encrypted ? '.db.gz.enc' : '.db.gz');
     const dir = await ensureRemoteDir(creds);
     const uploadedAt = new Date().toISOString();
-
-    let res = await davRequest(appendPath(dir, name), {
-      method: 'PUT',
-      body: payload,
-      headers: { 'content-type': 'application/octet-stream' },
-    }, creds);
-    if (!res.ok) throw davError(res, '上传备份');
-
     const manifest = await readManifest(dir, creds);
-    const entry = {
-      name,
-      bytes: payload.length,
-      sha256: sha256Hex(payload),
-      created_at: uploadedAt,
-      encrypted,
-      source: snap.name,
-    };
-    manifest.version = 1;
-    manifest.updated_at = uploadedAt;
-    manifest.files = [entry, ...manifest.files.filter((f) => f.name !== name)];
 
-    const pruned = [];
-    while (manifest.files.length > creds.keep) {
-      const old = manifest.files[manifest.files.length - 1];
-      const del = await davRequest(appendPath(dir, old.name), { method: 'DELETE' }, creds).catch(() => null);
-      if (!del || (!del.ok && del.status !== 404)) break;
-      manifest.files.pop();
-      pruned.push(old.name);
-    }
+    const uploaded = mode === 'incremental'
+      ? await uploadChunked(dir, snap, creds, manifest, uploadedAt)
+      : await uploadFull(dir, snap, creds, uploadedAt);
+    const entry = uploaded.entry;
+
+    manifest.version = 2;
+    manifest.updated_at = uploadedAt;
+    manifest.files = [entry, ...manifest.files.filter((f) => f.name !== entry.name)];
+    const pruned = await pruneRemoteEntries(dir, manifest, creds.keep, creds);
     await writeManifest(dir, manifest, creds);
 
+    const sizeText = mode === 'incremental'
+      ? `新增 ${uploaded.chunks.uploaded} 块 ${fmtBytes(uploaded.uploadedBytes)}，复用 ${uploaded.chunks.reused} 块（快照 ${fmtBytes(entry.bytes)}）`
+      : fmtBytes(entry.bytes);
     store.setMeta('backup_last_remote_at', uploadedAt);
     store.setMeta('backup_last_remote_attempt_at', uploadedAt);
     store.setMeta('backup_last_remote_status', 'ok');
-    store.setMeta('backup_last_remote_message', `${name} · ${fmtBytes(payload.length)}${encrypted ? ' · 已加密' : ' · 未加密'}`);
-    return { ok: true, name, bytes: payload.length, encrypted, pruned, snapshot: snap };
+    store.setMeta('backup_last_remote_message', `${entry.name} · ${sizeText}${entry.encrypted ? ' · 已加密' : ''}`);
+    return {
+      ok: true,
+      name: entry.name,
+      bytes: entry.bytes,
+      uploadedBytes: uploaded.uploadedBytes,
+      encrypted: entry.encrypted,
+      pruned,
+      snapshot: snap,
+      mode,
+      chunks: uploaded.chunks || null,
+    };
   } catch (err) {
     store.setMeta('backup_last_remote_attempt_at', new Date().toISOString());
     store.setMeta('backup_last_remote_status', 'error');
@@ -452,13 +561,35 @@ export async function runRemoteBackup({ reason = 'manual' } = {}) {
 
 export async function downloadRemoteBackup(name) {
   const n = String(name || '');
-  if (!REMOTE_RE.test(n)) throw new Error('远端备份文件名不合法');
+  if (!REMOTE_RE.test(n) && !CHUNKED_RE.test(n)) throw new Error('远端备份文件名不合法');
   const creds = webdavCredentials();
   if (!creds.webdavUrl) throw new Error('尚未配置 WebDAV 地址');
   const dir = await ensureRemoteDir(creds);
   const manifest = await readManifest(dir, creds);
   const entry = manifest.files.find((f) => f.name === n);
   if (!entry) throw new Error('远端备份不存在或已被清理');
+
+  if (entry.format === 'chunked') {
+    if (entry.encrypted && !creds.passphrase) throw new Error('该备份已加密，请先在设置页填写备份密码');
+    if (!Array.isArray(entry.chunks) || !entry.chunks.length) throw new Error('远端备份清单缺少分块信息');
+    const parts = [];
+    for (const c of entry.chunks) {
+      const h = String(c?.h || '');
+      if (!CHUNK_HASH_RE.test(h)) throw new Error('远端备份清单分块信息不合法');
+      const res = await davRequest(appendPath(dir, CHUNK_DIR, h), { method: 'GET' }, creds);
+      if (!res.ok) throw davError(res, '下载备份分块');
+      let buf = Buffer.from(await res.arrayBuffer());
+      if (entry.encrypted) buf = decryptBuffer(buf, creds.passphrase);
+      try { buf = zlib.gunzipSync(buf); } catch { throw new Error('备份分块解压失败，文件可能已损坏'); }
+      if (sha256Hex(buf) !== h) throw new Error('备份分块校验失败：内容与清单不一致');
+      parts.push(buf);
+    }
+    const data = Buffer.concat(parts);
+    if (data.length !== Number(entry.bytes) || sha256Hex(data) !== entry.sha256) {
+      throw new Error('备份校验失败：分块重组后 SHA-256 不一致');
+    }
+    return { entry, buffer: data };
+  }
 
   const res = await davRequest(appendPath(dir, n), { method: 'GET' }, creds);
   if (!res.ok) throw davError(res, '下载备份');

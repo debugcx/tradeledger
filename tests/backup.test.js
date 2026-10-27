@@ -21,6 +21,7 @@ const image = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2,
 function startFakeDav() {
   const files = new Map();
   const deletes = [];
+  const mkcols = [];
   const expectedAuth = 'Basic ' + Buffer.from('u:p').toString('base64');
   const server = http.createServer((req, res) => {
     if (req.headers.authorization !== expectedAuth) {
@@ -31,7 +32,7 @@ function startFakeDav() {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
-      if (req.method === 'MKCOL') { res.writeHead(201); return res.end(); }
+      if (req.method === 'MKCOL') { mkcols.push(p); res.writeHead(201); return res.end(); }
       if (req.method === 'PUT') { files.set(p, Buffer.concat(chunks)); res.writeHead(201); return res.end(); }
       if (req.method === 'GET') {
         if (!files.has(p)) { res.writeHead(404); return res.end(); }
@@ -49,7 +50,7 @@ function startFakeDav() {
     });
   });
   return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => resolve({ server, files, deletes, port: server.address().port }));
+    server.listen(0, '127.0.0.1', () => resolve({ server, files, deletes, mkcols, port: server.address().port }));
   });
 }
 
@@ -102,6 +103,7 @@ test('备份：WebDAV 上传、清单、下载、保留策略与恢复暂存', a
       webdavDir: 'TradeLedger',
       intervalHours: 6,
       keep: 5,
+      backupMode: 'full',
       passphrase: 'backup-pass-123',
       localEnabled: true,
       localIntervalHours: 24,
@@ -139,6 +141,84 @@ test('备份：WebDAV 上传、清单、下载、保留策略与恢复暂存', a
     assert.equal(after.files.length, 1);
     assert.equal(after.files[0].name, second.name);
     assert.ok(dav.deletes.some((p) => p.endsWith(first.name)));
+  } finally {
+    await new Promise((resolve) => dav.server.close(resolve));
+  }
+});
+
+test('增量备份：分块去重、重组校验与保留清理', async () => {
+  const dav = await startFakeDav();
+  try {
+    // 大块随机内容作主体：两次快照之间应大部分分块不变
+    const big = Buffer.alloc(3 * 1024 * 1024);
+    let x = 123456789;
+    for (let i = 0; i < big.length; i++) {
+      x ^= (x << 13) >>> 0; x >>>= 0;
+      x ^= x >>> 17;
+      x ^= (x << 5) >>> 0; x >>>= 0;
+      big[i] = x & 0xff;
+    }
+    store.saveResource({ id: 'big-blob', name: 'big.bin', mime: 'application/octet-stream', size: big.length, data: big });
+
+    const cfg = {
+      webdavEnabled: true,
+      webdavUrl: `http://127.0.0.1:${dav.port}/dav`,
+      webdavUsername: 'u',
+      webdavPassword: 'p',
+      webdavDir: 'TradeLedger',
+      intervalHours: 6,
+      keep: 3,
+      backupMode: 'incremental',
+      passphrase: 'backup-pass-123',
+      localEnabled: true,
+      localIntervalHours: 24,
+      localKeep: 10,
+    };
+    backup.saveBackupConfig(cfg);
+
+    const first = await backup.runRemoteBackup({ reason: 'inc-1' });
+    assert.equal(first.mode, 'incremental');
+    assert.ok(first.name.endsWith('.db.chunks'));
+    assert.equal(first.encrypted, true);
+    assert.ok(first.chunks.total >= 2);
+    assert.equal(first.chunks.uploaded, first.chunks.total);
+    assert.ok(dav.mkcols.some((p) => p.endsWith('/chunks')), '应先创建 chunks 子目录');
+    const chunkFiles = [...dav.files.keys()].filter((p) => p.includes('/chunks/'));
+    assert.equal(chunkFiles.length, first.chunks.total);
+
+    // 只加一笔交易：第二次应复用绝大多数分块，只上传少量新块
+    const account = store.ensureDefaultAccount();
+    store.createTrade({
+      symbol: 'ETH/USDT', side: 'long', size: 2, notional: 200,
+      entry_price: 100, exit_price: 105,
+      open_time: '2026-10-02T00:00:00.000Z', close_time: '2026-10-02T01:00:00.000Z',
+      pnl: 10, fee: -0.1,
+    }, { accountId: account.id });
+    const second = await backup.runRemoteBackup({ reason: 'inc-2' });
+    assert.notEqual(second.name, first.name);
+    assert.ok(second.chunks.reused >= 1, `第二次应复用分块（${second.chunks.reused}/${second.chunks.total}）`);
+    assert.ok(second.chunks.uploaded < second.chunks.total);
+    assert.ok(second.uploadedBytes < first.uploadedBytes);
+
+    // 远端按清单重组后必须与本地快照逐字节一致
+    const dl = await backup.downloadRemoteBackup(second.name);
+    const local = fs.readFileSync(second.snapshot.file);
+    assert.ok(dl.buffer.equals(local));
+    assert.equal(backup.sha256Hex(dl.buffer), dl.entry.sha256);
+    const staged = await backup.stageRestoreFromRemote(second.name);
+    assert.equal(staged.sha256.length, 64);
+    backup.cancelPendingRestore();
+
+    // keep=1：旧快照被裁掉；剩余快照引用的分块必须都还在
+    backup.saveBackupConfig({ ...cfg, keep: 1 });
+    const third = await backup.runRemoteBackup({ reason: 'inc-3' });
+    const listed = await backup.listRemoteBackups();
+    assert.equal(listed.files.length, 1);
+    assert.equal(listed.files[0].name, third.name);
+    const dirPath = new URL(listed.dir).pathname;
+    for (const c of listed.files[0].chunks) {
+      assert.ok(dav.files.has(`${dirPath}/chunks/${c.h}`), `分块 ${c.h.slice(0, 8)} 应仍在远端`);
+    }
   } finally {
     await new Promise((resolve) => dav.server.close(resolve));
   }

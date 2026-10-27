@@ -37,7 +37,10 @@ async function tick() {
 
     try {
       const result = await backup.runRemoteBackup({ reason: 'auto' });
-      console.log(`[backup] WebDAV 已上传 ${result.name}（${backup.fmtBytes(result.bytes)}${result.encrypted ? '，已加密' : ''}）`);
+      const size = result.mode === 'incremental'
+        ? `新增 ${backup.fmtBytes(result.uploadedBytes)}，复用 ${result.chunks?.reused ?? 0} 块`
+        : backup.fmtBytes(result.bytes);
+      console.log(`[backup] WebDAV 已上传 ${result.name}（${size}${result.encrypted ? '，已加密' : ''}）`);
     } catch (err) {
       console.error('[backup] WebDAV 备份失败：', err?.message || err);
     }
