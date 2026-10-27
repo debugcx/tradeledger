@@ -178,7 +178,6 @@ test('周报：空周不抛错', () => {
   assert.equal(review.period.kind, 'week');
   const shifted = shiftWeek(wk, 1);
   assert.equal(shifted.week, 2);
-  assert.equal(isoWeekOf(new Date()).week >= 1, true);
 });
 
 test('周期报告：月报与年报区间、标签与提示词', () => {

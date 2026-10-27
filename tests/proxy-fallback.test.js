@@ -21,8 +21,11 @@ test('wantsFallback：识别地区封锁/风控页', () => {
   assert.equal(wantsFallback({ status: 200, headers: {}, text: '{"code":"0","data":[]}' }), false);
 });
 
-// 端到端回退：需要本机真实代理（7890）。CI/无代理环境自动跳过。
-test('EXCHANGE_PROXY 端到端：直连超时 → 自动走代理', { timeout: 60_000 }, async () => {
+// 端到端回退：需要本机真实代理（7890）+ 真实外网，默认跳过；TL_E2E_PROXY=1 显式开启
+test('EXCHANGE_PROXY 端到端：直连超时 → 自动走代理', {
+  timeout: 60_000,
+  skip: process.env.TL_E2E_PROXY === '1' ? false : '端到端用例需 TL_E2E_PROXY=1 显式开启',
+}, async () => {
   const net = await import('node:net');
   const listening = await new Promise((resolve) => {
     const s = net.connect(7890, '127.0.0.1');

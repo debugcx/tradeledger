@@ -7,8 +7,6 @@
 
 import { matchFills, fingerprintTrade } from './fills.js';
 
-export { hash64, fingerprintTrade } from './fills.js';
-
 export const FIELD_DEFS = [
   {
     key: 'symbol', label: '币种', required: true,

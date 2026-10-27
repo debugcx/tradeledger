@@ -101,7 +101,6 @@ export function fmtDate(iso, withTime = false) {
 }
 
 export const fmtDateTime = (iso) => fmtDate(iso, true);
-export const dayKey = (iso) => fmtDate(iso);
 
 /** <input type="datetime-local"> 需要的本地时间串 */
 export function toLocalInput(iso) {

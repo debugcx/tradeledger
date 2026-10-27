@@ -51,10 +51,6 @@ export function getMasterKey() {
   return key;
 }
 
-export function resetMasterKeyCache() {
-  cachedKey = null;
-}
-
 export function encryptSecret(plain) {
   if (plain === undefined || plain === null || plain === '') return null;
   const iv = crypto.randomBytes(12);

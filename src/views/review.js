@@ -50,7 +50,7 @@ export function reportPage({
       </label>
       <div class="form-actions">
         <button class="btn btn-primary" type="submit" data-report-generate ${modelReady ? '' : 'disabled'}>调用 AI 生成解读</button>
-        <span class="muted small" data-report-status>提示词包含完整报告数据；生成在后台进行，可离开页面</span>
+        <span class="muted small">提示词包含完整报告数据；生成在后台进行，可离开页面</span>
         <a class="btn btn-ghost small" href="/dashboard/review/ai-reports">AI 报告专页</a>
       </div>
       <div class="report-progress" data-report-progress hidden>

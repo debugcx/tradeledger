@@ -38,7 +38,14 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 process.env.OKX_API_BASE = `http://127.0.0.1:${server.address().port}`;
 
 // 用查询串导入，避免与其他测试文件里已缓存的 okx 模块共享 BASE
-const { okx } = await import('../src/exchanges/okx.js?okx-pagination-test');
+const { okx, nextCursorOf } = await import('../src/exchanges/okx.js?okx-pagination-test');
+
+test('OKX positions-history 分页游标：用 uTime+1，不用 posId', () => {
+  assert.equal(nextCursorOf([{ uTime: 1000, posId: 'abc' }], 1), '1001');
+  assert.equal(nextCursorOf([{ uTime: 1000 }], 2), null);
+  assert.equal(nextCursorOf([{ posId: 'abc' }], 1), null);
+  assert.equal(nextCursorOf([{ cTime: '2000' }], 1), '2001');
+});
 
 test('OKX 分页：after 使用时间戳，且不和 end 同时发送', async () => {
   try {

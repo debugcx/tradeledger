@@ -518,9 +518,15 @@
     var resultBox = document.querySelector('[data-report-result]');
     var timer = null;
     var elapsed = 0;
+    // 软导航离开页面时停止轮询，避免后台任务完成后把用户当前页 reload 掉
+    onCleanup(function () {
+      if (timer) { clearTimeout(timer); timer = null; }
+      reloading = false;
+    });
+    var reloading = false;
 
     function stopProgress() {
-      if (timer) clearInterval(timer);
+      if (timer) clearTimeout(timer);
       timer = null;
       if (progress) progress.hidden = true;
       if (btn) { btn.disabled = false; btn.textContent = '调用 AI 生成解读'; }
@@ -540,8 +546,10 @@
           if (!data.ok || !job) { stopProgress(); showProgress('任务状态丢失，请到 AI 报告专页查看'); return; }
           if (job.status === 'done') {
             stopProgress();
+            if (reloading) return;
+            reloading = true;
             showProgress('生成完成，正在刷新页面…');
-            setTimeout(function () { location.reload(); }, 900);
+            setTimeout(function () { if (reloading) location.reload(); }, 900);
           } else if (job.status === 'error') {
             stopProgress();
             showProgress('生成失败：' + (job.error || '未知错误'));

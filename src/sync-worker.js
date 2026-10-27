@@ -13,11 +13,13 @@ import { classifyOrderType } from './fills.js';
 let timer = null;
 let busy = false;
 const backoff = new Map(); // accountId -> { until, attempts }
+const enrichFails = new Map(); // episodeId -> { attempts, nextAt }：分类不出的回合退避，避免每 tick 空拉
 
 /**
  * 空闲回填：给未分类（order_type=other）的回合补吃挂分类。
  * 每次只处理 1 笔（OKX 为一次 fills-history 请求），温和限速；
  * 回填近 85 天内的回合，更早的超出交易所成交保留期、保持 other。
+ * 连续 3 次拿不到有效成交（数据缺口/超保留期）的回合，24 小时内不再重试。
  */
 async function enrichIdle() {
   const accounts = store.listAccounts().filter((a) => !a.is_demo && a.exchange !== 'manual');
@@ -28,6 +30,16 @@ async function enrichIdle() {
     const pending = store.listUnclassifiedEpisodes(account.id, 1);
     if (!pending.length) continue;
     const episode = pending[0];
+    const failed = enrichFails.get(episode.id);
+    if (failed && failed.nextAt > Date.now()) return false; // 队首在退避期，本 tick 跳过
+    const noteFail = () => {
+      const cur = enrichFails.get(episode.id) || { attempts: 0, nextAt: 0 };
+      cur.attempts += 1;
+      if (cur.attempts >= 3) { cur.attempts = 0; cur.nextAt = Date.now() + 24 * 3600_000; }
+      enrichFails.set(episode.id, cur);
+      // 上限保护：长期运行也不让退避表无限增长
+      if (enrichFails.size > 1000) enrichFails.delete(enrichFails.keys().next().value);
+    };
     try {
       const creds = store.getAccountCredentials(account.id);
       const res = await adapter.fetchEpisodeFills({
@@ -43,9 +55,15 @@ async function enrichIdle() {
           const inputs = [episode.entry_price, episode.exit_price, episode.size, episode.side,
             episode.open_time, episode.close_time].join('|');
           store.saveTradeFillsCache(episode.id, inputs, res.fills);
+          enrichFails.delete(episode.id);
+        } else {
+          noteFail();
         }
+      } else {
+        noteFail();
       }
     } catch (err) {
+      noteFail();
       console.error(`[enrich] ${episode.symbol}#${episode.id}: ${err?.message || err}`);
     }
     return true; // 处理了一笔

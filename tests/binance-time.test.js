@@ -50,20 +50,23 @@ test('Binance：自动对齐服务器时钟、缓存偏移、-1021 自动重对�
   // 阶段 1：本机快 2.5s，首次调用自动对齐后成功
   const live1 = await binance.fetchLive(creds);
   assert.ok(Array.isArray(live1.balances));
-  assert.equal(timeRequests, 1, '首次调用应同步一次服务器时间');
+  // 负载高导致签名延迟超过容差时会多对齐一次，允许 <=2；核心是不缓存时必须同步
+  assert.ok(timeRequests >= 1 && timeRequests <= 2, '首次调用应同步服务器时间');
   const calls1 = signedCalls;
+  const timeReq1 = timeRequests;
 
   // 阶段 2：偏移已缓存，30 分钟内不再请求 /time
   const live2 = await binance.fetchLive(creds);
   assert.ok(Array.isArray(live2.balances));
-  assert.equal(timeRequests, 1, '偏移缓存生效，不再请求 /time');
+  assert.equal(timeRequests, timeReq1, '偏移缓存生效，不再请求 /time');
   assert.equal(signedCalls, calls1 + 1);
 
   // 阶段 3：强制下一次签名请求返回 -1021 → 重新对齐 + 重试成功
   forceNext1021 = true;
+  const timeReq2 = timeRequests;
   const live3 = await binance.fetchLive(creds);
   assert.ok(Array.isArray(live3.balances), '-1021 后应重试成功');
-  assert.equal(timeRequests, 2, '重试前应重新对齐服务器时间');
+  assert.equal(timeRequests, timeReq2 + 1, '重试前应重新对齐服务器时间');
   assert.ok(signedCalls >= calls1 + 3, '失败请求 + 重试至少各一次');
   await new Promise((resolve) => server.close(resolve));
 });

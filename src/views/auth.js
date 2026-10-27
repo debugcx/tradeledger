@@ -9,7 +9,7 @@ export function loginPage({ next = '', error = '', dev = false }) {
         <div class="auth-brand"><span class="brand-mark big">TL</span></div>
         <h1>TradeLedger</h1>
         <p class="muted">交易复盘台账 · 本地优先 · 数据自持</p>
-        ${dev ? `<div class="alert alert-info">未设置 <code>TRADEDLEDGER_PASSWORD</code>，当前使用开发密码 <b>demo1234</b>。部署或长期使用前请配置环境变量。</div>` : ''}
+        ${dev ? `<div class="alert alert-info">未设置 <code>TRADELEDGER_PASSWORD</code>，当前使用开发密码 <b>demo1234</b>。部署或长期使用前请配置环境变量。</div>` : ''}
         ${error ? `<div class="alert alert-error">${e(error)}</div>` : ''}
         <form method="post" action="/login" class="form">
           <input type="hidden" name="next" value="${e(next)}">

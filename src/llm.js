@@ -9,8 +9,6 @@
 import { requestJson } from './http-client.js';
 import * as store from './store.js';
 import { encryptSecret, decryptSecret, hintKey } from './crypto.js';
-import { buildWeeklyReview, reviewMarkdown, weekRange, isoWeekOf } from './review.js';
-import { analyze } from './stats.js';
 
 export const LLM_PRESETS = [
   { id: 'openai', label: 'OpenAI / 兼容接口', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', provider: 'openai' },
@@ -137,98 +135,3 @@ export async function callLlm({ messages, config = null, timeout = 90_000 } = {}
   return text;
 }
 
-/* ---------------- 复盘上下文 ---------------- */
-
-const trim = (s, n) => String(s || '').slice(0, n);
-
-function scopeRange(scope, trades, week) {
-  if (scope === 'week') {
-    const wk = week || isoWeekOf();
-    const range = weekRange(wk);
-    return { from: range.from.getTime(), to: range.to.getTime(), label: `${wk.year}-W${String(wk.week).padStart(2, '0')}` };
-  }
-  if (scope === 'all') {
-    const times = (trades || []).map((t) => Date.parse(t.close_time)).filter(Number.isFinite);
-    return { from: times.length ? Math.min(...times) : Date.now(), to: Date.now(), label: '全部历史' };
-  }
-  return { from: Date.now() - 14 * 86400_000, to: Date.now(), label: '最近 14 天' };
-}
-
-export function buildAiContext({ trades = [], notes = [], week = null, scope = 'week', includeNotes = true, instruction = '' }) {
-  const range = scopeRange(scope, trades, week);
-  const filtered = trades.filter((t) => {
-    const ms = Date.parse(t.close_time);
-    return Number.isFinite(ms) && ms >= range.from && ms <= range.to;
-  });
-
-  let context;
-  if (scope === 'week') {
-    const review = buildWeeklyReview(trades, week || isoWeekOf());
-    context = reviewMarkdown(review);
-  } else {
-    const s = analyze(filtered);
-    const slots = s.hourWeekday.flat().filter((c) => c.trades >= 2);
-    const worstSlots = [...slots].sort((a, b) => a.pnl - b.pnl).slice(0, 5);
-    const bestSlots = [...slots].sort((a, b) => b.pnl - a.pnl).slice(0, 5);
-    const tags = s.tagStats.filter((t) => t.count >= 3);
-    const worstTags = [...tags].sort((a, b) => a.expectancy - b.expectancy).slice(0, 5);
-    const bestTags = [...tags].sort((a, b) => b.expectancy - a.expectancy).slice(0, 5);
-    const worstSymbols = [...s.symbols].filter((x) => x.pnl < 0).sort((a, b) => a.pnl - b.pnl).slice(0, 5);
-    const bestSymbols = [...s.symbols].filter((x) => x.pnl > 0).sort((a, b) => b.pnl - a.pnl).slice(0, 5);
-    const lines = [
-      `# 交易复盘上下文（${range.label}）`,
-      '',
-      `区间：${new Date(range.from).toISOString().slice(0, 10)} → ${new Date(range.to).toISOString().slice(0, 10)}`,
-      `交易 ${s.total} 笔，净盈亏 ${s.totalPnl.toFixed(2)}，胜率 ${(s.winRate * 100).toFixed(1)}%，交易预期 ${s.expectancy.toFixed(2)}，最大回撤 ${s.drawdown.maxDrawdown.toFixed(2)}，最大连亏 ${s.maxConsecutiveLoss} 笔。`,
-      '',
-      '## 最差时段',
-      ...(worstSlots.length ? worstSlots.map((c) => `- ${c.weekdayLabel} ${String(c.hour).padStart(2, '0')}:00：${c.pnl.toFixed(2)}，${c.trades} 笔，胜率 ${(c.winRate * 100).toFixed(0)}%`) : ['- 样本不足']),
-      '',
-      '## 最好时段',
-      ...(bestSlots.length ? bestSlots.map((c) => `- ${c.weekdayLabel} ${String(c.hour).padStart(2, '0')}:00：${c.pnl.toFixed(2)}，${c.trades} 笔，胜率 ${(c.winRate * 100).toFixed(0)}%`) : ['- 样本不足']),
-      '',
-      '## 交易预期最差的标签',
-      ...(worstTags.length ? worstTags.map((t) => `- ${t.tag}：预期 ${t.expectancy.toFixed(2)}，${t.count} 笔，总盈亏 ${t.pnl.toFixed(2)}`) : ['- 样本不足']),
-      '',
-      '## 交易预期最好的标签',
-      ...(bestTags.length ? bestTags.map((t) => `- ${t.tag}：预期 ${t.expectancy.toFixed(2)}，${t.count} 笔，总盈亏 ${t.pnl.toFixed(2)}`) : ['- 样本不足']),
-      '',
-      '## 最亏的币种',
-      ...(worstSymbols.length ? worstSymbols.map((x) => `- ${x.symbol}：${x.pnl.toFixed(2)}，${x.count} 笔`) : ['- 无']),
-      '',
-      '## 最赚的币种',
-      ...(bestSymbols.length ? bestSymbols.map((x) => `- ${x.symbol}：${x.pnl.toFixed(2)}，${x.count} 笔`) : ['- 无']),
-    ];
-    context = lines.join('\n');
-  }
-
-  if (includeNotes) {
-    const standalone = (notes || []).slice(0, 10);
-    if (standalone.length) {
-      context += '\n\n# 我的独立笔记\n\n';
-      context += standalone.map((n) => `## ${n.title}（${String(n.updated_at).slice(0, 10)}）\n${trim(n.content, 1500)}`).join('\n\n');
-    }
-    const tradeNotes = filtered
-      .filter((t) => t.note && String(t.note).trim())
-      .sort((a, b) => String(b.note_updated_at || b.close_time).localeCompare(String(a.note_updated_at || a.close_time)))
-      .slice(0, 10);
-    if (tradeNotes.length) {
-      context += '\n\n# 交易复盘笔记\n\n';
-      context += tradeNotes.map((t) => `## ${t.symbol}（${String(t.close_time).slice(0, 10)}，${Number(t.pnl).toFixed(2)}）\n${trim(t.note, 500)}`).join('\n\n');
-    }
-  }
-
-  const system = '你是一名纪律导向的加密货币交易教练。只基于用户提供的复盘数据与笔记作答，' 
-    + '不要编造不存在的交易、指标或新闻。结论要引用具体时段、标签、币种或笔记内容；' 
-    + '如果样本不足，要明确说明。输出使用 Markdown，先给 3 条最重要的结论，再给下周可执行的规则。';
-  const ask = instruction.trim() || '请基于以上数据生成一份复盘：1 个最需要停止的行为、1 个最值得放大的优势，以及下周可执行的 3 条规则。';
-  const user = `${context}\n\n# 我的要求\n\n${ask}`;
-
-  return {
-    system,
-    user: user.slice(0, 40_000),
-    label: range.label,
-    tradeCount: filtered.length,
-    truncated: user.length > 40_000,
-  };
-}

@@ -287,6 +287,8 @@ function migrate(db) {
   db.exec("CREATE INDEX IF NOT EXISTS ix_notes_category ON notes(category, updated_at DESC)");
   db.exec("CREATE INDEX IF NOT EXISTS ix_notes_spot_lookup ON notes(category, account_id, subject)");
   db.exec("CREATE INDEX IF NOT EXISTS ix_trades_symbol ON trades(symbol)");
+  // trade_tags(tag_id)：标签计数与级联删除按 tag 找子行，避免每次临时物化自动索引
+  db.exec("CREATE INDEX IF NOT EXISTS ix_trade_tags_tag ON trade_tags(tag_id)");
   db.exec("DROP INDEX IF EXISTS ux_notes_symbol");
   db.exec("DROP INDEX IF EXISTS ux_notes_spot");
 

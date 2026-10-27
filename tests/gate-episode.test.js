@@ -57,6 +57,26 @@ test('matchEpisodes：同腿穿越零轴时拆成两个回合，不丢数量', (
   assert.ok(Math.abs(trades[1].pnl - 10) < 1e-9); // (105−110)×2×(−1)
 });
 
+test('matchEpisodes：全挂单回合 → limit', () => {
+  const trades = matchEpisodes([
+    { symbol: 'ETH/USDT', side: 'buy', price: 100, qty: 2, fee: 0, time: 1000, orderType: 'limit' },
+    { symbol: 'ETH/USDT', side: 'buy', price: 101, qty: 1, fee: 0, time: 1500, orderType: 'limit' },
+    { symbol: 'ETH/USDT', side: 'sell', price: 110, qty: 3, fee: 0, time: 2000, orderType: 'limit' },
+  ], 'gate');
+  assert.equal(trades.length, 1);
+  assert.equal(trades[0].order_type, 'limit');
+});
+
+test('matchEpisodes：吃挂混合回合 → mixed', () => {
+  const trades = matchEpisodes([
+    { symbol: 'SOL/USDT', side: 'buy', price: 100, qty: 3, fee: 0, time: 1000, orderType: 'limit' },
+    { symbol: 'SOL/USDT', side: 'buy', price: 102, qty: 2, fee: 0, time: 1500, orderType: 'market' },
+    { symbol: 'SOL/USDT', side: 'sell', price: 110, qty: 5, fee: 0, time: 2000, orderType: 'market' },
+  ], 'gate');
+  assert.equal(trades.length, 1);
+  assert.equal(trades[0].order_type, 'mixed');
+});
+
 /* ---------------- Gate 适配器：面值换算 + 回合 + K 线 + 成交明细 ---------------- */
 
 const queries = [];

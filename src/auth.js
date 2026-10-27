@@ -15,10 +15,6 @@ const MAX_FAILURES = 10;
 const LOCK_MS = 5 * 60 * 1000;
 const failures = new Map();
 
-export function isConfigured() {
-  return Boolean(config.password);
-}
-
 export function isDevPassword() {
   return !config.passwordFromEnv;
 }

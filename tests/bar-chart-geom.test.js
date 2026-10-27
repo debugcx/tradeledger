@@ -35,8 +35,7 @@ test('barChart：正负柱均以零线为基准，正柱不再贯穿全图', () 
   const sunVY = padT + h - ((-1728 - min) / span) * h;
   assert.ok(Math.abs(sun.y - zeroY) < 0.5, '负柱顶应在零线');
   assert.ok(Math.abs(sun.h - (sunVY - zeroY)) < 0.5, `负柱高 ${sun.h} 应为 ${ (sunVY - zeroY).toFixed(1) }（零线到数值）`);
-  // 最小值柱：底边应贴到绘图区底部
-  const monVY = padT + h - ((-2504 - min) / span) * h;
+  // 最小值柱：底边贴绘图区底，柱体从零线画到底
   assert.ok(Math.abs(mon.y + mon.h - (padT + h)) < 0.5, '最小值柱底应贴绘图区底');
-  assert.ok(Math.abs(mon.h - (monVY === zeroY ? 0 : zeroY - monVY)) < 0.6 || Math.abs(mon.h - (padT + h - zeroY)) < 0.6);
+  assert.ok(Math.abs(mon.h - (padT + h - zeroY)) < 0.6, '最小值柱应从零线画到绘图区底');
 });

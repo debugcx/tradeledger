@@ -124,11 +124,10 @@ console.log('\n▶ 仪表盘内容');
   record(html.includes('最赚钱的时段') && html.includes('胜率最高的时段'), '热力图附带最佳/最差时段');
   record(html.includes('href="/dashboard/accounts"') && html.includes('href="/dashboard/reconcile"')
     && html.includes('href="/dashboard/review"') && html.includes('href="/dashboard/transfers"')
-    && html.includes('href="/dashboard/spot"') && !html.includes('href="/dashboard/ai"'),
-  '侧栏包含交易所/资金流水/现货/对账/周期报告（无 AI 复盘）');
+    && html.includes('href="/dashboard/spot"'),
+  '侧栏包含交易所/资金流水/现货/对账/周期报告');
   record(html.indexOf('设置与数据') >= 0 && html.indexOf('设置与数据') < html.indexOf('href="/dashboard/reconcile"'),
     '对账已归入「设置与数据」分组');
-  record(!html.includes('现货资产种类'), '现货计数不再用「余额种类」口径');
 }
 
 console.log('\n▶ 日历');
@@ -144,7 +143,6 @@ let summaryBefore = 0;
   const html = await text(await req('/dashboard/journal'));
   record(html.includes('class="pager"'), '有分页条');
   record(html.includes('条 / 共'), '显示分页统计');
-  record(!html.includes('quick-note'), '列表不再有行内复盘输入（复盘在详情页）');
   summaryBefore = (await jsonOf(await req('/api/summary'))).total_trades;
   record(summaryBefore > 0, `演示数据已就绪（${summaryBefore} 笔）`);
 }
@@ -587,7 +585,6 @@ console.log('\n▶ 布局修复');
 {
   const html = await text(await req('/dashboard/transfers'));
   record(html.includes('table-wrap'), '宽表格容器支持横向滚动');
-  record(!html.includes('随账户同步自动更新；需要钱包/资产只读权限'), '旧的断裂 panel-head 文案已合并');
   const spotHtml = await text(await req('/dashboard/spot'));
   record(spotHtml.includes('持仓币种') && spotHtml.includes('计价币余额'), '现货页计数口径与持仓一致');
 }

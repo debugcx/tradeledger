@@ -11,6 +11,7 @@ import { escapeHtml } from './http.js';
 function safeUrl(raw, { image = false } = {}) {
   const url = String(raw || '').trim();
   if (/^https?:\/\//i.test(url)) return url;
+  if (url.startsWith('//')) return ''; // 协议相对地址会继承页面协议外链，拒绝
   if (url.startsWith('/media/')) return url;
   if (!image && (url.startsWith('/') || url.startsWith('#'))) return url;
   if (!image && /^mailto:/i.test(url)) return url;
@@ -140,15 +141,4 @@ export function renderMarkdown(source) {
   }
 
   return out.join('\n');
-}
-
-/** 列表摘要用：去掉 Markdown 标记，保留可读文字 */
-export function stripMarkdown(source) {
-  return String(source || '')
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-    .replace(/[#>*_~`-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
 }

@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 
 import {
   parseCsv, detectDelimiter, autoMap, parseNumber, parseTimeValue,
-  normalizeSide, normalizeOrderType, buildTrades, fingerprintTrade,
+  normalizeSide, normalizeOrderType, buildTrades,
   templateFromMapping, mappingFromTemplate,
 } from '../src/csv.js';
+import { fingerprintTrade } from '../src/fills.js';
 import { analyze, filterTrades, dailyMap } from '../src/stats.js';
 import { tradeBreakdown } from '../src/breakdown.js';
 

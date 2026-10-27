@@ -3,7 +3,7 @@
  */
 
 import { all, get, run, tx } from './db.js';
-import { nowIso } from './http.js';
+import { nowIso, uid } from './http.js';
 import { encryptSecret, decryptSecret, hintKey } from './crypto.js';
 import { remainingLots } from './fills.js';
 import { setExchangeProxyProvider } from './http-client.js';
@@ -666,6 +666,18 @@ export function countTrades() {
   return Number(get('SELECT COUNT(*) AS n FROM trades').n);
 }
 
+/** 只取数量的轻量统计，避免为计数拉全表 */
+export function countTradesBySource(source) {
+  return Number(get('SELECT COUNT(*) AS n FROM trades WHERE source = ?', String(source)).n);
+}
+
+export function countTradesBetween(fromIso, toIso) {
+  return Number(get(
+    'SELECT COUNT(*) AS n FROM trades WHERE close_time >= ? AND close_time <= ?',
+    String(fromIso), String(toIso),
+  ).n);
+}
+
 export function getTrade(id) {
   const row = get(
     `SELECT tr.*, a.name AS account_name, a.exchange AS account_exchange, a.is_demo AS account_is_demo
@@ -806,7 +818,7 @@ export function importTrades(trades, accountId, { upsert = false } = {}) {
     );
     const seen = new Set();
     for (const trade of trades) {
-      const ext = trade.external_id || `csv:${Math.random().toString(36).slice(2)}`;
+      const ext = trade.external_id || `csv:${uid()}`;
       if (seen.has(ext)) { skipped++; continue; }
       const found = exists.get(Number(accountId), ext);
       if (found) {
@@ -1427,7 +1439,9 @@ export function exportTradesCsv() {
     'open_time', 'close_time', 'pnl', 'fee', 'funding', 'external_id', 'tags', 'note',
   ];
   const esc = (v) => {
-    const s = String(v ?? '');
+    let s = String(v ?? '');
+    // 防 CSV 公式注入：电子表格会把 =+-@ 开头的单元格当公式执行
+    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
     return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const lines = [headers.join(',')];

@@ -93,7 +93,3 @@ export function quoteFee(fee, feeAsset, base, quote, price) {
   if (asset === String(base).toUpperCase()) return amount * (num(price) || 0);
   return 0;
 }
-
-export function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}

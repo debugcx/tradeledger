@@ -18,6 +18,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { config } from './config.js';
 import * as store from './store.js';
 import { vacuumInto } from './db.js';
+import { fmtBytes } from './http.js';
 import { encryptSecret, decryptSecret } from './crypto.js';
 import { pendingRestoreFile } from './restore.js';
 
@@ -41,13 +42,8 @@ function clampInt(value, min, max, fallback) {
   return Math.min(max, Math.max(min, Math.trunc(n)));
 }
 
-export function fmtBytes(n) {
-  const v = Number(n) || 0;
-  if (v < 1024) return `${v} B`;
-  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
-  if (v < 1024 * 1024 * 1024) return `${(v / 1024 / 1024).toFixed(2)} MB`;
-  return `${(v / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
+// 格式化统一走 http.js（原实现精度与页面展示不一致，已合并）
+export { fmtBytes };
 
 export function sha256Hex(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
@@ -389,7 +385,6 @@ export async function listRemoteBackups() {
 }
 
 let remoteRunning = false;
-export function isRemoteBackupRunning() { return remoteRunning; }
 
 export async function runRemoteBackup({ reason = 'manual' } = {}) {
   if (remoteRunning) throw new Error('已有备份任务在进行中');

@@ -4,15 +4,7 @@ import http from 'node:http';
 
 process.env.DB_FILE = ':memory:';
 
-const { renderMarkdown, stripMarkdown } = await import('../src/markdown.js');
-const { nextCursorOf } = await import('../src/exchanges/okx.js');
-
-test('OKX positions-history 分页游标：用 uTime+1，不用 posId', () => {
-  assert.equal(nextCursorOf([{ uTime: 1000, posId: 'abc' }], 1), '1001');
-  assert.equal(nextCursorOf([{ uTime: 1000 }], 2), null);
-  assert.equal(nextCursorOf([{ posId: 'abc' }], 1), null);
-  assert.equal(nextCursorOf([{ cTime: '2000' }], 1), '2001');
-});
+const { renderMarkdown } = await import('../src/markdown.js');
 
 test('回溯范围：按交易所上限截断，0 表示全部可用', async () => {
   const { lookbackDaysFor } = await import('../src/sync.js');
@@ -51,10 +43,6 @@ test('Markdown：原始 HTML 与 javascript: 图片被拦截', () => {
   assert.ok(!html.includes('<script>'));
   assert.ok(!/<img[^>]+src="javascript:/i.test(html));
   assert.ok(html.includes('&lt;script&gt;'));
-});
-
-test('stripMarkdown：摘要去掉标记', () => {
-  assert.equal(stripMarkdown('# 标题\n\n**粗体** [链接](/x) ![图](/media/1)'), '标题 粗体 链接');
 });
 
 test('资金费分配、余额/持仓、图片资源与 LLM 配置', async () => {
@@ -170,18 +158,6 @@ test('资金费分配、余额/持仓、图片资源与 LLM 配置', async () =>
   assert.equal(llm.getLlmConfig({ withSecret: true }).apiKey, 'sk-test-9999');
   llm.saveLlmConfig({ temperature: 0.7 });
   assert.equal(llm.getLlmConfig().temperature, 0.7);
-
-  const context = llm.buildAiContext({
-    trades: store.listTrades(),
-    notes: [{ title: '本周总结', content: '不要追高', updated_at: '2026-10-01T09:00:00.000Z' }],
-    scope: 'all',
-    includeNotes: true,
-    instruction: '重点看连亏',
-  });
-  assert.match(context.user, /本周总结/);
-  assert.match(context.user, /不要追高/);
-  assert.match(context.user, /重点看连亏/);
-  assert.match(context.system, /交易教练/);
 
   await assert.rejects(
     () => llm.callLlm({

@@ -362,8 +362,9 @@ export async function requestRaw(url, { method = 'GET', headers = {}, body, time
 
   // 按交易所分流：EXCHANGE_PROXY_HOSTS 列出的域名（后缀匹配）强制走 EXCHANGE_PROXY，
   // 其余域名若直连被拒（地区封锁/风控页），自动改走 EXCHANGE_PROXY 并记住该域名。
-  const exchangeProxy = process.env.EXCHANGE_PROXY || '';
-  const forcedHosts = (process.env.EXCHANGE_PROXY_HOSTS || '').split(/[,\s;]+/).filter(Boolean);
+  // 配置来源：设置页（meta，经 store 注册的 provider）优先，env 兜底。
+  const { proxy: exchangeProxy, hosts: forcedHostsRaw } = exchangeProxyConfig();
+  const forcedHosts = (forcedHostsRaw || '').split(/[,\s;]+/).filter(Boolean);
   const isForced = exchangeProxy && forcedHosts.some((s) => hostMatchesSuffix(target.hostname, s));
   const isAdaptive = exchangeProxy && !isForced && adaptiveProxied.has(target.hostname);
 

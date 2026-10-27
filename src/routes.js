@@ -3,6 +3,7 @@
  */
 
 import fs from 'node:fs';
+import { Readable } from 'node:stream';
 import { config } from './config.js';
 import { dbSizeBytes } from './db.js';
 import { escapeHtml, localInputToIso, uid, fmtNum } from './http.js';
@@ -68,6 +69,9 @@ const redirect = (location, status = 302, headers = {}) => new Response(null, {
 /* ---------------- 表单 ---------------- */
 
 async function readForm(req) {
+  // formData() 会把整个请求缓冲进内存，先按声明长度拒绝超大请求
+  const declared = Number(req.headers.get('content-length') || 0);
+  if (declared > config.maxCsvBytes + 4 * 1024 * 1024) throw new Error('请求体超过大小限制');
   const out = {};
   try {
     const fd = await req.formData();
@@ -166,16 +170,26 @@ function matchRoute(method, pathname) {
     const m = pathname.match(r.regex);
     if (!m) continue;
     const params = {};
-    r.keys.forEach((key, i) => { params[key] = decodeURIComponent(m[i + 1]); });
+    try {
+      r.keys.forEach((key, i) => { params[key] = decodeURIComponent(m[i + 1]); });
+    } catch {
+      return null; // 非法百分号编码按 404 处理，而不是 500
+    }
     return { handler: r.handler, params };
   }
   return null;
 }
 
 function clientIp(req) {
-  return req.headers.get('cf-connecting-ip')
-    || (req.headers.get('x-forwarded-for') || '').split(',')[0].trim()
-    || 'local';
+  // XFF/CF 头可伪造：仅回环监听（本机自用、smoke 模拟多 IP）或显式 TRUST_PROXY=1（部署在可信反代后）才采信
+  const trust = process.env.TRUST_PROXY === '1'
+    || config.host === '127.0.0.1' || config.host === 'localhost' || config.host === '::1';
+  if (trust) {
+    return req.headers.get('cf-connecting-ip')
+      || (req.headers.get('x-forwarded-for') || '').split(',')[0].trim()
+      || 'local';
+  }
+  return 'local';
 }
 
 function isSecure(req) {
@@ -259,6 +273,12 @@ function allTrades() {
   return store.listTrades();
 }
 
+/** 只接受当前账户列表里的 account_id，其余一律忽略 */
+function accountIdFromQuery(query, accounts) {
+  const raw = String(query.account_id || '');
+  return accounts.some((a) => String(a.id) === raw) ? Number(raw) : null;
+}
+
 /** 账户同步进度：优先用「已回溯到的最旧交易」，没有交易时退回分页游标 */
 function accountProgress() {
   const out = {};
@@ -304,7 +324,7 @@ function accountProgress() {
 route('GET', '/dashboard', (ctx) => requireUser(ctx, (c) => {
   const market = ['all', 'futures', 'spot'].includes(c.query.market) ? c.query.market : 'all';
   const accounts = store.listAccounts();
-  const accountId = accounts.some((a) => String(a.id) === String(c.query.account_id || '')) ? Number(c.query.account_id) : null;
+  const accountId = accountIdFromQuery(c.query, accounts);
   let all = allTrades();
   if (accountId) all = all.filter((t) => t.account_id === accountId);
   const trades = market === 'all' ? all : all.filter((t) => (t.market || 'futures') === market);
@@ -358,8 +378,7 @@ route('GET', '/dashboard/calendar', (ctx) => requireUser(ctx, (c) => {
   const year = Math.min(Math.max(Number(c.query.year) || now.getFullYear(), 2000), 2100);
   const month = Math.min(Math.max(Number(c.query.month) || (now.getMonth() + 1), 1), 12);
   const accounts = store.listAccounts();
-  const accountId = accounts.some((a) => String(a.id) === String(c.query.account_id || ''))
-    ? Number(c.query.account_id) : null;
+  const accountId = accountIdFromQuery(c.query, accounts);
   let trades = allTrades();
   if (accountId) trades = trades.filter((t) => t.account_id === accountId);
   return html(page({
@@ -384,7 +403,7 @@ route('GET', '/dashboard/calendar', (ctx) => requireUser(ctx, (c) => {
 
 route('GET', '/dashboard/journal', (ctx) => requireUser(ctx, (c) => {
   const accounts = store.listAccounts();
-  const accountId = accounts.some((a) => String(a.id) === String(c.query.account_id || '')) ? Number(c.query.account_id) : null;
+  const accountId = accountIdFromQuery(c.query, accounts);
   let all = allTrades();
   if (accountId) all = all.filter((t) => t.account_id === accountId);
   const notedCount = all.filter((t) => t.note && String(t.note).trim()).length;
@@ -451,7 +470,7 @@ function parseTradeForm(body, { existing = null } = {}) {
 
   const picked = list(body, 'tags');
   const fresh = String(val(body, 'new_tags')).split(',').map((x) => x.trim()).filter(Boolean);
-  const tags = [...new Set([...picked, ...fresh])];
+  const tags = [...new Set([...picked, ...fresh])].slice(0, 50);
 
   return {
     account_id: Number(val(body, 'account_id')) || undefined,
@@ -645,8 +664,9 @@ route('POST', '/dashboard/journal/:id/delete', (ctx) => requireUser(ctx, (c) => 
 
 route('POST', '/dashboard/journal/:id/note', (ctx) => requireUser(ctx, async (c) => {
   const body = await readForm(c.req);
-  store.setTradeNote(Number(c.params.id), String(val(body, 'note')));
-  return redirect(`/dashboard/journal/${c.params.id}?notice=${encodeURIComponent('复盘已保存')}`);
+  const id = Number(c.params.id);
+  store.setTradeNote(id, String(val(body, 'note')));
+  return redirect(`/dashboard/journal/${id}?notice=${encodeURIComponent('复盘已保存')}`);
 }));
 
 /** 快捷标签切换：仪表盘复盘队列行内按钮用，改完回到原页面 */
@@ -902,8 +922,7 @@ route('GET', '/dashboard/spot/symbol/:symbol', (ctx) => requireUser(ctx, (c) => 
 
 route('GET', '/dashboard/bots', (ctx) => requireUser(ctx, (c) => {
   const accounts = store.listAccounts();
-  const accountId = accounts.some((a) => String(a.id) === String(c.query.account_id || ''))
-    ? Number(c.query.account_id) : null;
+  const accountId = accountIdFromQuery(c.query, accounts);
   const bots = store.listBotTrades(accountId);
   return html(page({
     title: '策略机器人 | TradeLedger',
@@ -960,7 +979,6 @@ route('GET', '/dashboard/transfers', (ctx) => requireUser(ctx, (c) => {
 
 route('GET', '/dashboard/accounts', (ctx) => requireUser(ctx, (c) => {
   const accounts = store.listAccounts();
-  const all = allTrades();
   return html(page({
     title: '交易所 | TradeLedger',
     user: c.user,
@@ -971,7 +989,7 @@ route('GET', '/dashboard/accounts', (ctx) => requireUser(ctx, (c) => {
       runs: store.listSyncRuns(null, 20),
       accountStats: accountProgress(),
       stats: {
-        apiTrades: all.filter((t) => t.source === 'api').length,
+        apiTrades: store.countTradesBySource('api'),
         syncRuns: store.statsOverview().syncRuns,
       },
       notice: c.query.notice || '',
@@ -1138,7 +1156,8 @@ route('POST', '/dashboard/accounts/:id/sync', async (ctx) => {
  * ========================================================= */
 
 route('GET', '/dashboard/reconcile', (ctx) => requireUser(ctx, async (c) => {
-  const report = reconcileTrades(allTrades());
+  const all = allTrades();
+  const report = reconcileTrades(all);
   // 月度对账：应用内净盈亏 vs 交易所账本实结算（支持 fetchMonthlyLedger 的交易所）
   const monthly = [];
   for (const account of store.listAccounts().filter((a) => !a.is_demo)) {
@@ -1146,7 +1165,7 @@ route('GET', '/dashboard/reconcile', (ctx) => requireUser(ctx, async (c) => {
     if (!adapter || typeof adapter.fetchMonthlyLedger !== 'function') continue;
     const entry = { account: { id: account.id, name: account.name, exchange: account.exchange }, rows: [] };
     try {
-      const trades = allTrades().filter((t) => t.account_id === account.id);
+      const trades = all.filter((t) => t.account_id === account.id);
       const byMonth = new Map();
       for (const t of trades) {
         const d = new Date(t.close_time);
@@ -1261,7 +1280,7 @@ route('POST', '/dashboard/review/ai', (ctx) => requireUser(ctx, async (c) => {
   const job = store.createReportJob({ periodKind: period.kind, periodLabel: range.label, promptLen: prompt.length });
   const periodFrom = range.from.toISOString();
   const periodTo = range.to.toISOString();
-  const trades = allTrades().filter((t) => t.close_time >= periodFrom && t.close_time <= periodTo).length;
+  const trades = store.countTradesBetween(periodFrom, periodTo);
   (async () => {
     try {
       const text = await callLlm({ messages: [{ role: 'user', content: prompt }], config, timeout: 300_000 });
@@ -1281,7 +1300,7 @@ route('POST', '/dashboard/review/ai', (ctx) => requireUser(ctx, async (c) => {
         error: String(err?.message || err).slice(0, 500),
       });
     }
-  })().catch(() => {});
+  })().catch((err) => console.error('[report-ai] 后台任务异常:', err?.message || err));
 
   return json({ ok: true, jobId: job.id, statusUrl: `/api/review/ai/status?job=${encodeURIComponent(job.id)}` });
 }));
@@ -1464,7 +1483,7 @@ route('POST', '/dashboard/tags/quick-tags', (ctx) => requireUser(ctx, async (c) 
   const body = await readForm(c.req);
   const picked = list(body, 'tags');
   const fresh = String(val(body, 'new_tags') || '').split(/[,，;；\s]+/).map((x) => x.trim()).filter(Boolean);
-  const names = [...new Set([...picked, ...fresh].map((x) => String(x).trim()).filter(Boolean))];
+  const names = [...new Set([...picked, ...fresh].map((x) => String(x).trim()).filter(Boolean))].slice(0, 12);
   for (const name of names) store.getOrCreateTag(name);
   store.setQuickTags(names);
   return redirect('/dashboard/tags?notice=' + encodeURIComponent('快捷标签已保存') + '#quick-tags');
@@ -1726,12 +1745,15 @@ route('GET', '/dashboard/settings/backup/download', (ctx) => requireUser(ctx, (c
   try {
     const name = String(c.query.name || '');
     const file = backup.resolveLocalSnapshot(name);
-    const data = fs.readFileSync(file);
-    return new Response(data, {
+    const stat = fs.statSync(file);
+    // 大快照（数百 MB）流式返回，避免 readFileSync 阻塞事件循环
+    const stream = fs.createReadStream(file);
+    stream.on('error', () => stream.destroy());
+    return new Response(Readable.toWeb(stream), {
       headers: {
         'content-type': 'application/octet-stream',
         'content-disposition': `attachment; filename="${name}"`,
-        'content-length': String(data.length),
+        'content-length': String(stat.size),
       },
     });
   } catch (err) {

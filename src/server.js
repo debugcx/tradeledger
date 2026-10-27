@@ -16,9 +16,9 @@ const restoreResult = applyPendingRestore();
 const { handle } = await import('./routes.js');
 const { seed } = await import('./seed.js');
 const { closeDb } = await import('./db.js');
-const { startSyncWorker } = await import('./sync-worker.js');
+const { startSyncWorker, stopSyncWorker } = await import('./sync-worker.js');
 const { refreshLive } = await import('./live.js');
-const { startBackupWorker } = await import('./backup-worker.js');
+const { startBackupWorker, stopBackupWorker } = await import('./backup-worker.js');
 const { finishPendingRestore } = await import('./backup.js');
 
 if (restoreResult?.ok) {
@@ -59,7 +59,10 @@ function serveStatic(res, pathname) {
     'content-length': stat.size,
     'cache-control': 'no-cache',
   });
-  fs.createReadStream(file).pipe(res);
+  // stat 与 open 之间文件可能被删/改权限（如备份恢复操作 data 目录），不能让流错误炸掉进程
+  const stream = fs.createReadStream(file);
+  stream.on('error', () => res.destroy());
+  stream.pipe(res);
   return true;
 }
 
@@ -151,6 +154,7 @@ server.listen(config.port, config.host, () => {
 
 function shutdown(signal) {
   console.log(`\n收到 ${signal}，正在关闭…`);
+  try { stopSyncWorker(); stopBackupWorker(); } catch { /* 尚未启动时忽略 */ }
   server.close(() => {
     closeDb();
     process.exit(0);
