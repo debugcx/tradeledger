@@ -28,5 +28,6 @@ export const config = {
   spotRefreshHours: Math.max(1, Number(process.env.SPOT_REFRESH_HOURS || 1)),
   liveRefreshSeconds: Number(process.env.LIVE_REFRESH_SECONDS || 60),
   syncWorkerSeconds: Number(process.env.SYNC_WORKER_SECONDS || 5),
-  seedDemo: process.env.SEED_DEMO !== '0',
+  // 演示数据默认关闭：显式 SEED_DEMO=1 才会在空库时写入 564 笔样例
+  seedDemo: process.env.SEED_DEMO === '1',
 };

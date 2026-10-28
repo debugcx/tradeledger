@@ -1,9 +1,10 @@
 services:
   tradeledger:
+    # 默认拉取 GitHub 发布的镜像；离线或需要本地改动时用 `docker compose build`
+    image: ghcr.io/debugcx/tradeledger:latest
     build:
       context: .
       dockerfile: Dockerfile
-    image: tradeledger:latest
     container_name: tradeledger
     restart: unless-stopped
     env_file: .env

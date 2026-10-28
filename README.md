@@ -174,12 +174,15 @@ mkdir -p data && sudo chown -R 1000:1000 data
 
 ### 2. 启动
 
+镜像由 GitHub Actions 在每次 push 到 main 时自动构建并发布到 ghcr.io（标签 `latest` + 提交号，amd64/arm64 双架构）：
+
 ```bash
 git clone <你的仓库地址> tradeledger
 cd tradeledger
 cp .env.docker.example .env
 # 编辑 .env：TRADELEDGER_PASSWORD、TRADELEDGER_MASTER_KEY、TRADELEDGER_DOMAIN
-docker compose up -d --build
+docker compose up -d          # 直接拉取 ghcr 镜像，服务器上无需构建
+# 拉不动 ghcr（国内网络）或想用本地代码时：docker compose up -d --build
 ```
 
 `.env` 里两个必填项：
@@ -187,7 +190,9 @@ docker compose up -d --build
 - `TRADELEDGER_PASSWORD`：至少 16 位随机密码；
 - `TRADELEDGER_MASTER_KEY`：64 位十六进制，用 `openssl rand -hex 32` 生成。**这个值决定交易所 API 凭据能否解密，迁移时不能换。**
 
-首次启动默认 `SEED_DEMO=0`，不会写入演示数据。访问 `https://你的域名`；本地测试可把域名设为 `localhost`（Caddy 用内部证书，浏览器会提示不受信任）。
+首次启动**不会写入任何演示数据**（`SEED_DEMO` 默认关闭；想先看效果可显式设 `SEED_DEMO=1`）。访问 `https://你的域名`；本地测试可把域名设为 `localhost`（Caddy 用内部证书，浏览器会提示不受信任）。
+
+> 镜像可见性：仓库为私有或包默认私有时，到 GitHub → 右上角头像 → Packages → `tradeledger` → Package settings → Danger Zone → Change visibility → Public，改一次即可让所有服务器匿名 `docker pull`。
 
 ### 3. 迁移已有数据
 
