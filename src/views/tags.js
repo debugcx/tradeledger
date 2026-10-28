@@ -23,19 +23,19 @@ function quickTagsSection(tags = [], quickTags = null) {
   </section>`;
 }
 
-export function tagsPage({ user, tags, tagsWithCounts = [], quickTags = null, stats, error, notice = '' }) {
+export function tagsPage({ user, tags, tagsWithCounts = [], quickTags = null, accounts = [], accountId = null, stats, error, notice = '' }) {
   const maxAbs = Math.max(1, ...stats.tagStats.map((t) => Math.abs(t.expectancy)));
   const rows = stats.tagStats.length ? stats.tagStats.map((t) => {
     const width = (Math.abs(t.expectancy) / maxAbs) * 100;
     return `<tr>
       <td><a class="tag-pill" href="/dashboard/journal?tag=${encodeURIComponent(t.tag)}">${e(t.tag)}</a></td>
-      <td>${fmtNum(t.count)}</td>
-      <td class="${sign(t.pnl)}">${fmtMoney(t.pnl)}</td>
-      <td>${fmtPct(t.winRate)}</td>
-      <td>${fmtMoney(t.avgWin)}</td>
-      <td>${fmtMoney(-t.avgLoss, { sign: false })}</td>
-      <td>${e(fmtDuration(t.avgDuration))}</td>
-      <td class="${sign(t.expectancy)}">${fmtMoney(t.expectancy)}
+      <td class="num">${fmtNum(t.count)}</td>
+      <td class="num ${sign(t.pnl)}">${fmtMoney(t.pnl)}</td>
+      <td class="num">${fmtPct(t.winRate)}</td>
+      <td class="num">${fmtMoney(t.avgWin)}</td>
+      <td class="num">${fmtMoney(-t.avgLoss, { sign: false })}</td>
+      <td class="num">${e(fmtDuration(t.avgDuration))}</td>
+      <td class="num ${sign(t.expectancy)}">${fmtMoney(t.expectancy)}
         <div class="mini-bar"><span style="width:${width.toFixed(1)}%;background:${t.expectancy >= 0 ? '#4ade80' : '#ff6b57'}"></span></div>
       </td>
     </tr>`;
@@ -56,9 +56,15 @@ export function tagsPage({ user, tags, tagsWithCounts = [], quickTags = null, st
     ${quickTagsSection(tagsWithCounts, quickTags)}
     <section class="panel">
       <div class="panel-head"><h2>标签表现</h2>
+        <form method="get" action="/dashboard/tags" class="inline">
+          ${accounts.length > 1 ? `<select name="account_id" onchange="this.form.submit()">
+            <option value="">全部账户</option>
+            ${accounts.map((a) => `<option value="${a.id}" ${String(a.id) === String(accountId) ? 'selected' : ''}>${e(a.name)}（${e(a.exchange)}）</option>`).join('')}
+          </select>` : ''}
+        </form>
         <span class="muted small">按交易预期排序；条形长度 = 预期绝对值</span></div>
       <table class="table">
-        <thead><tr><th>标签</th><th>笔数</th><th>总盈亏</th><th>胜率</th><th>平均盈利</th><th>平均亏损</th><th>平均持仓</th><th>交易预期</th></tr></thead>
+        <thead><tr><th>标签</th><th class="num">笔数</th><th class="num">总盈亏</th><th class="num">胜率</th><th class="num">平均盈利</th><th class="num">平均亏损</th><th class="num">平均持仓</th><th class="num">交易预期</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </section>

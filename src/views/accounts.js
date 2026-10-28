@@ -11,7 +11,7 @@ function statusOf(account) {
   if (account.exchange === 'manual') return { label: '手动', cls: 'muted' };
   if (account.is_demo) return { label: '演示', cls: 'muted' };
   if (account.last_sync_status === 'error') return { label: '同步失败', cls: 'neg' };
-  if (account.sync_done) return { label: '已完整', cls: 'pos' };
+  if (account.sync_done) return { label: '已完成', cls: 'pos' };
   if (account.sync_state) return { label: '回溯中', cls: 'blue' };
   return { label: '未同步', cls: 'muted' };
 }

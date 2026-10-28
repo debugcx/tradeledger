@@ -10,7 +10,7 @@ import { escapeHtml, localInputToIso, uid, fmtNum } from './http.js';
 import * as auth from './auth.js';
 import * as store from './store.js';
 import * as backup from './backup.js';
-import { analyze, filterTrades } from './stats.js';
+import { analyze, filterTrades, localMonthKey } from './stats.js';
 import { renderMarkdown } from './markdown.js';
 import { aiSettingsPage } from './views/ai.js';
 import {
@@ -280,6 +280,20 @@ function accountIdFromQuery(query, accounts) {
   return accounts.some((a) => String(a.id) === raw) ? Number(raw) : null;
 }
 
+/** 快捷标签清单：设置页配置优先，否则最常用 + 默认词补足（仪表盘与详情页共用） */
+function quickTagList() {
+  const used = store.listTagsWithCounts();
+  const byName = new Map(used.map((x) => [x.name, x]));
+  const configured = store.getQuickTags();
+  if (configured) {
+    return configured.map((name) => ({ name, count: byName.get(name)?.count || 0, used: byName.has(name) }));
+  }
+  const names = used.map((x) => x.name);
+  const defaults = ['追高', '逆势', '扛单', '计划内', '计划外'].filter((x) => !names.includes(x));
+  return [...used.slice(0, 6).map((x) => ({ name: x.name, count: x.count, used: true })),
+    ...defaults.slice(0, Math.max(0, 6 - used.length)).map((name) => ({ name, count: 0, used: false }))];
+}
+
 /** 账户同步进度：优先用「已回溯到的最旧交易」，没有交易时退回分页游标 */
 function accountProgress() {
   const out = {};
@@ -351,18 +365,7 @@ route('GET', '/dashboard', (ctx) => requireUser(ctx, (c) => {
         accountId,
         limit: 8,
       }),
-      quickTags: (() => {
-        const used = store.listTagsWithCounts();
-        const byName = new Map(used.map((x) => [x.name, x]));
-        const configured = store.getQuickTags();
-        if (configured) {
-          return configured.map((name) => ({ name, count: byName.get(name)?.count || 0, used: byName.has(name) }));
-        }
-        const names = used.map((x) => x.name);
-        const defaults = ['追高', '逆势', '扛单', '计划内', '计划外'].filter((x) => !names.includes(x));
-        return [...used.slice(0, 6).map((x) => ({ name: x.name, count: x.count, used: true })),
-          ...defaults.slice(0, Math.max(0, 6 - used.length)).map((name) => ({ name, count: 0, used: false }))];
-      })(),
+      quickTags: quickTagList(),
       demo: store.demoStatus(),
       notice: c.query.notice || '',
       error: c.query.error || '',
@@ -440,6 +443,7 @@ route('GET', '/dashboard/journal', (ctx) => requireUser(ctx, (c) => {
       trades,
       filters,
       accounts,
+      back: c.url.pathname + c.url.search,
       tags: store.listTags(),
       symbols,
       pagination: { page: pageNo, pageSize: PAGE_SIZE, totalPages, total: filtered.length },
@@ -470,7 +474,7 @@ function parseTradeForm(body, { existing = null } = {}) {
   const notional = Number(val(body, 'notional')) || Math.abs(entry * size);
 
   const picked = list(body, 'tags');
-  const fresh = String(val(body, 'new_tags')).split(',').map((x) => x.trim()).filter(Boolean);
+  const fresh = String(val(body, 'new_tags') || '').split(/[,，;；\s]+/).map((x) => x.trim()).filter(Boolean);
   const tags = [...new Set([...picked, ...fresh])].slice(0, 50);
 
   return {
@@ -507,6 +511,29 @@ route('GET', '/dashboard/journal/new', (ctx) => requireUser(ctx, (c) => {
   }));
 }));
 
+/** 保存失败时把表单原始输入回传给视图，避免用户重填全部字段 */
+function tradeDraftFrom(body) {
+  return {
+    symbol: val(body, 'symbol'),
+    side: val(body, 'side') === 'short' ? 'short' : 'long',
+    order_type: val(body, 'order_type') || 'market',
+    account_id: Number(val(body, 'account_id')) || undefined,
+    open_time: val(body, 'open_time'),
+    close_time: val(body, 'close_time'),
+    entry_price: val(body, 'entry_price'),
+    exit_price: val(body, 'exit_price'),
+    size: val(body, 'size'),
+    notional: val(body, 'notional'),
+    pnl: val(body, 'pnl'),
+    fee: val(body, 'fee'),
+    funding: val(body, 'funding'),
+    note: val(body, 'note'),
+    tags: [...list(body, 'tags'), ...String(val(body, 'new_tags') || '').split(/[,，;；\s]+/)]
+      .map((x) => String(x).trim()).filter(Boolean),
+    new_tags: String(val(body, 'new_tags') || ''),
+  };
+}
+
 route('POST', '/dashboard/journal/new', (ctx) => requireUser(ctx, async (c) => {
   const body = await readForm(c.req);
   try {
@@ -522,6 +549,7 @@ route('POST', '/dashboard/journal/new', (ctx) => requireUser(ctx, async (c) => {
         accounts: store.listAccounts(),
         tags: store.listTags(),
         error: err.message || '保存失败',
+        draft: tradeDraftFrom(body),
       }),
     }), 400);
   }
@@ -601,6 +629,15 @@ async function loadTradeFills(trade) {
   }
 }
 
+/** 在路径上追加 notice 提示参数（back 可能已带查询串） */
+const withNotice = (path, text) => path + (path.includes('?') ? '&' : '?') + 'notice=' + encodeURIComponent(text);
+
+/** 校验 back 参数：只允许站内 /dashboard 路径 */
+function safeBack(raw) {
+  const value = safeNext(String(raw || ''));
+  return value.startsWith('/dashboard') ? value : '';
+}
+
 route('GET', '/dashboard/journal/:id', (ctx) => requireUser(ctx, async (c) => {
   const trade = store.getTrade(c.params.id);
   if (!trade) return redirect('/dashboard/journal?error=' + encodeURIComponent('交易记录不存在'));
@@ -613,6 +650,8 @@ route('GET', '/dashboard/journal/:id', (ctx) => requireUser(ctx, async (c) => {
       trade,
       curve,
       ops,
+      quickTags: quickTagList(),
+      back: safeBack(c.query.back),
       notice: c.query.notice || '',
       error: c.query.error || '',
     }),
@@ -630,6 +669,7 @@ route('GET', '/dashboard/journal/:id/edit', (ctx) => requireUser(ctx, (c) => {
       trade,
       accounts: store.listAccounts(),
       tags: store.listTags(),
+      back: safeBack(c.query.back),
     }),
   }));
 }));
@@ -637,10 +677,11 @@ route('GET', '/dashboard/journal/:id/edit', (ctx) => requireUser(ctx, (c) => {
 route('POST', '/dashboard/journal/:id/edit', (ctx) => requireUser(ctx, async (c) => {
   const body = await readForm(c.req);
   const id = Number(c.params.id);
+  const back = safeBack(val(body, 'back'));
   try {
     const input = parseTradeForm(body, { existing: store.getTrade(id) });
     store.updateTrade(id, input);
-    return redirect(`/dashboard/journal/${id}?notice=${encodeURIComponent('已保存')}`);
+    return redirect(back ? withNotice(back, '已保存') : `/dashboard/journal/${id}?notice=${encodeURIComponent('已保存')}`);
   } catch (err) {
     const trade = store.getTrade(id);
     if (!trade) return redirect('/dashboard/journal?error=' + encodeURIComponent('交易记录不存在'));
@@ -649,18 +690,21 @@ route('POST', '/dashboard/journal/:id/edit', (ctx) => requireUser(ctx, async (c)
       user: c.user,
       body: journalEditPage({
         user: c.user,
-        trade,
+        trade: { ...trade, ...tradeDraftFrom(body) },
         accounts: store.listAccounts(),
         tags: store.listTags(),
+        back,
         error: err.message || '保存失败',
       }),
     }), 400);
   }
 }));
 
-route('POST', '/dashboard/journal/:id/delete', (ctx) => requireUser(ctx, (c) => {
+route('POST', '/dashboard/journal/:id/delete', (ctx) => requireUser(ctx, async (c) => {
+  const body = await readForm(c.req);
   store.deleteTrade(Number(c.params.id));
-  return redirect('/dashboard/journal?notice=' + encodeURIComponent('交易已删除'));
+  const back = safeBack(val(body, 'back'));
+  return redirect(back ? withNotice(back, '交易已删除') : '/dashboard/journal?notice=' + encodeURIComponent('交易已删除'));
 }));
 
 route('POST', '/dashboard/journal/:id/note', (ctx) => requireUser(ctx, async (c) => {
@@ -853,19 +897,25 @@ route('POST', '/dashboard/import/templates/delete', (ctx) => requireUser(ctx, as
  *  现货
  * ========================================================= */
 
-route('GET', '/dashboard/spot', (ctx) => requireUser(ctx, (c) => html(page({
+route('GET', '/dashboard/spot', (ctx) => requireUser(ctx, (c) => {
+  const accounts = store.listAccounts();
+  const accountId = accountIdFromQuery(c.query, accounts);
+  return html(page({
   title: '现货 | TradeLedger',
   user: c.user,
   body: spotPage({
     user: c.user,
-    balances: store.listSpotBalances(),
-    holdings: store.listSpotHoldings(),
-    fills: store.listSpotFills({ limit: 200 }),
-    spotTrades: store.listSpotTrades(50),
+    accounts,
+    accountId,
+    balances: store.listSpotBalances(accountId),
+    holdings: store.listSpotHoldings(accountId),
+    fills: store.listSpotFills({ accountId, limit: 200 }),
+    spotTrades: store.listSpotTrades(50, accountId),
     notice: c.query.notice || '',
     error: c.query.error || '',
   }),
-}))));
+}));
+}));
 
 route('POST', '/api/spot/note', async (ctx) => {
   if (!ctx.user) return json({ error: 'unauthorized' }, 401);
@@ -1157,11 +1207,14 @@ route('POST', '/dashboard/accounts/:id/sync', async (ctx) => {
  * ========================================================= */
 
 route('GET', '/dashboard/reconcile', (ctx) => requireUser(ctx, async (c) => {
+  const accounts = store.listAccounts();
+  const accountId = accountIdFromQuery(c.query, accounts);
   const all = allTrades();
-  const report = reconcileTrades(all);
+  const scoped = accountId ? all.filter((t) => t.account_id === accountId) : all;
+  const report = reconcileTrades(scoped);
   // 月度对账：应用内净盈亏 vs 交易所账本实结算（支持 fetchMonthlyLedger 的交易所）
   const monthly = [];
-  for (const account of store.listAccounts().filter((a) => !a.is_demo)) {
+  for (const account of accounts.filter((a) => !a.is_demo && (!accountId || a.id === accountId))) {
     const adapter = getExchange(account.exchange);
     if (!adapter || typeof adapter.fetchMonthlyLedger !== 'function') continue;
     const entry = { account: { id: account.id, name: account.name, exchange: account.exchange }, rows: [] };
@@ -1169,8 +1222,7 @@ route('GET', '/dashboard/reconcile', (ctx) => requireUser(ctx, async (c) => {
       const trades = all.filter((t) => t.account_id === account.id);
       const byMonth = new Map();
       for (const t of trades) {
-        const d = new Date(t.close_time);
-        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        const key = localMonthKey(t.close_time);
         byMonth.set(key, (byMonth.get(key) || 0) + Number(t.pnl || 0));
       }
       const creds = store.getAccountCredentials(account.id);
@@ -1190,6 +1242,8 @@ route('GET', '/dashboard/reconcile', (ctx) => requireUser(ctx, async (c) => {
     user: c.user,
     body: reconcilePage({
       user: c.user,
+      accounts,
+      accountId,
       report,
       monthly,
       notice: c.query.notice || '',
@@ -1219,8 +1273,11 @@ function shiftPeriod(period) {
 
 route('GET', '/dashboard/review', (ctx) => requireUser(ctx, (c) => {
   const period = parsePeriod(c.query);
+  const accounts = store.listAccounts();
+  const accountId = accountIdFromQuery(c.query, accounts);
+  const base = accountId ? allTrades().filter((t) => t.account_id === accountId) : allTrades();
   const range = periodRange(period);
-  const review = buildPeriodReview(allTrades(), period);
+  const review = buildPeriodReview(base, period);
   const markdown = reviewMarkdown(review);
 
   const nextPeriod = (() => {
@@ -1240,6 +1297,8 @@ route('GET', '/dashboard/review', (ctx) => requireUser(ctx, (c) => {
     body: reportPage({
       user: c.user,
       review,
+      accounts,
+      accountId,
       prev: { ...shiftPeriod(period), label: periodRange(shiftPeriod(period)).label },
       next: { ...nextPeriod, label: periodRange(nextPeriod).label },
       markdownPreview: markdown.slice(0, 12000),
@@ -1281,7 +1340,11 @@ route('POST', '/dashboard/review/ai', (ctx) => requireUser(ctx, async (c) => {
   const job = store.createReportJob({ periodKind: period.kind, periodLabel: range.label, promptLen: prompt.length });
   const periodFrom = range.from.toISOString();
   const periodTo = range.to.toISOString();
-  const trades = store.countTradesBetween(periodFrom, periodTo);
+  const jobAccountId = Number(val(body, 'account_id')) || null;
+  const trades = jobAccountId
+    ? allTrades().filter((t) => t.account_id === jobAccountId
+        && t.close_time >= periodFrom && t.close_time <= periodTo).length
+    : store.countTradesBetween(periodFrom, periodTo);
   (async () => {
     try {
       const text = await callLlm({ messages: [{ role: 'user', content: prompt }], config, timeout: 300_000 });
@@ -1453,19 +1516,26 @@ route('POST', '/api/markdown', async (ctx) => {
  *  标签 / 笔记
  * ========================================================= */
 
-route('GET', '/dashboard/tags', (ctx) => requireUser(ctx, (c) => html(page({
-  title: '标签 | TradeLedger',
-  user: c.user,
-  body: tagsPage({
+route('GET', '/dashboard/tags', (ctx) => requireUser(ctx, (c) => {
+  const accounts = store.listAccounts();
+  const accountId = accountIdFromQuery(c.query, accounts);
+  const scoped = accountId ? allTrades().filter((t) => t.account_id === accountId) : allTrades();
+  return html(page({
+    title: '标签 | TradeLedger',
     user: c.user,
-    tags: store.listTags(),
-    tagsWithCounts: store.listTagsWithCounts(),
-    quickTags: store.getQuickTags(),
-    stats: analyze(allTrades()),
-    error: c.query.error || '',
-    notice: c.query.notice || '',
-  }),
-}))));
+    body: tagsPage({
+      user: c.user,
+      tags: store.listTags(),
+      tagsWithCounts: store.listTagsWithCounts(),
+      quickTags: store.getQuickTags(),
+      accounts,
+      accountId,
+      stats: analyze(scoped),
+      error: c.query.error || '',
+      notice: c.query.notice || '',
+    }),
+  }));
+}));
 
 route('POST', '/dashboard/tags', (ctx) => requireUser(ctx, async (c) => {
   const body = await readForm(c.req);

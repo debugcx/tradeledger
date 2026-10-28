@@ -62,16 +62,21 @@ function diagnosisPanel(s) {
 }
 
 /** 优先复盘队列：还没写复盘的大亏交易，支持行内快捷打标签 */
-function reviewQueuePanel(queue, quickTags, backQuery) {
+function reviewQueuePanel(queue, quickTags, backQuery, hasTrades = true) {
   if (!queue || !queue.length) {
+    const empty = hasTrades
+      ? '大亏交易都已写过复盘 ✓'
+      : '还没有交易。先添加交易所账户或导入 CSV，系统会自动把大亏交易排进这里。';
+    const links = hasTrades ? '' :
+      ' <a class="btn btn-ghost small" href="/dashboard/accounts">添加账户</a> <a class="btn btn-ghost small" href="/dashboard/import">导入 CSV</a>';
     return `<section class="panel">
       <div class="panel-head"><h2>优先复盘</h2>
         <span class="muted small">亏损超过阈值且还没写复盘的交易 · <a href="/dashboard/tags#quick-tags">管理快捷标签</a></span></div>
-      <div class="chart-empty">大亏交易都已写过复盘 ✓</div>
+      <div class="chart-empty">${empty}${links}</div>
     </section>`;
   }
   const tagBtn = (tradeId, name, active) =>
-    `<form method="post" action="/dashboard/journal/${tradeId}/tag" class="inline quick-tag-form">
+    `<form method="post" action="/dashboard/journal/${tradeId}/tag" class="inline quick-tag-form" data-no-guard>
       <input type="hidden" name="tag" value="${e(name)}">
       <input type="hidden" name="back" value="/dashboard${backQuery}">
       <button class="tag-pill ${active ? 'active' : ''}" type="submit">${e(name)}</button>
@@ -82,7 +87,7 @@ function reviewQueuePanel(queue, quickTags, backQuery) {
       <td class="small">${e(fmtDateTime(t.close_time))}</td>
       <td><a href="/dashboard/journal/${t.id}"><b>${e(t.symbol)}</b></a>
         <span class="muted small">${e(t.account_name || '')}</span></td>
-      <td class="neg strong">${fmtMoney(t.pnl)}</td>
+      <td class="num neg strong">${fmtMoney(t.pnl)}</td>
       <td class="small">${e(fmtDuration(Date.parse(t.close_time) - Date.parse(t.open_time)))}</td>
       <td class="quick-tag-cell">
         ${quickTags.map((x) => tagBtn(t.id, x.name, current.has(x.name))).join(' ')}
@@ -95,7 +100,7 @@ function reviewQueuePanel(queue, quickTags, backQuery) {
       <span class="muted small">按亏损从大到小 · 点标签快速归类 · <a href="/dashboard/tags#quick-tags">管理快捷标签</a></span></div>
     <div class="table-wrap">
     <table class="table">
-      <thead><tr><th>平仓时间</th><th>交易对</th><th>净盈亏</th><th>持仓</th><th>快捷标签</th></tr></thead>
+      <thead><tr><th>平仓时间</th><th>交易对</th><th class="num">净盈亏</th><th>持仓</th><th>快捷标签</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     </div>
@@ -325,16 +330,16 @@ function recentTrades(trades) {
       <div class="muted small">${t.market === 'spot' ? '现货' : '合约'}</div></td>
     <td><span class="side-tag ${t.side}">${t.side === 'long' ? '做多' : '做空'}</span></td>
     <td>${t.order_type === 'limit' ? '限价' : t.order_type === 'market' ? '市价' : '其他'}</td>
-    <td>${fmtPrice(t.entry_price)} → ${fmtPrice(t.exit_price)}</td>
-    <td>${fmtMoney(t.notional, { sign: false })}</td>
-    <td class="${sign(t.pnl)} strong">${fmtMoney(t.pnl)}</td>
-    <td class="muted">${e(fmtDuration(new Date(t.close_time) - new Date(t.open_time)))}</td>
+    <td class="num">${fmtPrice(t.entry_price)} → ${fmtPrice(t.exit_price)}</td>
+    <td class="num">${fmtMoney(t.notional, { sign: false })}</td>
+    <td class="num ${sign(t.pnl)} strong">${fmtMoney(t.pnl)}</td>
+    <td class="num muted">${e(fmtDuration(new Date(t.close_time) - new Date(t.open_time)))}</td>
     <td>${(t.tags || []).map((x) => `<span class="tag-pill">${e(x)}</span>`).join(' ')}</td>
   </tr>`).join('');
   return `<section class="panel">
     <div class="panel-head"><h2>最近交易</h2><a class="btn btn-ghost small" href="/dashboard/journal">查看全部</a></div>
     <table class="table">
-      <thead><tr><th>平仓时间</th><th>币种</th><th>方向</th><th>类型</th><th>开仓 → 平仓</th><th>名义价值</th><th>净盈亏</th><th>持仓</th><th>标签</th></tr></thead>
+      <thead><tr><th>平仓时间</th><th>币种</th><th>方向</th><th>类型</th><th class="num">开仓 → 平仓</th><th class="num">名义价值</th><th class="num">净盈亏</th><th class="num">持仓</th><th>标签</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="9" class="muted center">暂无交易记录</td></tr>'}</tbody>
     </table>
   </section>`;
@@ -447,7 +452,7 @@ export function dashboardPage({ user, stats, trades, market = 'all', accounts = 
     </div>` : ''}
     ${kpiBar(stats)}
     ${diagnosisPanel(stats)}
-    ${reviewQueuePanel(reviewQueue, quickTags, `?market=${market}${accountId ? `&account_id=${accountId}` : ''}`)}
+    ${reviewQueuePanel(reviewQueue, quickTags, `?market=${market}${accountId ? `&account_id=${accountId}` : ''}`, stats.total > 0)}
     ${statPanel(stats)}
     ${livePositionsPanel({ accounts, balances, positions, spotBalances, spotHoldings, accountId })}
     ${sideRow('多单', stats.longs, 'green')}

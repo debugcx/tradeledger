@@ -209,15 +209,26 @@
       var v = Number(n) || 0;
       return (v < 0 ? '-' : '') + '$' + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
+    // 与服务端 fmtPrice 同规则：<1 的价格显示 6 位小数，避免刷新后变成 $0.00
+    function price(n) {
+      var v = Number(n) || 0;
+      var abs = Math.abs(v);
+      var decimals = abs >= 1000 ? 2 : abs >= 1 ? 4 : 6;
+      return v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: decimals });
+    }
     function num(v) { return (Number(v) || 0).toLocaleString('en-US', { maximumFractionDigits: 4 }); }
     function cls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'flat'; }
     function rate(v) {
       if (v === null || v === undefined || v === '') return '—';
       return (Number(v) * 100).toFixed(4) + '%';
     }
+    // 与服务端 fmtDateTime 同格式：YYYY-MM-DD HH:mm
     function when(iso) {
       if (!iso) return '—';
-      try { return new Date(iso).toLocaleString('zh-CN', { hour12: false }); } catch (e) { return '—'; }
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return '—';
+      var p = function (n) { return String(n).padStart(2, '0'); };
+      return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
     }
 
     function render(raw) {
@@ -255,8 +266,8 @@
           '<td><b>' + esc(p.symbol) + '</b></td>' +
           '<td><span class="side-tag ' + (p.side === 'long' ? 'long' : 'short') + '">' + (p.side === 'long' ? '多' : '空') + '</span></td>' +
           '<td>' + num(p.size) + '</td>' +
-          '<td>' + money(p.entry_price) + '</td>' +
-          '<td>' + money(p.mark_price) + '</td>' +
+          '<td>' + price(p.entry_price) + '</td>' +
+          '<td>' + price(p.mark_price) + '</td>' +
           '<td class="strong ' + cls(Number(p.unrealized)) + '">' + money(p.unrealized) + '</td>' +
           '<td class="rate">' + rate(p.funding_rate) + '</td>' +
           '<td class="small muted">' + when(p.next_funding_time) + '</td>' +
@@ -272,13 +283,13 @@
       if (spotValueEl) spotValueEl.textContent = money(spotValue);
       if (spotRows) {
         spotRows.innerHTML = spotHoldings.map(function (h) {
-          var price = (h.price === null || h.price === undefined) ? '—' : money(h.price);
+          var priceText = (h.price === null || h.price === undefined) ? '—' : price(h.price);
           var value = (h.value === null || h.value === undefined) ? '—' : money(h.value);
           return '<tr>' +
             '<td class="small">' + esc(h.account_name) + '</td>' +
             '<td><b>' + esc(h.symbol) + '</b></td>' +
             '<td>' + num(h.quantity) + '</td>' +
-            '<td>' + price + '</td>' +
+            '<td>' + priceText + '</td>' +
             '<td>' + value + '</td>' +
             '</tr>';
         }).join('') || '<tr><td colspan="5" class="muted center">当前没有现货持仓</td></tr>';
@@ -846,6 +857,60 @@
     if (url.hash && keyOf(url) === currentKey) return;
     ev.preventDefault();
     navigate(url, true);
+  });
+
+  // 快捷标签无刷新提交：fetch 后原地切换 active，连续打标签不再整页 reload
+  document.addEventListener('submit', function (ev) {
+    var form = ev.target;
+    if (!form || !form.classList || !form.classList.contains('quick-tag-form')) return;
+    ev.preventDefault();
+    var btn = form.querySelector('button');
+    if (!btn) return;
+    var wasActive = btn.classList.contains('active');
+    fetch(form.getAttribute('action'), {
+      method: 'POST',
+      body: new FormData(form),
+      credentials: 'same-origin',
+      redirect: 'manual',
+    }).then(function (res) {
+      if (res.type === 'opaqueredirect' || res.ok) btn.classList.toggle('active', !wasActive);
+      else location.reload();
+    }).catch(function () { location.reload(); });
+  });
+
+  // 全站防重复提交：POST 表单提交后禁用按钮；整页跳转/刷新后自然恢复。
+  // 30 秒兜底自动恢复，避免网络失败时按钮永久禁用。
+  document.addEventListener('submit', function (ev) {
+    if (ev.defaultPrevented) return;
+    var form = ev.target;
+    if (!form || form.nodeType !== 1) return;
+    if (String(form.getAttribute('method') || '').toLowerCase() !== 'post') return;
+    if (form.hasAttribute('data-no-guard') || form.dataset.guarded) return;
+    form.dataset.guarded = '1';
+    var buttons = Array.prototype.slice.call(form.querySelectorAll('button[type="submit"], button:not([type])'));
+    buttons.forEach(function (btn) {
+      if (btn.disabled) return;
+      btn.dataset.label = btn.textContent;
+      btn.textContent = /备份|测试/.test(btn.dataset.label) ? '处理中…' : '提交中…';
+      btn.disabled = true;
+    });
+    setTimeout(function () {
+      buttons.forEach(function (btn) {
+        if (btn.dataset.label !== undefined) btn.textContent = btn.dataset.label;
+        btn.disabled = false;
+      });
+      delete form.dataset.guarded;
+    }, 30000);
+  });
+  window.addEventListener('pageshow', function () {
+    // bfcache 后退回来的页面：恢复被禁用的按钮
+    document.querySelectorAll('form[data-guarded]').forEach(function (form) {
+      form.querySelectorAll('button[data-label]').forEach(function (btn) {
+        if (btn.dataset.label !== undefined) btn.textContent = btn.dataset.label;
+        btn.disabled = false;
+      });
+      delete form.dataset.guarded;
+    });
   });
 
   document.addEventListener('submit', function (ev) {

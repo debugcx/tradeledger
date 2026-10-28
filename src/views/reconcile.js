@@ -18,16 +18,16 @@ function monthlyPanel(monthly) {
       const ok = Math.abs(r.diff) <= Math.max(1, Math.abs(r.exchange) * 0.02);
       return `<tr>
         <td>${e(r.month)}</td>
-        <td class="${sign(r.app)}">${fmtMoney(r.app)}</td>
-        <td class="${sign(r.exchange)}">${fmtMoney(r.exchange)}</td>
-        <td class="${ok ? 'pos' : 'neg'} strong">${ok ? '一致' : fmtMoney(r.diff)}</td>
+        <td class="num ${sign(r.app)}">${fmtMoney(r.app)}</td>
+        <td class="num ${sign(r.exchange)}">${fmtMoney(r.exchange)}</td>
+        <td class="num ${ok ? 'pos' : 'neg'} strong">${ok ? '一致' : fmtMoney(r.diff)}</td>
       </tr>`;
     }).join('');
     return `<section class="panel">
       <div class="panel-head"><h2>月度对账 · ${e(m.account.name)}（${e(m.account.exchange)}）</h2>
         <span class="muted small">应用内净盈亏 vs 交易所账本（已实现盈亏+手续费+资金费）· 缓存 30 分钟</span></div>
       <table class="table">
-        <thead><tr><th>月份</th><th>应用内</th><th>交易所账本</th><th>差异</th></tr></thead>
+        <thead><tr><th>月份</th><th class="num">应用内</th><th class="num">交易所账本</th><th class="num">差异</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="4" class="muted center">暂无数据</td></tr>'}</tbody>
       </table>
     </section>`;
@@ -35,7 +35,16 @@ function monthlyPanel(monthly) {
   return blocks;
 }
 
-export function reconcilePage({ user, report, monthly = [], notice, error }) {
+export function reconcilePage({ user, accounts = [], accountId = null, report, monthly = [], notice, error }) {
+  const accountPicker = accounts.length > 1 ? `
+    <form method="get" action="/dashboard/reconcile" class="filter-bar" style="margin:10px 0">
+      <select name="account_id" onchange="this.form.submit()">
+        <option value="">全部账户</option>
+        ${accounts.filter((a) => !a.is_demo).map((a) => `<option value="${a.id}" ${String(a.id) === String(accountId) ? 'selected' : ''}>${e(a.name)}（${e(a.exchange)}）</option>`).join('')}
+      </select>
+      <button class="btn btn-ghost small" type="submit">应用</button>
+    </form>` : '';
+
   const sourceRows = report.bySource.map((s) => `<tr>
     <td>${e(sourceLabel(s.source))}</td>
     <td>${fmtNum(s.checked)}</td>
@@ -68,6 +77,7 @@ export function reconcilePage({ user, report, monthly = [], notice, error }) {
       <div class="mini-stat"><span>复算不一致</span><b class="${report.mismatches ? 'neg' : 'pos'}">${fmtNum(report.mismatches)}</b></div>
       <div class="mini-stat"><span>缺少价格/数量</span><b class="muted">${fmtNum(report.missing)}</b></div>
     </div>
+    ${accountPicker}
 
     <section class="panel">
       <div class="panel-head"><h2>对账说明</h2></div>

@@ -129,6 +129,7 @@ function filterBar(filters, symbols, tags, accounts = []) {
       ${opt('all', '全部类型', filters.orderType)}
       ${opt('market', '市价单', filters.orderType)}
       ${opt('limit', '限价单', filters.orderType)}
+      ${opt('mixed', '混合', filters.orderType)}
       ${opt('other', '其他', filters.orderType)}
     </select>
     <select name="tag">
@@ -154,21 +155,22 @@ function filterBar(filters, symbols, tags, accounts = []) {
   </form>`;
 }
 
-export function journalPage({ user, trades, filters, tags, symbols, pagination, noteCoverage, accounts = [], notice, error }) {
+export function journalPage({ user, trades, filters, tags, symbols, pagination, noteCoverage, accounts = [], back = '', notice, error }) {
+  const backQ = back ? `?back=${encodeURIComponent(back)}` : '';
   const rows = trades.map((t) => `<tr>
     <td>${fmtDateTime(t.close_time)}</td>
     <td><a href="/dashboard/journal/${t.id}"><b>${e(t.symbol)}</b></a>
-      <div class="muted small">${t.market === 'spot' ? '现货' : '合约'} · <a href="/dashboard/notes/symbol/${encodeURIComponent(t.symbol)}">档案</a></div></td>
+      <div class="muted small">${t.market === 'spot' ? '现货' : '合约'} · ${e(t.account_name || '—')} · <a href="/dashboard/notes/symbol/${encodeURIComponent(t.symbol)}">档案</a></div></td>
     <td><span class="side-tag ${t.side}">${t.side === 'long' ? '做多' : '做空'}</span></td>
     <td>${t.order_type === 'limit' ? '挂单' : t.order_type === 'market' ? '吃单' : t.order_type === 'mixed' ? '混合' : '—'}</td>
-    <td>${fmtPrice(t.entry_price)} → ${fmtPrice(t.exit_price)}</td>
-    <td>${fmtMoney(t.notional, { sign: false })}</td>
-    <td class="${sign(t.pnl)} strong">${fmtMoney(t.pnl)}</td>
-    <td class="muted">${e(fmtDurationShort(new Date(t.close_time) - new Date(t.open_time)))}</td>
+    <td class="num">${fmtPrice(t.entry_price)} → ${fmtPrice(t.exit_price)}</td>
+    <td class="num">${fmtMoney(t.notional, { sign: false })}</td>
+    <td class="num ${sign(t.pnl)} strong">${fmtMoney(t.pnl)}</td>
+    <td class="num muted">${e(fmtDurationShort(new Date(t.close_time) - new Date(t.open_time)))}</td>
     <td class="tags-cell">${(t.tags || []).map((x) => `<span class="tag-pill">${e(x)}</span>`).join(' ')}</td>
     <td class="row-actions">
-      <a class="btn btn-ghost small" href="/dashboard/journal/${t.id}">详情</a>
-      <a class="btn btn-ghost small" href="/dashboard/journal/${t.id}/edit">编辑</a>
+      <a class="btn btn-ghost small" href="/dashboard/journal/${t.id}${backQ}">详情</a>
+      <a class="btn btn-ghost small" href="/dashboard/journal/${t.id}/edit${backQ}">编辑</a>
     </td>
   </tr>`).join('');
 
@@ -194,8 +196,8 @@ export function journalPage({ user, trades, filters, tags, symbols, pagination, 
       </div>
       <table class="table">
         <thead><tr>
-          <th>平仓时间</th><th>币种</th><th>方向</th><th>类型</th><th>开仓 → 平仓</th>
-          <th>名义价值</th><th>净盈亏</th><th>持仓</th><th>标签</th><th></th>
+          <th>平仓时间</th><th>币种</th><th>方向</th><th>类型</th><th class="num">开仓 → 平仓</th>
+          <th class="num">名义价值</th><th class="num">净盈亏</th><th class="num">持仓</th><th>标签</th><th></th>
         </tr></thead>
         <tbody>${rows || '<tr><td colspan="10" class="muted center">没有符合条件的交易</td></tr>'}</tbody>
       </table>
@@ -213,20 +215,21 @@ export function journalPage({ user, trades, filters, tags, symbols, pagination, 
   });
 }
 
-function tagPicker(tags, selected = []) {
+function tagPicker(tags, selected = [], newTags = '') {
   const set = new Set(selected || []);
   const boxes = (tags || []).map((t) => `<label class="tag-check">
       <input type="checkbox" name="tags" value="${e(t.name)}" ${set.has(t.name) ? 'checked' : ''}>
       <span class="tag-pill">${e(t.name)}</span>
     </label>`).join('');
   return `<div class="tag-picker">${boxes || '<span class="muted small">还没有标签，可在下方新建</span>'}</div>
-    <input name="new_tags" placeholder="新标签，逗号分隔（例如：突破, 趋势）">`;
+    <input name="new_tags" value="${e(newTags || '')}" placeholder="新标签，逗号分隔（例如：突破, 趋势）">`;
 }
 
-function tradeForm({ action, trade = {}, accounts, tags, error, submitLabel }) {
+function tradeForm({ action, trade = {}, accounts, tags, back = '', error, submitLabel }) {
   const selectedAccount = trade.account_id || accounts[0]?.id;
   return `<section class="panel">
     <form method="post" action="${action}" class="form grid-form">
+      <input type="hidden" name="back" value="${e(back)}">
       <label class="field"><span>币种</span><input name="symbol" required value="${e(trade.symbol || '')}" placeholder="BTC/USDT"></label>
       <label class="field"><span>方向</span>
         <select name="side">
@@ -253,30 +256,31 @@ function tradeForm({ action, trade = {}, accounts, tags, error, submitLabel }) {
       <label class="field"><span>净盈亏（留空自动算）</span><input name="pnl" type="number" step="any" value="${trade.pnl ?? ''}"></label>
       <label class="field"><span>手续费（正=返佣，负=支出）</span><input name="fee" type="number" step="any" value="${trade.fee ?? 0}"></label>
       <label class="field"><span>资金费（正=收取，负=支付）</span><input name="funding" type="number" step="any" value="${trade.funding ?? 0}"></label>
-      <div class="field wide"><span>标签</span>${tagPicker(tags, trade.tags || [])}</div>
+      <div class="field wide"><span>标签</span>${tagPicker(tags, trade.tags || [], trade.new_tags || '')}</div>
       <label class="field wide"><span>备注</span><textarea name="note" rows="3">${e(trade.note || '')}</textarea></label>
       <div class="form-actions wide">
         <button class="btn btn-primary" type="submit">${e(submitLabel)}</button>
-        <a class="btn btn-ghost" href="/dashboard/journal">取消</a>
+        <a class="btn btn-ghost" href="${e(back || '/dashboard/journal')}">取消</a>
       </div>
     </form>
   </section>`;
 }
 
-export function journalCreatePage({ user, accounts, tags, error }) {
+export function journalCreatePage({ user, accounts, tags, error, draft = null }) {
   return shell({
     active: 'journal', user, title: '手动记录一笔交易',
     subtitle: '自动同步之外的补充记录，同样参与全部统计。净盈亏留空时会按开平仓价自动计算。',
     error,
     body: tradeForm({
       action: '/dashboard/journal/new',
+      trade: draft || {},
       accounts, tags, error: '',
       submitLabel: '保存交易',
     }),
   });
 }
 
-export function journalEditPage({ user, trade, accounts, tags, error }) {
+export function journalEditPage({ user, trade, accounts, tags, error, back = '' }) {
   return shell({
     active: 'journal', user,
     title: `编辑 ${trade.symbol}`,
@@ -284,7 +288,7 @@ export function journalEditPage({ user, trade, accounts, tags, error }) {
     error,
     body: tradeForm({
       action: `/dashboard/journal/${trade.id}/edit`,
-      trade, accounts, tags,
+      trade, accounts, tags, back,
       submitLabel: '保存修改',
     }),
   });
@@ -347,10 +351,18 @@ function opsPanel(trade, ops) {
   </section>`;
 }
 
-export function tradeDetailPage({ user, trade, curve = null, ops = null, notice, error }) {
+export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTags = [], back = '', notice, error }) {
   const b = tradeBreakdown(trade);
   const pnlCls = sign(trade.pnl);
   const tags = (trade.tags || []).map((x) => `<span class="tag-pill">${e(x)}</span>`).join(' ');
+  // 详情页行内快捷标签：与仪表盘复盘队列同一套交互（点击即切换，免去进编辑表单）
+  const current = new Set(trade.tags || []);
+  const quickRow = (quickTags || []).map((x) => `
+      <form method="post" action="/dashboard/journal/${trade.id}/tag" class="inline quick-tag-form" data-no-guard>
+        <input type="hidden" name="tag" value="${e(x.name)}">
+        <input type="hidden" name="back" value="/dashboard/journal/${trade.id}">
+        <button class="tag-pill ${current.has(x.name) ? 'active' : ''}" type="submit">${e(x.name)}</button>
+      </form>`).join(' ');
   const diffCls = b.priceMatch === null ? 'flat' : b.priceMatch ? 'pos' : 'neg';
   const diffText = b.pricePnl === null
     ? '缺少开仓价 / 平仓价 / 数量，无法独立复算'
@@ -365,10 +377,12 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, notice,
           <span class="pill ${b.pnl > 0 ? 'pill-green' : b.pnl < 0 ? 'pill-red' : ''}">${fmtMoney(trade.pnl)}</span>
         </h2>
         <div class="head-actions">
+          <a class="btn btn-ghost small" href="${e(back || '/dashboard/journal')}">返回列表</a>
           <a class="btn btn-ghost small" href="/dashboard/notes/symbol/${encodeURIComponent(trade.symbol)}">交易对档案</a>
-          <a class="btn btn-ghost small" href="/dashboard/journal/${trade.id}/edit">编辑数据</a>
+          <a class="btn btn-ghost small" href="/dashboard/journal/${trade.id}/edit${back ? `?back=${encodeURIComponent(back)}` : ''}">编辑数据</a>
           <form method="post" action="/dashboard/journal/${trade.id}/delete" class="inline"
             onsubmit="return confirm('确定删除这笔交易吗？标签关联也会一起删除。')">
+            <input type="hidden" name="back" value="${e(back)}">
             <button class="btn btn-ghost small danger" type="submit">删除</button>
           </form>
         </div>
@@ -393,7 +407,13 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, notice,
           <div class="stat-item"><span class="stat-label">外部 ID</span><span class="stat-value small">${e(trade.external_id || '—')}</span></div>
         </div>
       </div>
-      ${tags ? `<div class="tag-row" style="margin-top:12px">${tags}</div>` : ''}
+      <div class="tag-row" style="margin-top:12px">
+        ${tags || '<span class="muted small">暂无标签，点下面快捷标签即可添加</span>'}
+      </div>
+      ${quickRow ? `<div class="tag-row" style="margin-top:8px">
+        <span class="muted small">快捷标签：</span>${quickRow}
+        <a class="muted small" href="/dashboard/tags#quick-tags">管理</a>
+      </div>` : ''}
     </section>
 
     ${curvePanel(trade, curve)}

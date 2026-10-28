@@ -14,18 +14,28 @@ function listSection(title, rows, render, empty = '本周期样本不足。') {
 }
 
 export function reportPage({
-  user, review, prev, next, markdownPreview, promptText, markdownTruncated = false,
+  user, review, accounts = [], accountId = null, prev, next, markdownPreview, promptText, markdownTruncated = false,
   savedReport = null, history = [], aiStatus = null, notice, error,
 }) {
   const kind = review.period.kind;
   const kindLabel = review.period.kindLabel;
   const s = review.stats;
 
+  const accQ = accountId ? `&account_id=${accountId}` : '';
   const queryOf = (p) => {
-    if (p.kind === 'month') return `kind=month&month=${p.label}`;
-    if (p.kind === 'year') return `kind=year&year=${p.label}`;
-    return `kind=week&week=${p.label}`;
+    if (p.kind === 'month') return `kind=month&month=${p.label}${accQ}`;
+    if (p.kind === 'year') return `kind=year&year=${p.label}${accQ}`;
+    return `kind=week&week=${p.label}${accQ}`;
   };
+  const accountPicker = accounts.length > 1 ? `
+          <form method="get" action="/dashboard/review" class="week-picker">
+            <input type="hidden" name="kind" value="${e(kind)}">
+            <input type="hidden" name="${kind === 'week' ? 'week' : kind === 'month' ? 'month' : 'year'}" value="${e(review.period.label)}">
+            <select name="account_id" onchange="this.form.submit()">
+              <option value="">全部账户</option>
+              ${accounts.map((a) => `<option value="${a.id}" ${String(a.id) === String(accountId) ? 'selected' : ''}>${e(a.name)}</option>`).join('')}
+            </select>
+          </form>` : '';
 
   const periodLabelInput = kind === 'week'
     ? `<input type="week" name="week" value="${e(review.period.label)}">`
@@ -45,6 +55,7 @@ export function reportPage({
       ${kind === 'week' ? `<input type="hidden" name="week" value="${e(review.period.label)}">` : ''}
       ${kind === 'month' ? `<input type="hidden" name="month" value="${e(review.period.label)}">` : ''}
       ${kind === 'year' ? `<input type="hidden" name="year" value="${e(review.period.label)}">` : ''}
+      ${accountId ? `<input type="hidden" name="account_id" value="${accountId}">` : ''}
       <label class="field wide"><span>提示词（已按报告数据生成，可手工编辑后再生成）</span>
         <textarea id="report-prompt" name="prompt" rows="12">${e(promptText)}</textarea>
       </label>
@@ -109,6 +120,7 @@ export function reportPage({
             ${periodLabelInput}
             <button class="btn btn-primary small" type="submit">查看</button>
           </form>
+          ${accountPicker}
         </div>
       </div>
       <div class="head-actions">

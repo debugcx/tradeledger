@@ -220,7 +220,10 @@ export function settingsPage({ user, overview, dbBytes, seededAt, notice, error,
       <p class="muted small">
         TradeLedger v0.1 · 本地优先 · 单密码登录 · 零第三方依赖。<br>
         访问密码来自环境变量 <code>TRADELEDGER_PASSWORD</code>，修改后需要重启服务；
-        已登录的会话最长 30 天有效。
+        已登录的会话最长 30 天有效。<br>
+        部署到 UTC 服务器时，可设置环境变量 <code>TRADELEDGER_TZ=Asia/Shanghai</code>，
+        让热力图、日历与周期报告仍按北京时间计算。
+        开发者接口：<a href="/api/docs">/api/docs</a>。
       </p>
     </section>`;
 

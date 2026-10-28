@@ -34,8 +34,8 @@ export function transfersPage({ user, transfers, summary, filters, accounts, not
       <td class="small">${e(t.account_name)} <span class="muted">${e(t.exchange)}</span></td>
       <td><span class="status-badge ${incoming ? 'pos' : t.type === 'other' ? 'muted' : 'neg'}">${e(TYPE_LABEL[t.type] || t.type)}</span></td>
       <td><b>${e(t.asset)}</b></td>
-      <td class="${cls} strong">${amount}</td>
-      <td>${t.fee ? `${numFmt(t.fee)} ${e(t.asset)}` : '—'}</td>
+      <td class="num ${cls} strong">${amount}</td>
+      <td class="num">${t.fee ? `${numFmt(t.fee)} ${e(t.asset)}` : '—'}</td>
       <td class="small">${e(t.chain || '—')}</td>
       <td class="small">${txid ? `<span class="rate" title="${e(txid)}">${e(txid.slice(0, 14))}${txid.length > 14 ? '…' : ''}</span>` : '—'}</td>
       <td class="muted small">${e(t.note || '')}</td>
@@ -43,15 +43,15 @@ export function transfersPage({ user, transfers, summary, filters, accounts, not
   }).join('');
 
   const assetRows = summary.byAsset.map((x) => `<tr>
-    <td><b>${e(x.asset)}</b></td><td>${fmtNum(x.count)}</td>
-    <td>${numFmt(x.amount)}</td>
+    <td><b>${e(x.asset)}</b></td><td class="num">${fmtNum(x.count)}</td>
+    <td class="num">${numFmt(x.amount)}</td>
   </tr>`).join('');
 
   const assetSummaryRows = (summary.byAssetNet || []).map((v) => `<tr>
       <td><b>${e(v.asset)}</b></td>
-      <td class="pos">+${numFmt(v.inflow)}</td>
-      <td class="neg">-${numFmt(v.outflow)}</td>
-      <td class="${v.inflow - v.outflow >= 0 ? 'pos' : 'neg'} strong">${v.inflow - v.outflow >= 0 ? '+' : '-'}${numFmt(Math.abs(v.inflow - v.outflow))}</td>
+      <td class="num pos">+${numFmt(v.inflow)}</td>
+      <td class="num neg">-${numFmt(v.outflow)}</td>
+      <td class="num ${v.inflow - v.outflow >= 0 ? 'pos' : 'neg'} strong">${v.inflow - v.outflow >= 0 ? '+' : '-'}${numFmt(Math.abs(v.inflow - v.outflow))}</td>
     </tr>`).join('');
 
   const body = `
@@ -82,7 +82,7 @@ export function transfersPage({ user, transfers, summary, filters, accounts, not
       </div>
       <div class="table-wrap">
       <table class="table">
-        <thead><tr><th>时间</th><th>账户</th><th>类型</th><th>币种</th><th>金额</th><th>手续费</th><th>链</th><th>TxID</th><th>备注</th></tr></thead>
+        <thead><tr><th>时间</th><th>账户</th><th>类型</th><th>币种</th><th class="num">金额</th><th class="num">手续费</th><th>链</th><th>TxID</th><th>备注</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="9" class="muted center">还没有资金流水。添加交易所并同步后，这里会出现充值、提现和内部划转。</td></tr>'}</tbody>
       </table>
       </div>
@@ -92,7 +92,7 @@ export function transfersPage({ user, transfers, summary, filters, accounts, not
       <div class="panel-head"><h2>按币种汇总</h2>
         <span class="muted small">直接按币种数量累计，不做 USDT 换算</span></div>
       <table class="table">
-        <thead><tr><th>币种</th><th>笔数</th><th>金额合计</th></tr></thead>
+        <thead><tr><th>币种</th><th class="num">笔数</th><th class="num">金额合计</th></tr></thead>
         <tbody>${assetRows}</tbody>
       </table>
     </section>` : ''}
@@ -101,7 +101,7 @@ export function transfersPage({ user, transfers, summary, filters, accounts, not
       <div class="panel-head"><h2>币种净流入 / 流出</h2>
         <span class="muted small">全量数据 · 充值/返佣 +，提现/转出 −；跨币种不做换算</span></div>
       <table class="table">
-        <thead><tr><th>币种</th><th>流入</th><th>流出</th><th>净额</th></tr></thead>
+        <thead><tr><th>币种</th><th class="num">流入</th><th class="num">流出</th><th class="num">净额</th></tr></thead>
         <tbody>${assetSummaryRows}</tbody>
       </table>
     </section>` : ''}`;

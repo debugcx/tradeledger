@@ -465,8 +465,9 @@ export function listTransfers({ accountId = null, type = 'all', asset = 'all', f
   if (accountId) { sql += ' AND t.account_id = ?'; params.push(Number(accountId)); }
   if (type && type !== 'all') { sql += ' AND t.type = ?'; params.push(type); }
   if (asset && asset !== 'all') { sql += ' AND t.asset = ?'; params.push(asset); }
-  if (from) { sql += ' AND t.tx_time >= ?'; params.push(from); }
-  if (to) { sql += ' AND t.tx_time <= ?'; params.push(to); }
+  // 日期按「天」粒度匹配且包含结束日（tx_time 是带时间的 ISO 串，直接 <= 会丢掉结束日）
+  if (from) { sql += ' AND substr(t.tx_time, 1, 10) >= ?'; params.push(String(from).slice(0, 10)); }
+  if (to) { sql += ' AND substr(t.tx_time, 1, 10) <= ?'; params.push(String(to).slice(0, 10)); }
   sql += ' ORDER BY t.tx_time DESC, t.id DESC LIMIT ?';
   params.push(Math.min(Math.max(Number(limit) || 500, 1), 5000));
   return all(sql, ...params);
@@ -1226,16 +1227,16 @@ export function listSymbols() {
   ).map((r) => r.symbol);
 }
 
-export function listSpotTrades(limit = 50) {
-  return all(
-    `SELECT t.*, a.name AS account_name
+export function listSpotTrades(limit = 50, accountId = null) {
+  const params = [];
+  let sql = `SELECT t.*, a.name AS account_name
        FROM trades t
        JOIN accounts a ON a.id = t.account_id
-      WHERE t.market = 'spot'
-      ORDER BY t.close_time DESC
-      LIMIT ?`,
-    Number(limit),
-  );
+      WHERE t.market = 'spot'`;
+  if (accountId) { sql += ' AND t.account_id = ?'; params.push(Number(accountId)); }
+  sql += ' ORDER BY t.close_time DESC LIMIT ?';
+  params.push(Number(limit));
+  return all(sql, ...params);
 }
 
 export function listSpotTradesBySymbol(symbol, limit = 200) {

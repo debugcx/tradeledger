@@ -1,7 +1,7 @@
 import { escapeHtml as e, fmtMoney, fmtNum, fmtPrice, fmtDateTime } from '../http.js';
 import { shell } from './layout.js';
 
-export function spotPage({ user, balances, holdings, fills, spotTrades = [], notice, error }) {
+export function spotPage({ user, accounts = [], accountId = null, balances, holdings, fills, spotTrades = [], notice, error }) {
   const spotValue = holdings.reduce((a, h) => a + (Number(h.value) || 0), 0);
   const withCost = holdings.filter((h) => h.avg_cost !== null && h.avg_cost !== undefined);
   const coverage = holdings.length ? withCost.length / holdings.length : 0;
@@ -21,12 +21,12 @@ export function spotPage({ user, balances, holdings, fills, spotTrades = [], not
     return `<tr>
       <td class="small">${e(h.account_name)} <span class="muted">${e(h.exchange)}</span></td>
       <td><a href="/dashboard/spot/symbol/${encodeURIComponent(h.symbol)}"><b>${e(h.symbol)}</b></a></td>
-      <td>${fmtNum(qty, 8)}</td>
-      <td>${cost === null ? '—' : fmtPrice(cost)}
+      <td class="num">${fmtNum(qty, 8)}</td>
+      <td class="num">${cost === null ? '—' : fmtPrice(cost)}
         ${costQty !== null && !costConsistent ? `<div class="muted small">成本数量 ${fmtNum(costQty, 8)}</div>` : ''}</td>
-      <td>${h.price === null || h.price === undefined ? '—' : fmtPrice(h.price)}</td>
-      <td>${value === null ? '—' : fmtMoney(value, { sign: false })}</td>
-      <td class="${cls}">${unrealized === null ? '—' : fmtMoney(unrealized)}</td>
+      <td class="num">${h.price === null || h.price === undefined ? '—' : fmtPrice(h.price)}</td>
+      <td class="num">${value === null ? '—' : fmtMoney(value, { sign: false })}</td>
+      <td class="num ${cls}">${unrealized === null ? '—' : fmtMoney(unrealized)}</td>
       <td class="small">
         ${h.note_id ? `<a href="/dashboard/notes/${h.note_id}" title="查看现货备注">有备注</a>` : '<span class="muted">—</span>'}
       </td>
@@ -47,12 +47,19 @@ export function spotPage({ user, balances, holdings, fills, spotTrades = [], not
     <td class="small">${e(fmtDateTime(t.close_time))}</td>
     <td><a href="/dashboard/spot/symbol/${encodeURIComponent(t.symbol)}"><b>${e(t.symbol)}</b></a><div class="muted small">${e(t.account_name)}</div></td>
     <td><span class="side-tag ${t.side}">${t.side === 'long' ? '做多' : '做空'}</span></td>
-    <td>${fmtNum(t.size, 8)}</td>
-    <td class="${t.pnl > 0 ? 'pos' : t.pnl < 0 ? 'neg' : ''}">${fmtMoney(t.pnl)}</td>
+    <td class="num">${fmtNum(t.size, 8)}</td>
+    <td class="num ${t.pnl > 0 ? 'pos' : t.pnl < 0 ? 'neg' : ''}">${fmtMoney(t.pnl)}</td>
     <td><a class="btn btn-ghost small" href="/dashboard/journal/${t.id}">详情</a></td>
   </tr>`).join('');
 
   const body = `
+    ${accounts.length > 1 ? `<form method="get" action="/dashboard/spot" class="filter-bar" style="margin:0 0 12px">
+      <select name="account_id" onchange="this.form.submit()">
+        <option value="">全部账户</option>
+        ${accounts.map((a) => `<option value="${a.id}" ${String(a.id) === String(accountId) ? 'selected' : ''}>${e(a.name)}（${e(a.exchange)}）</option>`).join('')}
+      </select>
+      <button class="btn btn-ghost small" type="submit">应用</button>
+    </form>` : ''}
     <div class="mini-strip">
       <div class="mini-stat"><span>持仓币种</span><b>${fmtNum(holdings.length)}</b>
         <div class="muted small">不含 USDT 等计价币</div></div>
@@ -66,7 +73,7 @@ export function spotPage({ user, balances, holdings, fills, spotTrades = [], not
       <div class="panel-head"><h2>现货持仓</h2>
         <span class="muted small">市值按实时价格估算；成本来自已同步的买入成交</span></div>
       <table class="table">
-        <thead><tr><th>账户</th><th>交易对</th><th>数量</th><th>平均成本</th><th>当前价</th><th>市值</th><th>未实现盈亏</th><th>备注</th></tr></thead>
+        <thead><tr><th>账户</th><th>交易对</th><th class="num">数量</th><th class="num">平均成本</th><th class="num">当前价</th><th class="num">市值</th><th class="num">未实现盈亏</th><th>备注</th></tr></thead>
         <tbody>${holdingRows || '<tr><td colspan="8" class="muted center">还没有现货持仓。添加交易所并同步后，这里会显示现货余额。</td></tr>'}</tbody>
       </table>
       <p class="chart-note">备注与复盘都在交易对详情页编辑，支持 Markdown 和图片；点交易对名字进入。</p>

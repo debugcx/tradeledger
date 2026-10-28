@@ -422,6 +422,7 @@ svg.chart, svg.heatmap, svg.donut { cursor: zoom-in; }
   white-space: nowrap;
 }
 .table td { padding: 9px 10px; border-bottom: 1px solid var(--border-soft); white-space: nowrap; vertical-align: middle; }
+.table th.num, .table td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .table tbody tr:hover { background: var(--panel-2); }
 .table tbody tr:last-child td { border-bottom: none; }
 .row-actions { display: flex; gap: 6px; }
@@ -752,10 +753,11 @@ td.tags-cell .tag-pill { margin: 0 2px 3px 0; }
 @media (max-width: 900px) {
   .app-shell { grid-template-columns: 1fr; }
   .side-nav { position: static; }
-  .side-nav nav { flex-direction: row; flex-wrap: wrap; }
+  .side-nav nav { flex-direction: row; flex-wrap: nowrap; overflow-x: auto; gap: 6px; -webkit-overflow-scrolling: touch; }
+  .side-nav nav a { white-space: nowrap; flex: 0 0 auto; }
   .nav-group { display: contents; }
   .nav-group-title { display: none; }
-  .side-new { display: none; }
+  .side-new { display: inline-flex; margin: 10px 0 0; white-space: nowrap; }
   .site-motto { display: none; }
   .site-main { padding: 14px; }
   .cal-cell { min-height: 64px; padding: 6px; }

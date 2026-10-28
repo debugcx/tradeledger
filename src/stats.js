@@ -2,10 +2,10 @@
  * 统计引擎（纯函数，不碰数据库）
  *
  * 统一口径：
- *   胜率       = 盈利笔数 / 总已平仓笔数
+ *   胜率       = 盈利笔数 / 总已平仓笔数（pnl=0 记为亏损）
  *   交易预期   = 胜率 × 平均盈利 − 败率 × 平均亏损
  *   毛盈亏     = 净盈亏 − 手续费 − 资金费（见 breakdown.js）
- *   时段统计   = 按 close_time、服务端本地时区
+ *   时段统计   = 按 close_time、TRADELEDGER_TZ 时区（未设置则用服务器本地时区）
  */
 
 export const sum = (arr, f = (x) => x) => arr.reduce((a, b) => a + (Number(f(b)) || 0), 0);
@@ -17,12 +17,56 @@ export function durationOf(trade) {
   return new Date(trade.close_time).getTime() - new Date(trade.open_time).getTime();
 }
 
+/* ---------------- 时区口径 ----------------
+ * 默认用服务器本地时区。部署到 UTC 服务器（如 Docker/VPS）时，
+ * 设置 TRADELEDGER_TZ=Asia/Shanghai 即可让热力图、日历、周界都按北京时间计算。
+ */
+const TZ = (() => {
+  const tz = String(process.env.TRADELEDGER_TZ || '').trim();
+  if (!tz) return '';
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return tz; } catch { return ''; }
+})();
+const ZONED_FMT = TZ
+  ? new Intl.DateTimeFormat('en-US', {
+      timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', hourCycle: 'h23', weekday: 'short',
+    })
+  : null;
+const WD_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+const pad2 = (n) => String(n).padStart(2, '0');
+
+/** 返回 {dayKey, monthKey, hour, weekday}；无效日期返回 null */
+function zonedOf(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  if (!ZONED_FMT) {
+    return {
+      dayKey: `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`,
+      monthKey: `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`,
+      hour: d.getHours(),
+      weekday: d.getDay(),
+    };
+  }
+  const parts = {};
+  for (const p of ZONED_FMT.formatToParts(d)) parts[p.type] = p.value;
+  return {
+    dayKey: `${parts.year}-${parts.month}-${parts.day}`,
+    monthKey: `${parts.year}-${parts.month}`,
+    hour: Number(parts.hour) % 24,
+    weekday: WD_INDEX[parts.weekday] ?? 0,
+  };
+}
+
 /** 本地日期键：与日历、日期筛选保持同一口径 */
 export function localDayKey(iso) {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return String(iso).slice(0, 10);
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  const z = zonedOf(iso);
+  return z ? z.dayKey : String(iso).slice(0, 10);
+}
+
+/** 本地月份键：YYYY-MM */
+export function localMonthKey(iso) {
+  const z = zonedOf(iso);
+  return z ? z.monthKey : String(iso).slice(0, 7);
 }
 
 function winRateOf(list) {
@@ -127,13 +171,17 @@ export function analyze(trades) {
   const totalVolume = sum(sorted, (t) => t.notional);
   const avgDuration = mean(sorted, durationOf);
 
-  const days = [...new Set(sorted.map((t) => localDayKey(t.close_time)))].sort();
+  // 每笔交易的时区口径只算一次（Intl 较慢），天/小时/星期/月共用
+  const zone = sorted.map((t) => zonedOf(t.close_time)
+    || { dayKey: String(t.close_time).slice(0, 10), monthKey: String(t.close_time).slice(0, 7), hour: 0, weekday: 0 });
+  const days = [...new Set(zone.map((z) => z.dayKey))].sort();
   const activeDays = days.length || 1;
 
   /* ---------- 按天 ---------- */
   const dailyMap = new Map();
-  for (const t of sorted) {
-    const key = localDayKey(t.close_time);
+  for (let i = 0; i < sorted.length; i++) {
+    const t = sorted[i];
+    const key = zone[i].dayKey;
     if (!dailyMap.has(key)) {
       dailyMap.set(key, { date: key, pnl: 0, volume: 0, trades: 0, wins: 0, longs: 0, shorts: 0 });
     }
@@ -169,12 +217,12 @@ export function analyze(trades) {
   const weekdayBuckets = WEEKDAYS.map((label) => ({
     label, pnl: 0, trades: 0, wins: 0, volume: 0, winRate: 0,
   }));
-  for (const t of sorted) {
-    const d = new Date(t.close_time);
-    const h = hourBuckets[d.getHours()];
+  for (let i = 0; i < sorted.length; i++) {
+    const t = sorted[i];
+    const h = hourBuckets[zone[i].hour];
     h.pnl += t.pnl; h.trades += 1; h.volume += t.notional;
     if (t.pnl > 0) h.wins += 1;
-    const w = weekdayBuckets[d.getDay()];
+    const w = weekdayBuckets[zone[i].weekday];
     w.pnl += t.pnl; w.trades += 1; w.volume += t.notional;
     if (t.pnl > 0) w.wins += 1;
   }
@@ -187,9 +235,9 @@ export function analyze(trades) {
       weekday: wd, weekdayLabel: WEEKDAYS[wd], hour,
       trades: 0, wins: 0, pnl: 0, volume: 0, winRate: 0,
     })));
-  for (const t of sorted) {
-    const d = new Date(t.close_time);
-    const cell = hourWeekday[d.getDay()][d.getHours()];
+  for (let i = 0; i < sorted.length; i++) {
+    const t = sorted[i];
+    const cell = hourWeekday[zone[i].weekday][zone[i].hour];
     cell.trades += 1;
     cell.pnl += t.pnl;
     cell.volume += t.notional;
@@ -377,8 +425,9 @@ export function filterTrades(trades, q = {}) {
   if (q.tag) list = list.filter((t) => (t.tags || []).includes(q.tag));
   if (q.note === 'yes') list = list.filter((t) => t.note && String(t.note).trim());
   else if (q.note === 'no') list = list.filter((t) => !t.note || !String(t.note).trim());
-  if (q.from) list = list.filter((t) => t.close_time >= q.from);
-  if (q.to) list = list.filter((t) => t.close_time <= q.to);
+  // 日期筛选按「本地日」粒度，且包含结束日整天（此前 to 会丢掉结束日的全部交易）
+  if (q.from) { const from = String(q.from).slice(0, 10); list = list.filter((t) => localDayKey(t.close_time) >= from); }
+  if (q.to) { const to = String(q.to).slice(0, 10); list = list.filter((t) => localDayKey(t.close_time) <= to); }
   if (q.q) {
     const kw = String(q.q).toLowerCase();
     list = list.filter((t) =>
