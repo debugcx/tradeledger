@@ -11,7 +11,7 @@
 import { config } from './config.js';
 import * as store from './store.js';
 import { getExchange, exchangeList } from './exchanges/index.js';
-import { matchFills } from './fills.js';
+import { matchFills, matchEpisodes } from './fills.js';
 
 const DAY = 86400_000;
 
@@ -94,7 +94,21 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
   let cursor;
   let mode;
 
-  if (account.sync_done && previous.cursor) {
+  // 客户端配对交易所（returnsFills）：成交覆盖未达到回溯起点前，强制全窗扫描
+  // 原始成交；期间不导入半截回合，覆盖完成后按 symbol 全量重算并清理幻影。
+  const fillsFromKey = `fills_from_${accountId}`;
+  const fillsFrom = Number(store.getMeta(fillsFromKey, '0'));
+  const fillsComplete = Boolean(adapter.returnsFills)
+    && fillsFrom > 0
+    && fillsFrom <= Date.now() - lookbackDays * DAY + DAY;
+  const needFillsBackfill = Boolean(adapter.returnsFills) && !fillsComplete;
+
+  if (needFillsBackfill) {
+    mode = 'fills_backfill';
+    toMs = now;
+    fromMs = now - lookbackDays * DAY;
+    cursor = null;
+  } else if (account.sync_done && previous.cursor) {
     // 增量同步在 2 天窗口里超过一页时，继续把游标走完
     mode = 'incremental';
     fromMs = Number(previous.fromMs) || (now - 2 * DAY);
@@ -129,10 +143,49 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
       windowBudget: config.syncWindowBudget,
     });
     const trades = Array.isArray(result?.trades) ? result.trades : [];
-    // upsert：OKX 部分平仓会原地更新仓位历史行，重新拉到同 ID 时回写最终状态
-    const imported = store.importTrades(trades, accountId, { upsert: true });
     const nextCursor = result?.nextCursor || null;
     const done = !nextCursor;
+
+    let imported = { inserted: 0, updated: 0, skipped: 0 };
+    let fillsInserted = 0;
+    let prunedPhantoms = 0;
+    if (adapter.returnsFills && Array.isArray(result.fills)) {
+      // 客户端配对交易所：先持久化原始成交；某个 symbol 的成交覆盖足够
+      // （最早成交不晚于库里最早开仓）时按全量重算回合（幂等 upsert）并清理
+      // 增量批次产生的幻影；覆盖不足（成交已超出交易所保留期）则保持旧行为。
+      fillsInserted = store.insertTradeFills(accountId, account.exchange, result.fills);
+      const covered = done ? fromMs : (Number(nextCursor) || fromMs);
+      const nextWm = fillsFrom ? Math.min(fillsFrom, covered) : covered;
+      if (nextWm !== fillsFrom) store.setMeta(fillsFromKey, String(Math.max(0, Math.round(nextWm))));
+      if (fillsComplete) {
+        const matcher = adapter.episodeMatching ? matchEpisodes : matchFills;
+        const earliestOpen = new Map(
+          store.listSymbolEarliestOpen(accountId).map((r) => [r.symbol, Date.parse(r.min_open)]),
+        );
+        for (const sym of store.listTradeFillSymbols(accountId)) {
+          const raw = store.listTradeFills(accountId, sym);
+          const fillObjs = raw.map((r) => ({
+            id: r.external_id, symbol: sym, side: r.side, price: r.price, qty: r.qty,
+            fee: r.fee, time: r.time, orderType: r.order_type || 'other',
+          }));
+          const earliestFill = fillObjs.length ? fillObjs[0].time : Infinity;
+          const openBoundary = Number.isFinite(earliestOpen.get(sym)) ? earliestOpen.get(sym) : Infinity;
+          if (earliestFill <= openBoundary + 60_000) {
+            // 覆盖完整：重算可信，导入并清理幻影
+            const recomputed = matcher(fillObjs, account.exchange);
+            store.importTrades(recomputed, accountId, { upsert: true });
+            prunedPhantoms += store.pruneTradesNotIn(accountId, account.exchange, sym, recomputed.map((t) => t.external_id));
+          } else {
+            // 保留期外的老回合无法重算：该 symbol 回退旧行为（按本批增量导入）
+            const partial = trades.filter((t) => t.symbol === sym);
+            if (partial.length) store.importTrades(partial, accountId, { upsert: true });
+          }
+        }
+      }
+    } else {
+      // upsert：OKX 部分平仓会原地更新仓位历史行，重新拉到同 ID 时回写最终状态
+      imported = store.importTrades(trades, accountId, { upsert: true });
+    }
 
     // 资金费：按本批交易覆盖的时间范围单独拉取，再回填到对应交易。
     // OKX 的 funding 已在仓位历史里，适配器返回空数组。
@@ -256,6 +309,7 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
       done: account.sync_done ? 1 : (done ? 1 : 0),
       status: 'ok',
       message: `fetched ${trades.length}, inserted ${imported.inserted}, updated ${imported.updated || 0}, skipped ${imported.skipped}`
+        + (adapter.returnsFills ? `, fills ${fillsInserted}, pruned ${prunedPhantoms}` : '')
         + (fundingApplied ? `, funding ${fundingApplied}` : '')
         + (transfersInserted ? `, transfers ${transfersInserted}` : '')
         + (botsInserted ? `, bots ${botsInserted}` : '')

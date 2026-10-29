@@ -133,6 +133,7 @@ docs/REQUIREMENTS.md       需求规格
 ```bash
 npm test                  # 纯函数单元测试
 npm run smoke             # 需要先 npm start（默认 127.0.0.1:8790）
+                          # 冒烟脚本依赖演示数据：启动时加 SEED_DEMO=1
 npm run backup            # 创建本地快照；启用 WebDAV 时顺带上传
 npm run backup:list       # 列出本地 / 远端备份
 npm run restore:stage -- <文件名>   # 暂存一个备份

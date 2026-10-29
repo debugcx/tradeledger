@@ -217,8 +217,48 @@ test('增量备份：分块去重、重组校验与保留清理', async () => {
     assert.equal(listed.files[0].name, third.name);
     const dirPath = new URL(listed.dir).pathname;
     for (const c of listed.files[0].chunks) {
-      assert.ok(dav.files.has(`${dirPath}/chunks/${c.h}`), `分块 ${c.h.slice(0, 8)} 应仍在远端`);
+      assert.ok(dav.files.has(`${dirPath}/chunks/${c.f}`), `分块 ${c.f.slice(0, 8)} 应仍在远端`);
     }
+  } finally {
+    await new Promise((resolve) => dav.server.close(resolve));
+  }
+});
+
+test('增量备份：更换备份密码后，新快照可恢复、旧快照明确报错', async () => {
+  const dav = await startFakeDav();
+  try {
+    const cfg = {
+      webdavEnabled: true,
+      webdavUrl: `http://127.0.0.1:${dav.port}/dav`,
+      webdavUsername: 'u',
+      webdavPassword: 'p',
+      webdavDir: 'TradeLedger',
+      intervalHours: 6,
+      keep: 5,
+      backupMode: 'incremental',
+      passphrase: 'old-pass-123',
+      localEnabled: true,
+      localIntervalHours: 24,
+      localKeep: 10,
+    };
+    backup.saveBackupConfig(cfg);
+    const first = await backup.runRemoteBackup({ reason: 'rot-1' });
+    assert.equal(first.encrypted, true);
+
+    // 换密码后再备份：分块必须按新密码重新加密上传，不能复用旧密文
+    backup.saveBackupConfig({ ...cfg, passphrase: 'new-pass-456' });
+    const second = await backup.runRemoteBackup({ reason: 'rot-2' });
+    assert.equal(second.chunks.uploaded, second.chunks.total);
+    assert.equal(second.chunks.reused, 0);
+
+    const dl2 = await backup.downloadRemoteBackup(second.name);
+    assert.ok(dl2.buffer.equals(fs.readFileSync(second.snapshot.file)));
+
+    // 旧快照是旧密码加密的：新密码下给出明确提示，而不是解密崩溃
+    await assert.rejects(
+      () => backup.downloadRemoteBackup(first.name),
+      /旧的备份密码/,
+    );
   } finally {
     await new Promise((resolve) => dav.server.close(resolve));
   }

@@ -85,6 +85,9 @@ export const gate = {
   name: 'Gate.io',
   maxLookbackDays: 180,
   maxSpotLookbackDays: 180,
+  // 回合匹配在本地做（净头寸 0→0），需要原始成交持久化 + 全量重算
+  returnsFills: true,
+  episodeMatching: true,
   fields: [
     { key: 'api_key', label: 'API Key' },
     { key: 'api_secret', label: 'API Secret' },
@@ -127,7 +130,7 @@ export const gate = {
 
     // 净头寸 0→0 一个回合：开仓/加仓/减仓/清零不再拆成多条
     const trades = matchEpisodes(fills.slice(0, cap), 'gate');
-    return { trades, nextCursor };
+    return { trades, fills: fills.slice(0, cap), nextCursor };
   },
 
   async fetchFunding({ creds, fromMs, toMs, cursor, limit }) {

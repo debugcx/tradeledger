@@ -24,6 +24,7 @@ const PROXY_CANDIDATES = [
   'http://127.0.0.1:1080',
 ];
 let proxyCache = { value: undefined, at: 0 };
+const loggedHints = new Set();
 
 // 交易所专用代理的运行时配置提供器（由 store 注册，读 meta；env 作为兜底）
 let exchangeProxyProvider = null;
@@ -101,7 +102,12 @@ async function resolveProxy(targetHost) {
   for (const candidate of PROXY_CANDIDATES) {
     if (await probeProxy(candidate)) {
       proxyCache = { value: candidate, at: Date.now() };
-      console.warn(`[http] 未配置 HTTPS_PROXY，自动使用本地代理 ${candidate}`);
+      // 同一条提示只打一次，避免每 60 秒刷屏
+      const hint = `[http] 未配置 HTTPS_PROXY，自动使用本地代理 ${candidate}`;
+      if (!loggedHints.has(hint)) {
+        loggedHints.add(hint);
+        console.warn(hint);
+      }
       return candidate;
     }
   }

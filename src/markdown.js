@@ -23,6 +23,7 @@ function renderInline(input) {
 
   // 行内代码先抽出来，避免里面的 * / _ 被当成强调
   const codes = [];
+  const embeds = [];
   text = text.replace(/`([^`\n]+)`/g, (_, code) => {
     codes.push(code);
     return `\u0000C${codes.length - 1}\u0000`;
@@ -31,22 +32,25 @@ function renderInline(input) {
   text = text.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (match, alt, url) => {
     const safe = safeUrl(url, { image: true });
     if (!safe) return match;
-    return `<img src="${safe}" alt="${alt}" loading="lazy">`;
+    const i = embeds.push(`<img src="${safe}" alt="${alt}" loading="lazy">`) - 1;
+    return `\u0000E${i}\u0000`;
   });
 
   text = text.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (match, label, url) => {
     const safe = safeUrl(url);
     if (!safe) return match;
-    return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+    const i = embeds.push(`<a href="${safe}" target="_blank" rel="noopener noreferrer">${label}</a>`) - 1;
+    return `\u0000E${i}\u0000`;
   });
 
-  // 注意：强调必须在链接/图片插入之前处理，否则会误改 href 里的下划线
+  // 强调在链接/图片占位之后处理，URL 里的 * _ ~ 不会再被误改成标签
   text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   text = text.replace(/__([^_]+)__/g, '<strong>$1</strong>');
   text = text.replace(/~~([^~]+)~~/g, '<del>$1</del>');
   text = text.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
   text = text.replace(/(^|[^_])_([^_\n]+)_/g, '$1<em>$2</em>');
 
+  text = text.replace(/\u0000E(\d+)\u0000/g, (_, i) => embeds[Number(i)] || '');
   text = text.replace(/\u0000C(\d+)\u0000/g, (_, i) => `<code>${codes[Number(i)] || ''}</code>`);
   return text;
 }

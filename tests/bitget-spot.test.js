@@ -4,6 +4,7 @@ import http from 'node:http';
 
 const NOW = Date.now();
 const DAY = 86400_000;
+const SNOWFLAKE = 1234567890123456789n; // BigInt：19 位不能用 Number 字面量（解析即丢精度）
 const queries = [];
 let failNext = false;
 
@@ -19,10 +20,9 @@ const server = http.createServer((req, res) => {
   if (failNext) {
     return res.end(JSON.stringify({ code: '40001', msg: 'boom' }));
   }
-  const idStart = q.idLessThan ? Number(q.idLessThan) - 100 : 1000;
   const n = q.idLessThan ? 1 : 100;
   const rows = Array.from({ length: n }, (_, i) => ({
-    tradeId: String(idStart - i),
+    tradeId: q.idLessThan ? (SNOWFLAKE - 500n - BigInt(i)).toString() : (SNOWFLAKE - BigInt(i)).toString(),
     symbol: 'BTCUSDT',
     price: '60000',
     size: '0.01',
@@ -56,6 +56,8 @@ test('Bitget 现货：7 天窗口 + idLessThan 翻页', async () => {
     assert.ok(Number(q.endTime) - Number(q.startTime) <= 7 * DAY);
   }
   assert.ok(calls.some((q) => q.idLessThan));
+  // 19 位雪花 ID 必须原样透传（Number 化会丢精度导致漏页）
+  assert.ok(calls.some((q) => q.idLessThan === (SNOWFLAKE - 99n).toString()), calls.map((q) => q.idLessThan).join());
 });
 
 test('Bitget 现货：错误不再被静默吞掉', async () => {

@@ -510,3 +510,37 @@ test('LLM：三种接口的请求与解析（本地假服务）', async () => {
     server.close();
   }
 });
+
+test('Markdown：URL 中的下划线不被强调改写', () => {
+  const html = renderMarkdown('参考 [文档](https://example.com/a__b__c/next_page)');
+  assert.match(html, /href="https:\/\/example\.com\/a__b__c\/next_page"/);
+  assert.ok(!html.includes('<strong>'));
+});
+
+test('资金费归属：api upsert 之后不被抹掉', async () => {
+  const { openDb, setDb, closeDb } = await import('../src/db.js');
+  setDb(openDb(':memory:'));
+  const store = await import('../src/store.js');
+  const acc = store.createAccount({ exchange: 'gate', name: 'FUND' });
+  const trade = {
+    external_id: 'g1', symbol: 'DOGE/USDT', side: 'long', order_type: 'market',
+    size: 100, notional: 10, entry_price: 0.1, exit_price: 0.11,
+    open_time: '2026-10-01T00:00:00.000Z', close_time: '2026-10-02T00:00:00.000Z',
+    pnl: 1, fee: -0.01, funding: 0, source: 'api',
+  };
+  store.importTrades([trade], acc.id, { upsert: true });
+  store.insertFundingEvents([
+    { external_id: 'fe1', symbol: 'DOGE/USDT', time: '2026-10-01T08:00:00.000Z', amount: -0.5 },
+  ], acc.id);
+  assert.equal(store.applyFundingEvents(acc.id), 1);
+  const after = store.listTrades().find((t) => t.external_id === 'g1');
+  assert.equal(Number(after.funding), -0.5);
+
+  // 模拟下一次增量同步：适配器数据不带资金费，重新 upsert
+  store.importTrades([{ ...trade }], acc.id, { upsert: true });
+  const again = store.listTrades().find((t) => t.external_id === 'g1');
+  assert.equal(Number(again.funding), -0.5, '资金费不应被 upsert 抹掉');
+  assert.ok(Math.abs(Number(again.pnl) - 0.5) < 1e-9, 'pnl 应保留资金费调整');
+  store.clearAllData();
+  closeDb();
+});

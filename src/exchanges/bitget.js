@@ -62,6 +62,7 @@ export const bitget = {
   id: 'bitget',
   name: 'Bitget',
   maxLookbackDays: 90,
+  returnsFills: true,
   maxSpotLookbackDays: 90,
   fields: [
     { key: 'api_key', label: 'API Key' },
@@ -111,12 +112,12 @@ export const bitget = {
         }
         const lastId = rows[rows.length - 1]?.tradeId;
         if (rows.length < 100 || !lastId) break;
-        idLessThan = Number(lastId);
+        idLessThan = String(lastId);
       }
     }
 
     const trades = matchFills(fills.slice(0, cap), 'bitget');
-    return { trades, nextCursor };
+    return { trades, fills: fills.slice(0, cap), nextCursor };
   },
 
   async fetchFunding({ creds, fromMs, toMs, limit }) {
@@ -148,7 +149,7 @@ export const bitget = {
         if (events.length >= cap) break outer;
         const lastId = rows[rows.length - 1]?.billId;
         if (rows.length < 100 || !lastId) break;
-        idLessThan = Number(lastId);
+        idLessThan = String(lastId);
       }
     }
     return { events: events.slice(0, cap), nextCursor: null };
@@ -190,7 +191,7 @@ export const bitget = {
           }
           const lastId = rows[rows.length - 1]?.orderId || rows[rows.length - 1]?.billId;
           if (rows.length < 100 || !lastId) break;
-          idLessThan = Number(lastId);
+          idLessThan = String(lastId);
         }
         if (out.length >= cap) break;
       }
@@ -258,7 +259,7 @@ export const bitget = {
             }
             const lastId = rows[rows.length - 1]?.tradeId;
             if (rows.length < 100 || !lastId) break;
-            idLessThan = Number(lastId);
+            idLessThan = String(lastId);
           } catch (err) {
             errors.push(`${pair}: ${err?.message || err}`);
             break;

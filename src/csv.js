@@ -395,7 +395,12 @@ export function parseNumber(value) {
   const hasDot = s.includes('.');
   const hasComma = s.includes(',');
   if (hasDot && hasComma) {
-    s = s.replace(/,/g, '');
+    // 两种分隔符并存（如欧洲格式 1.234,56）：看最后出现的是谁，谁是就是小数点
+    const lastDot = s.lastIndexOf('.');
+    const lastComma = s.lastIndexOf(',');
+    s = lastComma > lastDot
+      ? s.replace(/\./g, '').replace(',', '.')
+      : s.replace(/,/g, '');
   } else if (hasComma && !hasDot) {
     const parts = s.split(',');
     s = parts.length === 2 && parts[1].length !== 3 ? `${parts[0]}.${parts[1]}` : s.replace(/,/g, '');
@@ -415,7 +420,8 @@ export function parseTimeValue(value, tzOffsetHours = 0) {
 
   if (/^\d{10}$/.test(raw)) return new Date(Number(raw) * 1000).toISOString();
   if (/^\d{13}$/.test(raw)) return new Date(Number(raw)).toISOString();
-  if (/^\d{16,19}$/.test(raw)) return new Date(Math.floor(Number(raw) / 1000)).toISOString();
+  if (/^\d{14,16}$/.test(raw)) return new Date(Math.round(Number(raw) / 1000)).toISOString();        // 微秒
+  if (/^\d{17,19}$/.test(raw)) return new Date(Math.round(Number(raw) / 1e6)).toISOString();         // 纳秒
 
   // 自带时区：直接交给 Date
   if (/(Z|[+-]\d{2}:?\d{2})$/i.test(raw)) {

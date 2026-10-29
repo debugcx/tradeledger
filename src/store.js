@@ -633,18 +633,97 @@ export function accountTradeStats() {
   );
 }
 
+/* ---------------- 原始成交（客户端配对交易所） ---------------- */
+
+/** 持久化适配器返回的原始成交；external_id 按 (账户, symbol) 唯一 */
+export function insertTradeFills(accountId, exchange, fills) {
+  if (!Array.isArray(fills) || !fills.length) return 0;
+  return tx((db) => {
+    const stmt = db.prepare(
+      `INSERT OR IGNORE INTO trade_fills
+         (account_id, exchange, symbol, external_id, side, price, qty, fee, time, order_type, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    let inserted = 0;
+    for (const f of fills) {
+      if (!f?.id || !f.symbol || !Number(f.time)) continue;
+      const r = stmt.run(
+        Number(accountId), String(exchange), String(f.symbol), String(f.id),
+        f.side === 'buy' ? 'buy' : 'sell',
+        Number(f.price) || 0, Number(f.qty) || 0, Number(f.fee) || 0,
+        Math.floor(Number(f.time) || 0), f.orderType ? String(f.orderType) : null, nowIso(),
+      );
+      inserted += Number(r.changes) || 0;
+    }
+    return inserted;
+  });
+}
+
+export function listTradeFillSymbols(accountId) {
+  return all('SELECT DISTINCT symbol FROM trade_fills WHERE account_id = ? ORDER BY symbol', Number(accountId))
+    .map((r) => r.symbol);
+}
+
+/** 每个 symbol 最早的开仓时间（判断成交覆盖是否够做全量重算） */
+export function listSymbolEarliestOpen(accountId) {
+  return all(
+    `SELECT symbol, MIN(open_time) AS min_open FROM trades
+     WHERE account_id = ? AND source = 'api' AND market = 'futures' GROUP BY symbol`,
+    Number(accountId),
+  );
+}
+
+export function listTradeFills(accountId, symbol) {
+  return all(
+    `SELECT external_id, side, price, qty, fee, time, order_type
+     FROM trade_fills WHERE account_id = ? AND symbol = ? ORDER BY time ASC, id ASC`,
+    Number(accountId), String(symbol),
+  );
+}
+
+/**
+ * 重算后清理幻影回合：删除该 symbol 下 source=api、external_id 以交易所前缀开头
+ * 但不在重算集合里的交易。删除前把挂在这些交易上的资金费事件释放为未分配，
+ * 下一次同步会重新分配到正确回合。
+ */
+export function pruneTradesNotIn(accountId, exchange, symbol, keepIds) {
+  const keep = new Set((keepIds || []).map(String));
+  const rows = all(
+    `SELECT id, external_id FROM trades
+     WHERE account_id = ? AND source = 'api' AND market = 'futures'
+       AND symbol = ? AND external_id LIKE ?`,
+    Number(accountId), String(symbol), `${exchange}:%`,
+  );
+  const dead = rows.filter((r) => !keep.has(String(r.external_id))).map((r) => Number(r.id));
+  if (!dead.length) return 0;
+  return tx((db) => {
+    const release = db.prepare('UPDATE funding_events SET trade_id = NULL WHERE trade_id = ?');
+    const del = db.prepare('DELETE FROM trades WHERE id = ?');
+    let n = 0;
+    for (const id of dead) {
+      release.run(id);
+      n += Number(del.run(id).changes) || 0;
+    }
+    return n;
+  });
+}
+
 /* ---------------- 交易 ---------------- */
 
 function attachTagsToRows(rows) {
   if (!rows.length) return rows;
   const ids = rows.map((r) => r.id);
-  const placeholders = ids.map(() => '?').join(',');
-  const links = all(
-    `SELECT tt.trade_id, t.name FROM trade_tags tt
-     JOIN tags t ON t.id = tt.tag_id
-     WHERE tt.trade_id IN (${placeholders}) ORDER BY t.name`,
-    ...ids,
-  );
+  // IN 占位符有上限（3.2 万），交易数增长后分批查询
+  const links = [];
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = ids.slice(i, i + 500);
+    links.push(...all(
+      `SELECT tt.trade_id, t.name FROM trade_tags tt
+       JOIN tags t ON t.id = tt.tag_id
+       WHERE tt.trade_id IN (${chunk.map(() => '?').join(',')}) ORDER BY t.name`,
+      ...chunk,
+    ));
+  }
   const byTrade = new Map();
   for (const link of links) {
     if (!byTrade.has(link.trade_id)) byTrade.set(link.trade_id, []);
@@ -800,13 +879,13 @@ export function importTrades(trades, accountId, { upsert = false } = {}) {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const exists = db.prepare(
-      'SELECT id, source FROM trades WHERE account_id = ? AND external_id = ?',
+      'SELECT id, source, funding, pnl FROM trades WHERE account_id = ? AND external_id = ?',
     );
     // OKX 偶尔补写行的 openTime（如从 cTime 整秒值精化为实际成交时间），同一回合
     // 会带着新外部 ID 再来一次。按 posId + 盈亏/数量指纹做二次匹配：命中则改键并回写，
     // 而不是插入重复记录。时间窗口 180s 内，避免误并同 posId 的相邻独立回合。
     const byFingerprint = db.prepare(
-      `SELECT id FROM trades WHERE account_id = ? AND source = 'api' AND external_id LIKE ?
+      `SELECT id, funding FROM trades WHERE account_id = ? AND source = 'api' AND external_id LIKE ?
          AND symbol = ? AND ABS(pnl - ?) < 1e-9 AND ABS(size - ?) < 1e-9
          AND ABS(strftime('%s', close_time) * 1000 - ?) < 180000 LIMIT 1`,
     );
@@ -818,6 +897,16 @@ export function importTrades(trades, accountId, { upsert = false } = {}) {
          updated_at = ? WHERE id = ?`,
     );
     const seen = new Set();
+    // gate/binance 的逐笔接口不带资金费字段：直接回写会把 applyFundingEvents
+    // 已分配的资金费（连同等额的 pnl 调整）抹掉。入参 funding=0 且库里已有
+    // 非零资金费时，沿用库值并把等额加回 pnl，保持「毛盈亏 = 净盈亏 − 手续费 − 资金费」。
+    const mergeFunding = (incoming, existing) => {
+      const funding = Number(incoming) || 0;
+      const prior = Number(existing) || 0;
+      return funding === 0 && prior !== 0
+        ? { funding: prior, pnlShift: prior }
+        : { funding, pnlShift: 0 };
+    };
     for (const trade of trades) {
       const ext = trade.external_id || `csv:${uid()}`;
       if (seen.has(ext)) { skipped++; continue; }
@@ -825,12 +914,13 @@ export function importTrades(trades, accountId, { upsert = false } = {}) {
       if (found) {
         // OKX 部分平仓会原地更新仓位历史行：api 行允许回写最终状态，其余来源一律跳过
         if (upsert && found.source === 'api' && trade.source === 'api') {
+          const mf = mergeFunding(trade.funding, found.funding);
           updateApi.run(
             String(trade.symbol || ''), String(trade.side || 'long'), trade.order_type || 'other',
             Number(trade.size) || 0, Number(trade.notional) || 0,
             Number(trade.entry_price) || 0, Number(trade.exit_price) || 0,
             trade.open_time, trade.close_time,
-            Number(trade.pnl) || 0, Number(trade.fee) || 0, Number(trade.funding) || 0,
+            (Number(trade.pnl) || 0) + mf.pnlShift, Number(trade.fee) || 0, mf.funding,
             at, found.id,
           );
           updated++;
@@ -851,13 +941,14 @@ export function importTrades(trades, accountId, { upsert = false } = {}) {
             )
           : null;
         if (twin) {
+          const mf = mergeFunding(trade.funding, twin.funding);
           rekey.run(ext, twin.id);
           updateApi.run(
             String(trade.symbol || ''), String(trade.side || 'long'), trade.order_type || 'other',
             Number(trade.size) || 0, Number(trade.notional) || 0,
             Number(trade.entry_price) || 0, Number(trade.exit_price) || 0,
             trade.open_time, trade.close_time,
-            Number(trade.pnl) || 0, Number(trade.fee) || 0, Number(trade.funding) || 0,
+            (Number(trade.pnl) || 0) + mf.pnlShift, Number(trade.fee) || 0, mf.funding,
             at, twin.id,
           );
           updated++;

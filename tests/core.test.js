@@ -306,3 +306,18 @@ test('seed：固定 564 笔，清空演示数据后归零', async () => {
   assert.equal(store.countTrades(), 0);
   closeDb();
 });
+
+test('parseNumber：欧洲小数与混合分隔符', () => {
+  assert.equal(parseNumber('1.234,56'), 1234.56);
+  assert.equal(parseNumber('1,234.56'), 1234.56);
+  assert.equal(parseNumber('1,23'), 1.23);
+  assert.equal(parseNumber('-1.234,56'), -1234.56);
+  assert.equal(parseNumber('1,234'), 1234);
+});
+
+test('parseTimeValue：微秒/纳秒时间戳', () => {
+  const ms = 1731231973737;
+  assert.equal(parseTimeValue(String(ms) + '000'), new Date(ms).toISOString()); // 微秒
+  assert.equal(parseTimeValue(String(ms) + '000000'), new Date(ms).toISOString()); // 纳秒
+  assert.equal(parseTimeValue('1731231973'), new Date(1731231973000).toISOString()); // 秒
+});

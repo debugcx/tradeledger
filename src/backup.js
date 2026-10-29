@@ -429,16 +429,26 @@ async function uploadFull(dir, snap, creds, uploadedAt) {
 
 /**
  * 增量模式：快照按内容分块，只上传清单里没有的块。
- * 块名 = 明文 SHA-256；块内容 = gzip(明文) [+ AES-GCM]。恢复时逐块校验再拼接。
+ * 块名 = 明文 SHA-256（加密时追加当前密码指纹），块内容 = gzip(明文) [+ AES-GCM]。
+ * 恢复时逐块校验再拼接；密码指纹保证换密码后旧块不会与新生成块混用。
  */
+const CHUNK_HASH_RE2 = /^[a-f0-9]{64}(-[a-f0-9]{10})?$/;
+
+function chunkFileName(plainHash, passphrase) {
+  // 密码指纹参与文件名：同一明文在不同密码代际下是不同远端对象，
+  // 换密码后新快照会重新上传（旧块留给旧清单，恢复时用旧密码）。
+  return passphrase ? `${plainHash}-${sha256Hex(`tl-keyfp:${passphrase}`).slice(0, 10)}` : plainHash;
+}
+
 async function uploadChunked(dir, snap, creds, manifest, uploadedAt) {
   const raw = fs.readFileSync(snap.file);
   const parts = chunkBuffer(raw);
   await ensureRemoteSubdir(dir, CHUNK_DIR, creds);
-  const known = new Map(); // 明文 hash → 已存大小
+  const known = new Map(); // 远端文件名 → 已存大小
   for (const f of manifest.files) {
     for (const c of f.chunks || []) {
-      if (c?.h && CHUNK_HASH_RE.test(String(c.h))) known.set(c.h, Number(c.s) || 0);
+      const fname = String(c?.f || c?.h || '');
+      if (fname && CHUNK_HASH_RE2.test(fname)) known.set(fname, Number(c.s) || 0);
     }
   }
   const chunks = [];
@@ -447,21 +457,22 @@ async function uploadChunked(dir, snap, creds, manifest, uploadedAt) {
   let uploadedBytes = 0;
   for (const part of parts) {
     const h = sha256Hex(part);
-    if (known.has(h)) {
-      chunks.push({ h, n: part.length, s: known.get(h) });
+    const fname = chunkFileName(h, creds.passphrase);
+    if (known.has(fname)) {
+      chunks.push({ h, f: fname, n: part.length, s: known.get(fname) });
       reused++;
       continue;
     }
     let stored = zlib.gzipSync(part, { level: 9 });
     if (creds.passphrase) stored = encryptBuffer(stored, creds.passphrase);
-    const res = await davRequest(appendPath(dir, CHUNK_DIR, h), {
+    const res = await davRequest(appendPath(dir, CHUNK_DIR, fname), {
       method: 'PUT',
       body: stored,
       headers: { 'content-type': 'application/octet-stream' },
     }, creds);
     if (!res.ok) throw davError(res, '上传备份分块');
-    chunks.push({ h, n: part.length, s: stored.length });
-    known.set(h, stored.length);
+    chunks.push({ h, f: fname, n: part.length, s: stored.length });
+    known.set(fname, stored.length);
     uploaded++;
     uploadedBytes += stored.length;
   }
@@ -473,6 +484,8 @@ async function uploadChunked(dir, snap, creds, manifest, uploadedAt) {
     sha256: sha256Hex(raw),
     created_at: uploadedAt,
     encrypted: Boolean(creds.passphrase),
+    // 当前密码指纹：恢复时校验，密码换过就给出明确提示而不是解密报错
+    kfp: creds.passphrase ? sha256Hex(`tl-keyfp:${creds.passphrase}`).slice(0, 10) : '',
     chunks,
     source: snap.name,
   };
@@ -487,13 +500,17 @@ async function pruneRemoteEntries(dir, manifest, keep, creds) {
   const removed = manifest.files.slice(keep);
   const referenced = new Set();
   for (const f of remaining) {
-    for (const c of f.chunks || []) if (c?.h) referenced.add(c.h);
+    for (const c of f.chunks || []) {
+      const fname = String(c?.f || c?.h || '');
+      if (fname) referenced.add(fname);
+    }
   }
   const dropChunks = new Set();
   for (const old of removed) {
     if (old.format === 'chunked') {
       for (const c of old.chunks || []) {
-        if (c?.h && !referenced.has(c.h)) dropChunks.add(c.h);
+        const fname = String(c?.f || c?.h || '');
+        if (fname && !referenced.has(fname)) dropChunks.add(fname);
       }
     } else {
       await davRequest(appendPath(dir, old.name), { method: 'DELETE' }, creds).catch(() => null);
@@ -572,11 +589,17 @@ export async function downloadRemoteBackup(name) {
   if (entry.format === 'chunked') {
     if (entry.encrypted && !creds.passphrase) throw new Error('该备份已加密，请先在设置页填写备份密码');
     if (!Array.isArray(entry.chunks) || !entry.chunks.length) throw new Error('远端备份清单缺少分块信息');
+    // 密码代际校验：备份分块是用上传时的密码加密的，密码换过就明确报错
+    const currentKfp = creds.passphrase ? sha256Hex(`tl-keyfp:${creds.passphrase}`).slice(0, 10) : '';
+    if (entry.encrypted && entry.kfp && entry.kfp !== currentKfp) {
+      throw new Error('这份备份是用旧的备份密码加密的：请在设置页换回当时的密码再恢复，或直接用本地快照');
+    }
     const parts = [];
     for (const c of entry.chunks) {
       const h = String(c?.h || '');
-      if (!CHUNK_HASH_RE.test(h)) throw new Error('远端备份清单分块信息不合法');
-      const res = await davRequest(appendPath(dir, CHUNK_DIR, h), { method: 'GET' }, creds);
+      const fname = String(c?.f || h);
+      if (!CHUNK_HASH_RE.test(h) || !CHUNK_HASH_RE2.test(fname)) throw new Error('远端备份清单分块信息不合法');
+      const res = await davRequest(appendPath(dir, CHUNK_DIR, fname), { method: 'GET' }, creds);
       if (!res.ok) throw davError(res, '下载备份分块');
       let buf = Buffer.from(await res.arrayBuffer());
       if (entry.encrypted) buf = decryptBuffer(buf, creds.passphrase);

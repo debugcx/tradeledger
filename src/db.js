@@ -289,6 +289,24 @@ function migrate(db) {
   db.exec("CREATE INDEX IF NOT EXISTS ix_trades_symbol ON trades(symbol)");
   // trade_tags(tag_id)：标签计数与级联删除按 tag 找子行，避免每次临时物化自动索引
   db.exec("CREATE INDEX IF NOT EXISTS ix_trade_tags_tag ON trade_tags(tag_id)");
+  // 客户端配对交易所（Gate/Binance 等）的原始成交持久化：
+  // 增量批次只含回合的一部分时，按 symbol 全量重算才能避免幻影交易。
+  db.exec(`CREATE TABLE IF NOT EXISTS trade_fills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    exchange TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    side TEXT NOT NULL,
+    price REAL NOT NULL,
+    qty REAL NOT NULL,
+    fee REAL NOT NULL DEFAULT 0,
+    time INTEGER NOT NULL,
+    order_type TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(account_id, symbol, external_id)
+  )`);
+  db.exec("CREATE INDEX IF NOT EXISTS ix_trade_fills_sym ON trade_fills(account_id, symbol, time)");
   db.exec("DROP INDEX IF EXISTS ux_notes_symbol");
   db.exec("DROP INDEX IF EXISTS ux_notes_spot");
 

@@ -55,6 +55,7 @@ export const bybit = {
   id: 'bybit',
   name: 'Bybit',
   maxLookbackDays: 730,
+  returnsFills: true,
   maxSpotLookbackDays: 730,
   fields: [
     { key: 'api_key', label: 'API Key' },
@@ -107,7 +108,7 @@ export const bybit = {
     }
 
     const trades = matchFills(fills.slice(0, cap), 'bybit');
-    return { trades, nextCursor };
+    return { trades, fills: fills.slice(0, cap), nextCursor };
   },
 
   async fetchFunding({ creds, fromMs, toMs, limit }) {

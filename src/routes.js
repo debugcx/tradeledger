@@ -2044,6 +2044,17 @@ route('GET', '/api/docs', (ctx) => html(page({
 export async function handle(request) {
   const url = new URL(request.url);
   const pathname = url.pathname;
+  // CSRF 第二层：浏览器发出的跨站写请求会带 Origin 头，与宿主不一致直接拒绝。
+  // 与 SameSite=Lax 叠加（curl/同源 fetch 不带 Origin 或同源，不受影响）。
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
+    const origin = request.headers.get('origin');
+    if (origin) {
+      const host = request.headers.get('host') || '';
+      let sameHost = false;
+      try { sameHost = new URL(origin).host === host; } catch { sameHost = false; }
+      if (!sameHost) return new Response('cross-origin request blocked', { status: 403 });
+    }
+  }
   try {
     const method = request.method === 'HEAD' ? 'GET' : request.method;
     const match = matchRoute(method, pathname);

@@ -47,6 +47,7 @@ export const hyperliquid = {
   id: 'hyperliquid',
   name: 'Hyperliquid',
   maxLookbackDays: 3650,
+  returnsFills: true,
   maxSpotLookbackDays: 3650,
   fields: [
     { key: 'wallet', label: '钱包地址', placeholder: '0x...' },
@@ -77,7 +78,7 @@ export const hyperliquid = {
     const sorted = rows.map(toFill).sort((a, b) => a.time - b.time);
     const batch = sorted.length > cap ? sorted.slice(-cap) : sorted;
     const nextCursor = sorted.length > cap ? String(batch[0].time - 1) : null;
-    return { trades: matchFills(batch, 'hyperliquid'), nextCursor };
+    return { trades: matchFills(batch, 'hyperliquid'), fills: batch, nextCursor };
   },
 
   async fetchFunding({ creds, fromMs, toMs, limit }) {

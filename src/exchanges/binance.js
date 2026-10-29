@@ -95,7 +95,6 @@ function toFill(row) {
     orderType: row.maker === true || String(row.maker) === 'true' ? 'limit' : 'market',
     fee,
     time: Number(row.time || 0),
-    orderType: 'other',
   };
 }
 
@@ -104,6 +103,7 @@ export const binance = {
   name: 'Binance',
   // 合约成交接口只保留约 6 个月；现货可用 fromId 翻到最早
   maxLookbackDays: 365,
+  returnsFills: true,
   maxSpotLookbackDays: 3650,
   fields: [
     { key: 'api_key', label: 'API Key' },
@@ -153,7 +153,7 @@ export const binance = {
     }
 
     const trades = matchFills(fills.slice(0, cap), 'binance');
-    return { trades, nextCursor };
+    return { trades, fills: fills.slice(0, cap), nextCursor };
   },
 
   async fetchFunding({ creds, fromMs, toMs, limit }) {    const cap = Math.max(100, Number(limit) || 2000);
