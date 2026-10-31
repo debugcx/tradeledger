@@ -4,11 +4,12 @@ const NAV = [
   { href: '/dashboard', label: '仪表盘', key: 'dashboard' },
   { href: '/dashboard/calendar', label: '盈亏日历', key: 'calendar' },
   { href: '/dashboard/journal', label: '交易记录', key: 'journal' },
-  { href: '/dashboard/transfers', label: '资金流水', key: 'transfers' },
-  { href: '/dashboard/spot', label: '现货', key: 'spot' },
-  { href: '/dashboard/bots', label: '策略机器人', key: 'bots' },
-  { href: '/dashboard/notes', label: '笔记', key: 'notes' },
+  { href: '/dashboard/assets', label: '资产总览', key: 'assets' },
   { href: '/dashboard/review', label: '周期报告', key: 'review' },
+  { href: '/dashboard/spot', label: '现货', key: 'spot' },
+  { href: '/dashboard/notes', label: '笔记', key: 'notes' },
+  { href: '/dashboard/transfers', label: '资金流水', key: 'transfers' },
+  { href: '/dashboard/bots', label: '策略机器人', key: 'bots' },
 ];
 
 const SETTINGS_NAV = [
@@ -65,6 +66,29 @@ export function layout({ title = 'TradeLedger', user = null, body = '', descript
 }
 
 export const page = (opts) => layout(opts);
+
+/** 现货 T 回合的方向文案：先买后卖 = 正T，先卖后买回 = 反T；合约维持做多/做空 */
+export function tradeSideLabel(trade) {
+  if (trade.market === 'spot' && trade.kind === 't_shot') {
+    return trade.side === 'long' ? '正T' : '反T';
+  }
+  return trade.side === 'long' ? '做多' : '做空';
+}
+
+/**
+ * 行内快评按钮：点击在表格行下方展开输入框（app.js initQuickNote），
+ * 回车/Ctrl+Enter 保存到 /api/trades/:id/note，免去进详情页。
+ */
+export function quickNoteBtn(trade, { maxPreview = 24, maxPreload = 500 } = {}) {
+  const note = String(trade.note || '');
+  const trimmed = note.trim();
+  if (!trimmed) {
+    return `<button type="button" class="quick-note-btn" data-quick-note="${trade.id}" data-note="" title="写一句话快评（回车保存）">+ 快评</button>`;
+  }
+  const flat = trimmed.replace(/\s+/g, ' ');
+  const preview = flat.length > maxPreview ? `${flat.slice(0, maxPreview)}…` : flat;
+  return `<button type="button" class="quick-note-btn has-note" data-quick-note="${trade.id}" data-note="${e(note.slice(0, maxPreload))}" title="${e(flat.slice(0, 200))}">${e(preview)}</button>`;
+}
 
 export function alert(message, kind = 'error') {
   if (!message) return '';

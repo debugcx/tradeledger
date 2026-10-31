@@ -438,3 +438,46 @@ meta(key, value)
   会出现「成本数量与当前余额不一致」，此时不计算未实现盈亏。
 - 已实现现货交易按单次同步窗口内的成交配对；跨窗口的开平仓可能不会生成已实现交易，但逐笔成交和持仓仍保留。
 - 期权、策略机器人不在本版本范围。
+
+---
+
+## 16. 资产总览（v0.2 增补）
+
+> 2026-10-31 起：在复盘台账之上增加全资产统计。目标口径：**场所 × 资产桶 × 币种**，统一 USD 估值，
+> 每条仓位可追溯来源。只读，不改变交易同步逻辑。
+
+### 16.1 数据模型
+
+| 表 | 说明 |
+|---|---|
+| `asset_positions` | 统一仓位：venue_kind(exchange/wallet/manual) × venue_id × bucket × asset，UNIQUE 防重 |
+| `manual_assets` | 手动台账：打新 / Launchpool / 双币赢等 API 查不到的产品，status=active 才计入 |
+| `wallets` / `wallet_providers` | 链上钱包（只读公开地址）与索引服务凭据（AES-256-GCM） |
+| `asset_snapshots` | 每日净资产快照（total/net/liabilities/by_bucket/by_venue） |
+| `asset_sync_runs` | 每次同步的来源接口、状态、失败原因；进程中断标记为 error |
+| `prices` | 美元价格缓存（稳定币 1；OKX/Binance/Gate 公共行情） |
+
+### 16.2 资产桶
+
+交易账户 / 合约账户 / 现货 / 资金账户 / 活期理财 / 定期理财 / 链上质押 / 打新 / 链上钱包 /
+DeFi 存款 / DeFi LP / DeFi 质押 / DeFi 奖励 / DeFi 借款（负债，负数计入）。
+
+- 统一账户（OKX 交易账户、Bybit UNIFIED）只计一次，不与现货桶重复。
+- 钱包仓位只信任索引器给出的价格/市值；不按同名币行情二次估值。
+- 未验证的钱包代币（Zerion `verified=false`、DeBank `is_verified=false`）不进入统计，同步记录里留提示。
+- 未估值仓位不计入总额，明细里单独标出。
+
+### 16.3 刷新
+
+- 交易所账内资产每 `ASSET_REFRESH_MINUTES`（默认 10 分钟）；钱包索引每 `WALLET_REFRESH_MINUTES`（默认 240 分钟），
+  也可在「资产总览 → 钱包 → 自动同步周期」里改（存 `meta.wallet_refresh_minutes`，页面设置优先于 env）。
+- 手动「刷新全部资产」忽略 TTL；单个场所失败不影响其他场所，失败桶保留旧数据。
+- 每轮刷新后写当日快照（UPSERT）。
+
+### 16.4 已知边界
+
+- 打新 / Launchpad / 双币赢多数没有持仓 API → 手动台账。
+- 币安在受限地区返回 451 时，全部桶失败；换代理节点后自动恢复。
+- Gate `earn/staking/assets`、Hyperliquid `delegatorSummary` 等接口已按官方路径接入，
+  但仅有空余额账号可验证；字段异常会在同步记录中显示。
+- 同一币种在多条链 / 多个合约上的仓位按 (桶, 币种, 链, 协议, 产品) 合并。

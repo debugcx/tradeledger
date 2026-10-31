@@ -4,7 +4,7 @@ import {
 import { tradeBreakdown } from '../breakdown.js';
 import { renderMarkdown } from '../markdown.js';
 import { lineChart, PALETTE } from '../charts.js';
-import { shell } from './layout.js';
+import { shell, quickNoteBtn, tradeSideLabel } from './layout.js';
 
 const sign = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : 'flat');
 
@@ -155,22 +155,29 @@ function filterBar(filters, symbols, tags, accounts = []) {
   </form>`;
 }
 
-export function journalPage({ user, trades, filters, tags, symbols, pagination, noteCoverage, accounts = [], back = '', notice, error }) {
+export function journalPage({ user, trades, filters, tags, symbols, pagination, noteCoverage, accounts = [], trashedCount = 0, back = '', notice, error }) {
   const backQ = back ? `?back=${encodeURIComponent(back)}` : '';
   const rows = trades.map((t) => `<tr>
     <td>${fmtDateTime(t.close_time)}</td>
     <td><a href="/dashboard/journal/${t.id}"><b>${e(t.symbol)}</b></a>
       <div class="muted small">${t.market === 'spot' ? '现货' : '合约'} · ${e(t.account_name || '—')} · <a href="/dashboard/notes/symbol/${encodeURIComponent(t.symbol)}">档案</a></div></td>
-    <td><span class="side-tag ${t.side}">${t.side === 'long' ? '做多' : '做空'}</span></td>
+    <td><span class="side-tag ${t.side}">${e(tradeSideLabel(t))}</span></td>
     <td>${t.order_type === 'limit' ? '挂单' : t.order_type === 'market' ? '吃单' : t.order_type === 'mixed' ? '混合' : '—'}</td>
     <td class="num">${fmtPrice(t.entry_price)} → ${fmtPrice(t.exit_price)}</td>
     <td class="num">${fmtMoney(t.notional, { sign: false })}</td>
     <td class="num ${sign(t.pnl)} strong">${fmtMoney(t.pnl)}</td>
     <td class="num muted">${e(fmtDurationShort(new Date(t.close_time) - new Date(t.open_time)))}</td>
     <td class="tags-cell">${(t.tags || []).map((x) => `<span class="tag-pill">${e(x)}</span>`).join(' ')}</td>
+    <td class="quick-note-cell">${quickNoteBtn(t)}</td>
     <td class="row-actions">
       <a class="btn btn-ghost small" href="/dashboard/journal/${t.id}${backQ}">详情</a>
       <a class="btn btn-ghost small" href="/dashboard/journal/${t.id}/edit${backQ}">编辑</a>
+      <form method="post" action="/dashboard/journal/${t.id}/trash" class="inline" data-no-guard>
+        <input type="hidden" name="back" value="${e(back || '/dashboard/journal')}">
+        <button class="btn btn-ghost small danger" type="submit"
+          title="移入垃圾箱：不参与统计，同步也不会再导回"
+          onclick="return confirm('把这条记录移入垃圾箱？\\n统计会立即排除它，交易所同步也不会再把它导回来；可在交易记录 → 垃圾箱里恢复。')">删除</button>
+      </form>
     </td>
   </tr>`).join('');
 
@@ -191,16 +198,19 @@ export function journalPage({ user, trades, filters, tags, symbols, pagination, 
         <h2>交易记录</h2>
         <div class="head-actions">
           <a class="btn btn-ghost small" href="/dashboard/import">导入 CSV</a>
+          <a class="btn btn-ghost small" href="/dashboard/journal/trash">垃圾箱${trashedCount ? ` (${fmtNum(trashedCount)})` : ''}</a>
           <a class="btn btn-primary small" href="/dashboard/journal/new">+ 手动记录</a>
         </div>
       </div>
+      <div class="table-wrap">
       <table class="table">
         <thead><tr>
           <th>平仓时间</th><th>币种</th><th>方向</th><th>类型</th><th class="num">开仓 → 平仓</th>
-          <th class="num">名义价值</th><th class="num">净盈亏</th><th class="num">持仓</th><th>标签</th><th></th>
+          <th class="num">名义价值</th><th class="num">净盈亏</th><th class="num">持仓</th><th>标签</th><th>复盘</th><th></th>
         </tr></thead>
-        <tbody>${rows || '<tr><td colspan="10" class="muted center">没有符合条件的交易</td></tr>'}</tbody>
+        <tbody>${rows || '<tr><td colspan="11" class="muted center">没有符合条件的交易</td></tr>'}</tbody>
       </table>
+      </div>
       ${pager(filters, pagination)}
     </section>`;
 
@@ -308,6 +318,14 @@ function opsPanel(trade, ops) {
     return (n < 1e-10 ? 0 : n).toLocaleString('en-US', { maximumFractionDigits: 6 });
   };
   let pos = 0;
+  let makerCount = 0;
+  let takerCount = 0;
+  const fillOrderType = (f) => {
+    if (f.orderType === 'limit' || f.orderType === 'market') return f.orderType;
+    if (f.execType === 'M') return 'limit';
+    if (f.execType === 'T') return 'market';
+    return null;
+  };
   const rows = ops.fills.map((f) => {
     const before = pos;
     const opened = Math.abs(before) < 1e-9;
@@ -315,14 +333,23 @@ function opsPanel(trade, ops) {
     const flat = Math.abs(pos) < 1e-9;
     const grew = Math.abs(pos) > Math.abs(before) + 1e-9;
     const op = opened ? '首次开仓' : flat ? '平仓（清零）' : grew ? '加仓' : '减仓 / 做T';
+    const ot = fillOrderType(f);
+    if (ot === 'limit') makerCount++;
+    else if (ot === 'market') takerCount++;
+    const otCell = ot === 'limit'
+      ? '<span class="status-badge blue">限价挂单</span>'
+      : ot === 'market'
+        ? '<span class="status-badge muted">市价吃单</span>'
+        : '<span class="muted">—</span>';
     return `<tr>
       <td class="small">${e(fmtDateTime(new Date(f.t).toISOString()))}</td>
       <td>${op}</td>
       <td>${f.side === 'buy' ? '<span class="pos">买入</span>' : '<span class="neg">卖出</span>'}</td>
-      <td>${fmtPrice(f.price)}</td>
-      <td>${fmtQty(f.qty)}</td>
-      <td class="${f.fee <= 0 ? 'neg' : 'pos'}">${f.fee ? `${fmtQty(Math.abs(f.fee))} ${e(f.feeCcy)}` : '—'}</td>
-      <td class="strong">${fmtQty(pos)}</td>
+      <td>${otCell}</td>
+      <td class="num">${fmtPrice(f.price)}</td>
+      <td class="num">${fmtQty(f.qty)}</td>
+      <td class="num ${f.fee <= 0 ? 'neg' : 'pos'}">${f.fee ? `${fmtQty(Math.abs(f.fee))} ${e(f.feeCcy)}` : '—'}</td>
+      <td class="num strong">${fmtQty(pos)}</td>
     </tr>`;
   }).join('');
   let buy = 0, sell = 0;
@@ -334,16 +361,17 @@ function opsPanel(trade, ops) {
   const feeText = [...fees.entries()].map(([ccy, v]) => `${fmtQty(v)} ${e(ccy)}`).join(' + ') || '—';
   return `<section class="panel">
     <div class="panel-head"><h2>操作明细（开仓 → 平仓）</h2>
-      <span class="muted small">同一回合的开仓、加仓、减仓、做T 全部归属这条记录 · 共 ${fmtNum(ops.fills.length)} 笔成交</span></div>
+      <span class="muted small">同一回合的开仓、加仓、减仓、做T 全部归属这条记录 · 共 ${fmtNum(ops.fills.length)} 笔成交${makerCount || takerCount ? ` · 挂单 ${fmtNum(makerCount)} / 吃单 ${fmtNum(takerCount)}` : ''}</span></div>
     <div class="table-wrap">
     <table class="table">
-      <thead><tr><th>时间</th><th>操作</th><th>方向</th><th>价格</th><th>数量</th><th>手续费</th><th>本笔后持仓</th></tr></thead>
+      <thead><tr><th>时间</th><th>操作</th><th>方向</th><th>委托</th><th class="num">价格</th><th class="num">数量</th><th class="num">手续费</th><th class="num">本笔后持仓</th></tr></thead>
       <tbody>
         ${rows}
         <tr><td colspan="4" class="strong">合计</td>
+          <td></td>
           <td class="strong">买 ${fmtQty(buy)} / 卖 ${fmtQty(sell)}</td>
-          <td>${feeText}</td>
-          <td class="strong">${Math.abs(pos) < 1e-9 ? '归零' : fmtQty(pos)}</td></tr>
+          <td class="num">${feeText}</td>
+          <td class="num strong">${Math.abs(pos) < 1e-9 ? '归零' : fmtQty(pos)}</td></tr>
       </tbody>
     </table>
     </div>
@@ -351,18 +379,27 @@ function opsPanel(trade, ops) {
   </section>`;
 }
 
-export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTags = [], back = '', notice, error }) {
+export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTags = [], allTags = [], aiReady = false, aiModel = '', back = '', notice, error }) {
   const b = tradeBreakdown(trade);
   const pnlCls = sign(trade.pnl);
   const tags = (trade.tags || []).map((x) => `<span class="tag-pill">${e(x)}</span>`).join(' ');
   // 详情页行内快捷标签：与仪表盘复盘队列同一套交互（点击即切换，免去进编辑表单）
   const current = new Set(trade.tags || []);
-  const quickRow = (quickTags || []).map((x) => `
+  const tagButton = (name) => `
       <form method="post" action="/dashboard/journal/${trade.id}/tag" class="inline quick-tag-form" data-no-guard>
-        <input type="hidden" name="tag" value="${e(x.name)}">
+        <input type="hidden" name="tag" value="${e(name)}">
         <input type="hidden" name="back" value="/dashboard/journal/${trade.id}">
-        <button class="tag-pill ${current.has(x.name) ? 'active' : ''}" type="submit">${e(x.name)}</button>
-      </form>`).join(' ');
+        <button class="tag-pill ${current.has(name) ? 'active' : ''}" type="submit">${e(name)}</button>
+      </form>`;
+  const quickRow = (quickTags || []).map((x) => tagButton(x.name)).join(' ');
+  // 快捷列表之外的标签：可展开后直接挂到这笔交易，不用进编辑表单
+  const quickNames = new Set((quickTags || []).map((x) => x.name));
+  const extraTags = (allTags || []).filter((t) => !quickNames.has(t.name));
+  const extraRow = extraTags.length ? `
+      <details style="margin-top:8px">
+        <summary class="muted small" style="cursor:pointer">更多标签（${extraTags.length}）</summary>
+        <div class="tag-row" style="margin-top:8px">${extraTags.map((t) => tagButton(t.name)).join(' ')}</div>
+      </details>` : '';
   const diffCls = b.priceMatch === null ? 'flat' : b.priceMatch ? 'pos' : 'neg';
   const diffText = b.pricePnl === null
     ? '缺少开仓价 / 平仓价 / 数量，无法独立复算'
@@ -372,18 +409,19 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTa
     <section class="panel">
       <div class="panel-head">
         <h2>${e(trade.symbol)}
-          <span class="side-tag ${trade.side}">${trade.side === 'long' ? '做多' : '做空'}</span>
+          <span class="side-tag ${trade.side}">${e(tradeSideLabel(trade))}</span>
           <span class="status-badge ${trade.market === 'spot' ? 'blue' : 'muted'}">${trade.market === 'spot' ? '现货' : '合约'}</span>
+          ${trade.kind === 't_shot' ? '<span class="status-badge blue" title="做T：24 小时内同数量闭环，不影响底仓成本">T 回合</span>' : ''}
           <span class="pill ${b.pnl > 0 ? 'pill-green' : b.pnl < 0 ? 'pill-red' : ''}">${fmtMoney(trade.pnl)}</span>
         </h2>
         <div class="head-actions">
           <a class="btn btn-ghost small" href="${e(back || '/dashboard/journal')}">返回列表</a>
           <a class="btn btn-ghost small" href="/dashboard/notes/symbol/${encodeURIComponent(trade.symbol)}">交易对档案</a>
           <a class="btn btn-ghost small" href="/dashboard/journal/${trade.id}/edit${back ? `?back=${encodeURIComponent(back)}` : ''}">编辑数据</a>
-          <form method="post" action="/dashboard/journal/${trade.id}/delete" class="inline"
-            onsubmit="return confirm('确定删除这笔交易吗？标签关联也会一起删除。')">
+          <form method="post" action="/dashboard/journal/${trade.id}/trash" class="inline" data-no-guard>
             <input type="hidden" name="back" value="${e(back)}">
-            <button class="btn btn-ghost small danger" type="submit">删除</button>
+            <button class="btn btn-ghost small danger" type="submit"
+              onclick="return confirm('把这条记录移入垃圾箱？\\n统计会立即排除它，交易所同步也不会再把它导回来；可在交易记录 → 垃圾箱里恢复。')">删除</button>
           </form>
         </div>
       </div>
@@ -414,6 +452,7 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTa
         <span class="muted small">快捷标签：</span>${quickRow}
         <a class="muted small" href="/dashboard/tags#quick-tags">管理</a>
       </div>` : ''}
+      ${extraRow}
     </section>
 
     ${curvePanel(trade, curve)}
@@ -448,11 +487,20 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTa
 
     <section class="panel">
       <div class="panel-head"><h2>交易复盘</h2>
-        ${trade.note_updated_at ? `<span class="muted small">上次更新 ${e(fmtDateTime(trade.note_updated_at))}</span>` : ''}</div>
+        <div class="head-actions">
+          ${aiReady
+            ? `<button class="btn btn-ghost small" type="button" data-trade-ai="${trade.id}" title="使用 ${e(aiModel)} 生成复盘">AI 复盘</button>`
+            : '<a class="btn btn-ghost small" href="/dashboard/settings/ai">配置 AI 模型</a>'}
+          ${trade.note_updated_at ? `<span class="muted small">上次更新 ${e(fmtDateTime(trade.note_updated_at))}</span>` : ''}
+        </div></div>
+      <p class="muted small" data-trade-ai-status style="margin:0 0 8px">${aiReady ? `AI 会结合这笔交易与持仓期 K 线走势生成复盘，并直接填入下方笔记框，可编辑后再保存。` : '配置 AI 模型后，可一键生成这笔交易的复盘。'}</p>
+      <div class="report-progress" data-trade-ai-progress hidden>
+        <div class="report-progress-bar"><span></span></div>
+      </div>
       ${trade.note ? `<div class="markdown" style="margin-bottom:16px">${renderMarkdown(trade.note)}</div>` : ''}
       <form method="post" action="/dashboard/journal/${trade.id}/note" class="form">
         <label class="field wide"><span>这笔交易为什么开？执行了计划吗？错在哪 / 对在哪？（支持 Markdown）</span>
-          <textarea name="note" rows="10">${e(trade.note || '')}</textarea>
+          <textarea name="note" rows="10" data-trade-note>${e(trade.note || '')}</textarea>
         </label>
         <div class="form-actions">
           <button class="btn btn-primary" type="submit">保存复盘</button>
@@ -465,5 +513,52 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTa
     active: 'journal', user, title: '交易详情',
     subtitle: `#${trade.id} · ${e(trade.symbol)} · 平仓于 ${e(fmtDateTime(trade.close_time))}`,
     notice, error, body,
+  });
+}
+
+/** 垃圾箱：软删除的交易在这里集中管理；同步不会再导回，恢复或彻底删除二选一 */
+export function journalTrashPage({ user, trades = [], notice, error }) {
+  const rows = trades.map((t) => `<tr>
+    <td class="small">${e(fmtDateTime(t.trashed_at))}</td>
+    <td class="small">${e(fmtDateTime(t.close_time))}</td>
+    <td><b>${e(t.symbol)}</b><div class="muted small">${t.market === 'spot' ? '现货' : '合约'} · ${e(t.account_name || '—')}</div></td>
+    <td><span class="side-tag ${t.side}">${e(tradeSideLabel(t))}</span></td>
+    <td class="num ${sign(t.pnl)}">${fmtMoney(t.pnl)}</td>
+    <td class="small muted">${e((t.note || '').replace(/\s+/g, ' ').slice(0, 40))}${t.note && t.note.length > 40 ? '…' : ''}</td>
+    <td class="row-actions">
+      <form method="post" action="/dashboard/journal/${t.id}/restore" class="inline">
+        <button class="btn btn-ghost small" type="submit">恢复</button>
+      </form>
+      <form method="post" action="/dashboard/journal/${t.id}/delete" class="inline">
+        <button class="btn btn-ghost small danger" type="submit"
+          onclick="return confirm('彻底删除后无法恢复。若交易所侧仍有这条记录，下次同步会重新导入。确定删除？')">彻底删除</button>
+      </form>
+    </td>
+  </tr>`).join('');
+
+  return shell({
+    active: 'journal', user,
+    title: '交易垃圾箱',
+    subtitle: '误操作或不需要的记录先扔到这里：不参与统计，交易所同步也不会再导回',
+    notice, error,
+    body: `
+    <div class="page-actions">
+      <a class="btn btn-ghost small" href="/dashboard/journal">← 返回交易记录</a>
+    </div>
+    <section class="panel">
+      <div class="panel-head"><h2>垃圾箱</h2>
+        <span class="muted small">${trades.length ? `${fmtNum(trades.length)} 条` : ''}</span></div>
+      ${trades.length ? `<div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>扔入时间</th><th>平仓时间</th><th>交易对</th><th>方向</th><th class="num">净盈亏</th><th>备注</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      </div>
+      <p class="chart-note">「恢复」把记录原样放回交易记录（标签与笔记一起回来）；「彻底删除」从数据库移除——
+      若交易所侧仍有这条数据，下次同步会重新导入，届时可再扔进垃圾箱。
+      另注意：现货和客户端配对的合约记录由成交重算得出，若之后的同步改变了配对结构
+      （例如先前的卖出被买回、闭环成一个做T回合），可能生成一条新记录——再扔一次即可，之后不会再出现。</p>`
+        : '<div class="muted center" style="padding:20px 0">垃圾箱是空的。</div>'}
+    </section>`,
   });
 }

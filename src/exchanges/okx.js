@@ -473,6 +473,82 @@ export const okx = {
     return { fills: fills.slice(0, cap), nextCursor: null };
   },
 
+  /**
+   * 资产总览：交易账户 / 资金账户 / 余币宝 / 链上质押。
+   * 交易账户（统一账户）本身包含现货抵押品，因此不再单独拉现货桶，避免重复计算。
+   */
+  async fetchAssetPositions(creds) {
+    const positions = [];
+    const buckets = [];
+    const errors = [];
+    const mark = (bucket) => { if (!buckets.includes(bucket)) buckets.push(bucket); };
+
+    try {
+      const rows = await call('/api/v5/account/balance', creds);
+      mark('trading');
+      for (const d of rows[0]?.details || []) {
+        const amount = num(d.eq ?? d.cashBal);
+        if (!d.ccy || amount === 0) continue;
+        positions.push({
+          bucket: 'trading', asset: d.ccy, amount,
+          source: 'okx:/api/v5/account/balance', source_ref: '交易账户',
+        });
+      }
+    } catch (err) {
+      errors.push(`交易账户：${err?.message || err}`);
+    }
+
+    try {
+      const rows = await call('/api/v5/asset/balances', creds);
+      mark('funding');
+      for (const b of Array.isArray(rows) ? rows : []) {
+        const amount = num(b.bal);
+        if (!b.ccy || amount === 0) continue;
+        positions.push({
+          bucket: 'funding', asset: b.ccy, amount,
+          source: 'okx:/api/v5/asset/balances', source_ref: '资金账户',
+        });
+      }
+    } catch (err) {
+      errors.push(`资金账户：${err?.message || err}`);
+    }
+
+    try {
+      const rows = await call('/api/v5/finance/savings/balance', creds);
+      mark('earn_flexible');
+      for (const r of Array.isArray(rows) ? rows : []) {
+        const amount = num(r.amt);
+        if (!r.ccy || amount === 0) continue;
+        positions.push({
+          bucket: 'earn_flexible', asset: r.ccy, amount,
+          product: '余币宝',
+          source: 'okx:/api/v5/finance/savings/balance', source_ref: '余币宝活期',
+        });
+      }
+    } catch (err) {
+      errors.push(`余币宝：${err?.message || err}`);
+    }
+
+    try {
+      const rows = await call('/api/v5/finance/staking-defi/orders-active', creds);
+      mark('staking');
+      for (const r of Array.isArray(rows) ? rows : []) {
+        const amount = num(r.amt);
+        if (!r.ccy || amount === 0) continue;
+        positions.push({
+          bucket: 'staking', asset: r.ccy, amount,
+          protocol: String(r.protocol || ''),
+          product: String(r.productId || r.state || '链上质押'),
+          source: 'okx:/api/v5/finance/staking-defi/orders-active', source_ref: '链上质押',
+        });
+      }
+    } catch (err) {
+      errors.push(`链上质押：${err?.message || err}`);
+    }
+
+    return { positions, buckets, errors };
+  },
+
   async fetchSpotLive(creds) {
     const trading = await call('/api/v5/account/balance', creds);
     let funding = [];

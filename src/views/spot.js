@@ -1,7 +1,7 @@
 import { escapeHtml as e, fmtMoney, fmtNum, fmtPrice, fmtDateTime } from '../http.js';
-import { shell } from './layout.js';
+import { shell, quickNoteBtn, tradeSideLabel } from './layout.js';
 
-export function spotPage({ user, accounts = [], accountId = null, balances, holdings, fills, spotTrades = [], notice, error }) {
+export function spotPage({ user, accounts = [], accountId = null, balances, holdings, fills, spotTrades = [], noteFilter = 'all', unwrittenCount = 0, notice, error }) {
   const spotValue = holdings.reduce((a, h) => a + (Number(h.value) || 0), 0);
   const withCost = holdings.filter((h) => h.avg_cost !== null && h.avg_cost !== undefined);
   const coverage = holdings.length ? withCost.length / holdings.length : 0;
@@ -46,11 +46,18 @@ export function spotPage({ user, accounts = [], accountId = null, balances, hold
   const spotTradeRows = spotTrades.map((t) => `<tr>
     <td class="small">${e(fmtDateTime(t.close_time))}</td>
     <td><a href="/dashboard/spot/symbol/${encodeURIComponent(t.symbol)}"><b>${e(t.symbol)}</b></a><div class="muted small">${e(t.account_name)}</div></td>
-    <td><span class="side-tag ${t.side}">${t.side === 'long' ? '做多' : '做空'}</span></td>
+    <td><span class="side-tag ${t.side}">${e(tradeSideLabel(t))}</span></td>
     <td class="num">${fmtNum(t.size, 8)}</td>
     <td class="num ${t.pnl > 0 ? 'pos' : t.pnl < 0 ? 'neg' : ''}">${fmtMoney(t.pnl)}</td>
+    <td class="quick-note-cell">${quickNoteBtn(t)}</td>
     <td><a class="btn btn-ghost small" href="/dashboard/journal/${t.id}">详情</a></td>
   </tr>`).join('');
+
+  const spotFilterTabs = `<div class="notes-tabs spot-note-tabs">
+    <a href="/dashboard/spot" class="${noteFilter === 'all' ? 'active' : ''}">全部</a>
+    <a href="/dashboard/spot?note=no" class="${noteFilter === 'no' ? 'active' : ''}">没写复盘${unwrittenCount ? ` <span class="muted">${fmtNum(unwrittenCount)}</span>` : ''}</a>
+    <a href="/dashboard/journal?market=spot&note=no">去交易记录筛选 →</a>
+  </div>`;
 
   const body = `
     ${accounts.length > 1 ? `<form method="get" action="/dashboard/spot" class="filter-bar" style="margin:0 0 12px">
@@ -81,16 +88,19 @@ export function spotPage({ user, accounts = [], accountId = null, balances, hold
 
     <section class="panel">
       <div class="panel-head"><h2>现货交易复盘</h2>
-        <span class="muted small">卖出配对后的已实现交易；<a href="/dashboard/journal?market=spot">在交易记录中筛选</a></span></div>
+        <span class="muted small">做T 回合与减仓/清仓记录；点「+ 快评」就地写一句话复盘</span></div>
+      ${spotFilterTabs}
+      <div class="table-wrap">
       <table class="table">
-        <thead><tr><th>平仓时间</th><th>交易对</th><th>方向</th><th>数量</th><th>盈亏</th><th></th></tr></thead>
-        <tbody>${spotTradeRows || '<tr><td colspan="6" class="muted center">还没有已实现的现货交易。买入后卖出，配对完成才会出现在这里。</td></tr>'}</tbody>
+        <thead><tr><th>平仓时间</th><th>交易对</th><th>方向</th><th class="num">数量</th><th class="num">盈亏</th><th>复盘</th><th></th></tr></thead>
+        <tbody>${spotTradeRows || `<tr><td colspan="7" class="muted center">${noteFilter === 'no' ? '都写过复盘了 ✓' : '还没有已实现的现货交易。买入后卖出，配对完成才会出现在这里。'}</td></tr>`}</tbody>
       </table>
+      </div>
     </section>
 
     <section class="panel">
       <div class="panel-head"><h2>现货成交</h2>
-        <span class="muted small">最近 200 笔；逐笔成交按 long-only FIFO 统计已实现盈亏</span></div>
+        <span class="muted small">最近 200 笔；24 小时内同数量闭环的买卖先记为一个做T回合，剩余成交按 long-only FIFO 配对</span></div>
       <table class="table">
         <thead><tr><th>时间</th><th>账户</th><th>交易对</th><th>方向</th><th>价格</th><th>数量</th><th>手续费</th></tr></thead>
         <tbody>${fillRows || '<tr><td colspan="7" class="muted center">还没有现货成交记录。</td></tr>'}</tbody>

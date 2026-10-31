@@ -272,6 +272,63 @@ export const bitget = {
     return { fills: fills.slice(0, cap), nextCursor: null, errors };
   },
 
+  /**
+   * 资产总览：合约账户 / 现货账户 / 活期储蓄 / 链上质押。
+   * Bitget Launchpad 没有持仓查询接口，走手动台账。
+   */
+  async fetchAssetPositions(creds) {
+    const positions = [];
+    const buckets = [];
+    const errors = [];
+    const mark = (bucket) => { if (!buckets.includes(bucket)) buckets.push(bucket); };
+    const push = (bucket, asset, amount, source, sourceRef, extra = {}) => {
+      if (!asset || !Number.isFinite(amount) || amount === 0) return;
+      positions.push({ bucket, asset, amount, source, source_ref: sourceRef, ...extra });
+    };
+
+    try {
+      const rows = await call('/api/v2/mix/account/accounts', { productType: 'USDT-FUTURES' }, creds);
+      mark('futures');
+      for (const a of rows || []) {
+        push('futures', a.marginCoin || 'USDT', num(a.accountEquity), 'bitget:/api/v2/mix/account/accounts', '合约账户');
+      }
+    } catch (err) {
+      errors.push(`合约账户：${err?.message || err}`);
+    }
+
+    try {
+      const rows = await call('/api/v2/spot/account/assets', {}, creds);
+      mark('spot');
+      for (const a of rows || []) {
+        push('spot', a.coin, num(a.available) + num(a.frozen), 'bitget:/api/v2/spot/account/assets', '现货账户');
+      }
+    } catch (err) {
+      errors.push(`现货账户：${err?.message || err}`);
+    }
+
+    try {
+      const rows = await call('/api/v2/earn/savings/assets', {}, creds);
+      mark('earn_flexible');
+      for (const a of Array.isArray(rows) ? rows : []) {
+        push('earn_flexible', a.coin || a.currency, num(a.amount ?? a.available), 'bitget:/api/v2/earn/savings/assets', '活期储蓄', { product: 'Savings' });
+      }
+    } catch (err) {
+      errors.push(`活期储蓄：${err?.message || err}`);
+    }
+
+    try {
+      const rows = await call('/api/v2/earn/staking/assets', {}, creds);
+      mark('staking');
+      for (const a of Array.isArray(rows) ? rows : []) {
+        push('staking', a.coin || a.currency, num(a.amount ?? a.available), 'bitget:/api/v2/earn/staking/assets', '链上质押', { product: 'Staking' });
+      }
+    } catch (err) {
+      errors.push(`链上质押：${err?.message || err}`);
+    }
+
+    return { positions, buckets, errors };
+  },
+
   async fetchSpotLive(creds) {
     const assets = await call('/api/v2/spot/account/assets', {}, creds);
     const balances = [];
@@ -424,6 +481,7 @@ export const bitget = {
             side: String(r.side || '').toLowerCase() === 'buy' ? 'buy' : 'sell',
             price: num(r.price), qty: num(r.size ?? r.baseVolume),
             fee: fillFee(r), feeCcy: r.feeCoin || 'USDT', billId: r.tradeId || '',
+            orderType: r.role === 'maker' ? 'limit' : r.role === 'taker' ? 'market' : null,
           });
         }
         if (rows.length < 100) break;

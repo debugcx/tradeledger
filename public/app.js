@@ -250,13 +250,22 @@
       }
       var balances = data.balances || [];
       var positions = data.positions || [];
-      var equity = balances.reduce(function (a, b) { return a + (Number(b.total) || 0); }, 0);
+      // 不同币种数量不能直接相加：这里只汇总稳定币，非稳定币在下方提示数量。
+      var STABLE = { USD: 1, USDT: 1, USDC: 1, DAI: 1, FDUSD: 1, TUSD: 1, USDD: 1, USDE: 1, USDS: 1, BUSD: 1, PYUSD: 1, GUSD: 1, FRAX: 1, LUSD: 1, CRVUSD: 1, GHO: 1, USD1: 1 };
+      var equity = balances.reduce(function (a, b) {
+        return STABLE[String(b.asset || '').toUpperCase()] ? a + (Number(b.total) || 0) : a;
+      }, 0);
+      var nonStable = balances.filter(function (b) {
+        return !STABLE[String(b.asset || '').toUpperCase()] && Math.abs(Number(b.total) || 0) > 0;
+      }).length;
       var unrealized = positions.reduce(function (a, p) { return a + (Number(p.unrealized) || 0); }, 0);
 
       var eq = document.querySelector('[data-live-equity]');
       var count = document.querySelector('[data-live-count]');
       var upl = document.querySelector('[data-live-unrealized]');
+      var nonStableEl = document.querySelector('[data-live-nonstable]');
       if (eq) eq.textContent = money(equity);
+      if (nonStableEl) nonStableEl.textContent = nonStable ? nonStable + ' 个非稳定币未折算' : '仅稳定币口径';
       if (count) count.textContent = String(positions.length);
       if (upl) { upl.textContent = money(unrealized); upl.className = cls(unrealized); }
 
@@ -716,6 +725,84 @@
     });
   }
 
+  /* ---------------- 交易详情：AI 复盘 ---------------- */
+  function initTradeAi() {
+    var btn = document.querySelector('[data-trade-ai]');
+    if (!btn) return;
+    var panel = btn.closest('.panel');
+    var input = panel ? panel.querySelector('[data-trade-note]') : null;
+    var status = panel ? panel.querySelector('[data-trade-ai-status]') : null;
+    var progress = panel ? panel.querySelector('[data-trade-ai-progress]') : null;
+    var bar = progress ? progress.querySelector('.report-progress-bar span') : null;
+    if (!input) return;
+    var label = btn.textContent;
+    var timer = null;
+    var startedAt = 0;
+
+    function stopTicker() {
+      if (timer) { clearInterval(timer); timer = null; }
+    }
+    // 软导航离开页面时停止计时，避免残留定时器
+    onCleanup(stopTicker);
+
+    function startTicker() {
+      stopTicker();
+      startedAt = Date.now();
+      if (progress) progress.hidden = false;
+      if (bar) bar.style.width = '4%';
+      timer = setInterval(function () {
+        var secs = Math.round((Date.now() - startedAt) / 1000);
+        // 没有真实进度可拿：缓慢逼近 92%，完成时再跳 100%
+        if (bar) bar.style.width = Math.min(92, 4 + secs * 1.6) + '%';
+        if (status) {
+          status.textContent = '正在生成… 已等待 ' + secs + ' 秒（通常 10–60 秒，请勿关闭页面）';
+          status.className = 'muted small';
+        }
+      }, 1000);
+    }
+
+    function finishTicker(done) {
+      stopTicker();
+      if (bar && done) bar.style.width = '100%';
+      if (done) {
+        setTimeout(function () { if (progress) progress.hidden = true; }, 700);
+      } else if (progress) {
+        progress.hidden = true;
+      }
+    }
+
+    btn.addEventListener('click', function () {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = 'AI 生成中…';
+      if (status) { status.textContent = '正在按这笔交易的记录生成复盘，通常需要 10–60 秒…'; status.className = 'muted small'; }
+      startTicker();
+      fetch('/api/trades/' + encodeURIComponent(btn.getAttribute('data-trade-ai')) + '/ai-review', {
+        method: 'POST',
+        credentials: 'same-origin',
+      }).then(function (res) {
+        return res.json().then(function (data) { return { res: res, data: data }; }).catch(function () {
+          return { res: res, data: {} };
+        });
+      }).then(function (out) {
+        if (!out.res.ok || !out.data.ok) {
+          throw new Error((out.data && (out.data.error || out.data.message)) || ('HTTP ' + out.res.status));
+        }
+        finishTicker(true);
+        var current = input.value.trim();
+        input.value = current ? current + '\n\n---\n\n' + out.data.text : out.data.text;
+        input.focus();
+        if (status) { status.textContent = '已生成并填入下方笔记框，可编辑后点「保存复盘」。'; status.className = 'muted small pos'; }
+      }).catch(function (err) {
+        finishTicker(false);
+        if (status) { status.textContent = 'AI 生成失败：' + (err && err.message || err); status.className = 'muted small neg'; }
+      }).finally(function () {
+        btn.disabled = false;
+        btn.textContent = label;
+      });
+    });
+  }
+
   function initPage() {
     initTheme();
     initTimeDefaults();
@@ -728,10 +815,112 @@
     initAccountForm();
     initAi();
     initReportAi();
+    initTradeAi();
     initMarkdown();
     initAutoSubmit();
     initChartHover();
     initChartZoom();
+    initQuickNote();
+  }
+
+  /* ---------------- 行内快评：表格行下方展开输入框，就地保存 ---------------- */
+  var quickNoteBound = false;
+  var openEditor = null; // { row, editorRow, btn }
+
+  function closeQuickEditor() {
+    if (!openQuickEditor()) return;
+    var row = openEditor.editorRow;
+    openEditor = null;
+    if (row && row.parentNode) row.parentNode.removeChild(row);
+  }
+  function openQuickEditor() { return openEditor; }
+
+  function saveQuickNote() {
+    if (!openEditor) return;
+    var btn = openEditor.btn;
+    var id = btn.getAttribute('data-quick-note');
+    var textarea = openEditor.editorRow.querySelector('textarea');
+    var status = openEditor.editorRow.querySelector('[data-qnote-status]');
+    var text = textarea.value;
+    if (status) status.textContent = '保存中…';
+    fetch('/api/trades/' + encodeURIComponent(id) + '/note', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+      body: new URLSearchParams({ note: text }).toString(),
+    }).then(function (res) {
+      return res.json().then(function (data) { return { res: res, data: data }; }, function () { return { res: res, data: {} }; });
+    }).then(function (out) {
+      if (!out.res.ok || !out.data.ok) {
+        throw new Error((out.data && (out.data.error || out.data.message)) || ('HTTP ' + out.res.status));
+      }
+      var trimmed = text.trim();
+      btn.setAttribute('data-note', trimmed);
+      if (trimmed) {
+        btn.classList.add('has-note');
+        var flat = trimmed.replace(/\s+/g, ' ');
+        btn.textContent = flat.length > 24 ? flat.slice(0, 24) + '…' : flat;
+        btn.title = flat.slice(0, 200);
+      } else {
+        btn.classList.remove('has-note');
+        btn.textContent = '+ 快评';
+        btn.title = '写一句话快评';
+      }
+      if (status) status.textContent = '已保存 ✓';
+      pageTimeout(function () { closeQuickEditor(); }, 400);
+    }).catch(function (err) {
+      if (status) status.textContent = '保存失败：' + (err && err.message || err);
+    });
+  }
+
+  function toggleQuickEditor(btn) {
+    if (openEditor && openEditor.btn === btn) { closeQuickEditor(); return; }
+    closeQuickEditor();
+    var row = btn.closest('tr');
+    if (!row || !row.parentNode) return;
+    var editorRow = document.createElement('tr');
+    editorRow.className = 'quick-note-row';
+    var td = document.createElement('td');
+    td.colSpan = row.children.length;
+    td.innerHTML = '<div class="quick-note-editor">' +
+      '<textarea rows="3" maxlength="5000" placeholder="一句话也行：为什么开 / 错在哪 / 下次怎么办（Ctrl+Enter 保存，Esc 取消）"></textarea>' +
+      '<div class="quick-note-actions">' +
+      '<button type="button" class="btn btn-primary small" data-qnote-save>保存</button>' +
+      '<button type="button" class="btn btn-ghost small" data-qnote-cancel>取消</button>' +
+      '<span class="muted small" data-qnote-status>支持 Markdown；深度复盘请进详情页</span>' +
+      '</div></div>';
+    editorRow.appendChild(td);
+    row.parentNode.insertBefore(editorRow, row.nextSibling);
+    var textarea = td.querySelector('textarea');
+    textarea.value = btn.getAttribute('data-note') || '';
+    openEditor = { row: row, editorRow: editorRow, btn: btn };
+    onCleanup(closeQuickEditor); // 软导航离开时收起，避免残留
+    td.querySelector('[data-qnote-save]').addEventListener('click', saveQuickNote);
+    td.querySelector('[data-qnote-cancel]').addEventListener('click', closeQuickEditor);
+    textarea.addEventListener('keydown', function (ev) {
+      if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
+        ev.preventDefault();
+        saveQuickNote();
+      }
+    });
+    textarea.focus();
+  }
+
+  function initQuickNote() {
+    if (!document.querySelector('[data-quick-note]')) return;
+    if (quickNoteBound) return;
+    quickNoteBound = true;
+    // 委托到 document：软导航换页后新表格行依然有效
+    document.addEventListener('click', function (ev) {
+      var btn = ev.target && ev.target.closest ? ev.target.closest('[data-quick-note]') : null;
+      if (btn) {
+        ev.preventDefault();
+        toggleQuickEditor(btn);
+      }
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape') closeQuickEditor();
+    });
   }
 
   /* ---------------- 软导航：只替换主内容，不整页刷新 ---------------- */

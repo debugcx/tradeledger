@@ -358,6 +358,61 @@ export const gate = {
     return { fills: fills.slice(0, cap), nextCursor: null, errors };
   },
 
+  /**
+   * 资产总览：合约账户 / 现货账户 / 余币宝（Uni Lending）/ 链上质押。
+   * Gate Launchpad 没有持仓查询接口，走手动台账。
+   */
+  async fetchAssetPositions(creds) {
+    const positions = [];
+    const buckets = [];
+    const errors = [];
+    const mark = (bucket) => { if (!buckets.includes(bucket)) buckets.push(bucket); };
+    const push = (bucket, asset, amount, source, sourceRef, extra = {}) => {
+      if (!asset || !Number.isFinite(amount) || amount === 0) return;
+      positions.push({ bucket, asset, amount, source, source_ref: sourceRef, ...extra });
+    };
+
+    try {
+      const account = await call('/api/v4/futures/usdt/accounts', {}, creds);
+      mark('futures');
+      push('futures', account?.currency || 'USDT', num(account?.total), 'gate:/api/v4/futures/usdt/accounts', '合约账户');
+    } catch (err) {
+      errors.push(`合约账户：${err?.message || err}`);
+    }
+
+    try {
+      const rows = await call('/api/v4/spot/accounts', {}, creds);
+      mark('spot');
+      for (const a of rows || []) {
+        push('spot', a.currency, num(a.available) + num(a.locked), 'gate:/api/v4/spot/accounts', '现货账户');
+      }
+    } catch (err) {
+      errors.push(`现货账户：${err?.message || err}`);
+    }
+
+    try {
+      const rows = await call('/api/v4/earn/uni/lends', {}, creds);
+      mark('earn_flexible');
+      for (const a of Array.isArray(rows) ? rows : []) {
+        push('earn_flexible', a.currency, num(a.amount), 'gate:/api/v4/earn/uni/lends', '余币宝', { product: 'Uni Lending' });
+      }
+    } catch (err) {
+      errors.push(`余币宝：${err?.message || err}`);
+    }
+
+    try {
+      const rows = await call('/api/v4/earn/staking/assets', {}, creds);
+      mark('staking');
+      for (const a of Array.isArray(rows) ? rows : []) {
+        push('staking', a.currency || a.coin, num(a.amount), 'gate:/api/v4/earn/staking/assets', '链上质押', { product: a.product || 'Staking' });
+      }
+    } catch (err) {
+      errors.push(`链上质押：${err?.message || err}`);
+    }
+
+    return { positions, buckets, errors };
+  },
+
   async fetchSpotLive(creds) {
     const accounts = await call('/api/v4/spot/accounts', {}, creds);
     const balances = [];
@@ -549,6 +604,7 @@ export const gate = {
             side: String(r.side).toLowerCase() === 'buy' ? 'buy' : 'sell',
             price: num(r.price), qty: num(r.amount),
             fee: -Math.abs(num(r.fee)), feeCcy: r.fee_currency || '', billId: String(r.id || ''),
+            orderType: r.role === 'maker' ? 'limit' : r.role === 'taker' ? 'market' : null,
           });
         }
         if (rows.length < 100) break;
@@ -567,6 +623,7 @@ export const gate = {
             side: size > 0 ? 'buy' : 'sell',
             price: num(r.price), qty: Math.abs(size) * mult,
             fee: -Math.abs(num(r.fee)), feeCcy: 'USDT', billId: String(r.id || ''),
+            orderType: r.role === 'maker' ? 'limit' : r.role === 'taker' ? 'market' : null,
           });
         }
         if (rows.length < 1000) break;

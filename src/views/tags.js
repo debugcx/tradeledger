@@ -52,6 +52,7 @@ export function tagsPage({ user, tags, tagsWithCounts = [], quickTags = null, ac
         <input name="color" type="color" value="#4ade80" title="颜色">
         <button class="btn btn-primary small" type="submit">添加</button>
       </form>
+      <p class="muted small" style="margin:8px 0 0">新建只是加入标签库；要用在交易上，可在下方「快捷标签」勾选，或到交易详情页的「更多标签」里点选。</p>
     </section>
     ${quickTagsSection(tagsWithCounts, quickTags)}
     <section class="panel">

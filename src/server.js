@@ -18,6 +18,7 @@ const { seed } = await import('./seed.js');
 const { closeDb } = await import('./db.js');
 const { startSyncWorker, stopSyncWorker } = await import('./sync-worker.js');
 const { refreshLive } = await import('./live.js');
+const { startAssetWorker, stopAssetWorker } = await import('./asset-worker.js');
 const { startBackupWorker, stopBackupWorker } = await import('./backup-worker.js');
 const { finishPendingRestore } = await import('./backup.js');
 
@@ -128,6 +129,17 @@ if (config.seedDemo && !fs.existsSync(config.dbFile)) {
   }
 }
 
+// 一次性迁移：现货记录从旧逐手 FIFO 配对重算为「T 回合 + FIFO」（幂等，meta 标记防重跑）
+try {
+  const { migrateSpotRoundsOnce } = await import('./store.js');
+  const migrated = migrateSpotRoundsOnce();
+  if (migrated) {
+    console.log(`[migrate] 现货 T 回合重算：${migrated.accounts} 个账户，新增 ${migrated.inserted} 条，清理 ${migrated.pruned} 条旧记录`);
+  }
+} catch (err) {
+  console.error('[migrate] 现货 T 回合重算失败：', err?.message || err);
+}
+
 server.listen(config.port, config.host, () => {
   console.log('\n  TradeLedger 已启动');
   console.log(`  ➜ http://${config.host}:${config.port}`);
@@ -138,6 +150,8 @@ server.listen(config.port, config.host, () => {
   startSyncWorker();
   // 本地快照 + WebDAV 自动备份
   startBackupWorker();
+  // 资产总览：交易所账内资产 + 链上钱包（按各自 TTL 刷新）
+  startAssetWorker();
   // 定时刷新余额 / 持仓 / 资金费率
   if (config.liveRefreshSeconds > 0) {
     const timer = setInterval(() => {
@@ -149,12 +163,12 @@ server.listen(config.port, config.host, () => {
     }, 2500);
     kick.unref();
   }
-  console.log(`  ➜ 后台同步：每 ${config.syncWorkerSeconds}s · 实时持仓：每 ${config.liveRefreshSeconds}s\n`);
+  console.log(`  ➜ 后台同步：每 ${config.syncWorkerSeconds}s · 实时持仓：每 ${config.liveRefreshSeconds}s · 资产：交易所 ${config.assetRefreshMinutes}min / 钱包 ${config.walletRefreshMinutes}min\n`);
 });
 
 function shutdown(signal) {
   console.log(`\n收到 ${signal}，正在关闭…`);
-  try { stopSyncWorker(); stopBackupWorker(); } catch { /* 尚未启动时忽略 */ }
+  try { stopSyncWorker(); stopBackupWorker(); stopAssetWorker(); } catch { /* 尚未启动时忽略 */ }
   server.close(() => {
     closeDb();
     process.exit(0);

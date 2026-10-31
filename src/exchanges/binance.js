@@ -41,6 +41,14 @@ async function syncTimeOffset() {
 }
 
 async function call(path, creds, opts = {}) {
+  return signedCall('GET', path, creds, opts);
+}
+
+async function callPost(path, creds, opts = {}) {
+  return signedCall('POST', path, creds, opts);
+}
+
+async function signedCall(method, path, creds, opts = {}) {
   if (timeOffsetMs === null || Date.now() - timeSyncedAt > 30 * 60_000) {
     try { await syncTimeOffset(); } catch { timeOffsetMs = timeOffsetMs ?? 0; timeSyncedAt = Date.now(); }
   }
@@ -51,7 +59,7 @@ async function call(path, creds, opts = {}) {
     const query = `${existingQuery ? `${existingQuery}&` : ''}recvWindow=5000&timestamp=${Math.round(Date.now() + timeOffsetMs)}`;
     const url = `${baseUrl}${plainPath}?${query}&signature=${hmacHex(creds.apiSecret, query)}`;
     const res = await requestJson(url, {
-      method: 'GET',
+      method,
       timeout: opts.timeout,
       retries: opts.retries,
       headers: { 'X-MBX-APIKEY': creds.apiKey },
@@ -319,6 +327,93 @@ export const binance = {
     return { fills: fills.slice(0, cap), nextCursor: null, errors };
   },
 
+  /**
+   * 资产总览：合约钱包 / 现货 / 资金账户 / Simple Earn（活期+定期）/ 质押。
+   * 币安 Launchpool、Megadrop 没有持仓查询接口，走手动台账。
+   */
+  async fetchAssetPositions(creds) {
+    const positions = [];
+    const buckets = [];
+    const errors = [];
+    const mark = (bucket) => { if (!buckets.includes(bucket)) buckets.push(bucket); };
+    const rowsOf = (data) => Array.isArray(data)
+      ? data
+      : (Array.isArray(data?.rows) ? data.rows : (Array.isArray(data?.positionList) ? data.positionList : []));
+    const push = (bucket, asset, amount, source, sourceRef, extra = {}) => {
+      if (!asset || !Number.isFinite(amount) || amount === 0) return;
+      positions.push({ bucket, asset, amount, source, source_ref: sourceRef, ...extra });
+    };
+
+    try {
+      const account = await call('/fapi/v2/account', creds);
+      mark('futures');
+      for (const a of account.assets || []) {
+        push('futures', a.asset, num(a.walletBalance), 'binance:/fapi/v2/account', '合约钱包');
+      }
+    } catch (err) {
+      errors.push(`合约钱包：${err?.message || err}`);
+    }
+
+    try {
+      const account = await call('/api/v3/account', creds, { baseUrl: BASE_SAPI });
+      mark('spot');
+      for (const b of account.balances || []) {
+        push('spot', b.asset, num(b.free) + num(b.locked), 'binance:/api/v3/account', '现货账户');
+      }
+    } catch (err) {
+      errors.push(`现货账户：${err?.message || err}`);
+    }
+
+    try {
+      const rows = await callPost('/sapi/v1/asset/get-funding-asset', creds, { baseUrl: BASE_SAPI });
+      mark('funding');
+      for (const a of Array.isArray(rows) ? rows : []) {
+        push(
+          'funding', a.asset,
+          num(a.free) + num(a.locked) + num(a.freeze) + num(a.withdrawing),
+          'binance:/sapi/v1/asset/get-funding-asset', '资金账户',
+        );
+      }
+    } catch (err) {
+      errors.push(`资金账户：${err?.message || err}`);
+    }
+
+    try {
+      const data = await call('/sapi/v1/simple-earn/flexible/position?current=1&size=100', creds, { baseUrl: BASE_SAPI });
+      mark('earn_flexible');
+      for (const r of rowsOf(data)) {
+        const amount = r.totalAmount !== undefined
+          ? num(r.totalAmount)
+          : num(r.flexibleAmount) + num(r.lockedAmount);
+        push('earn_flexible', r.asset, amount, 'binance:/sapi/v1/simple-earn/flexible/position', 'Simple Earn 活期', { product: 'Simple Earn 活期' });
+      }
+    } catch (err) {
+      errors.push(`Simple Earn 活期：${err?.message || err}`);
+    }
+
+    try {
+      const data = await call('/sapi/v1/simple-earn/locked/position?current=1&size=100', creds, { baseUrl: BASE_SAPI });
+      mark('earn_locked');
+      for (const r of rowsOf(data)) {
+        push('earn_locked', r.asset, num(r.amount ?? r.totalAmount), 'binance:/sapi/v1/simple-earn/locked/position', 'Simple Earn 定期', { product: r.projectName || 'Simple Earn 定期' });
+      }
+    } catch (err) {
+      errors.push(`Simple Earn 定期：${err?.message || err}`);
+    }
+
+    try {
+      const data = await call('/sapi/v1/staking/position?current=1&size=100', creds, { baseUrl: BASE_SAPI });
+      mark('staking');
+      for (const r of rowsOf(data)) {
+        push('staking', r.asset, num(r.amount ?? r.totalAmount), 'binance:/sapi/v1/staking/position', '链上质押', { product: r.productName || 'Staking' });
+      }
+    } catch (err) {
+      errors.push(`链上质押：${err?.message || err}`);
+    }
+
+    return { positions, buckets, errors };
+  },
+
   async fetchSpotLive(creds) {
     const account = await call('/api/v3/account', creds, { baseUrl: BASE_SAPI });
     const balances = [];
@@ -448,12 +543,15 @@ export const binance = {
       if (!Array.isArray(rows) || !rows.length) break;
       for (const r of rows) {
         const quoteFeeCcy = ['USDT', 'BUSD', 'USDC', 'FDUSD'].includes(String(r.commissionAsset || '').toUpperCase());
+        const maker = r.maker === true || r.isMaker === true;
+        const taker = r.maker === false || r.isMaker === false;
         out.push({
           t: Number(r.time || 0),
           side: String(r.side).toUpperCase() === 'BUY' ? 'buy' : 'sell',
           price: num(r.price), qty: num(r.qty),
           fee: quoteFeeCcy ? -Math.abs(num(r.commission)) : 0,
           feeCcy: r.commissionAsset || '', billId: r.id,
+          orderType: maker ? 'limit' : taker ? 'market' : null,
         });
       }
       if (rows.length < 1000) break;

@@ -27,7 +27,7 @@ if (cmd === 'restore' || cmd === 'apply') {
 
   if (cmd === 'backup' || cmd === 'snapshot') {
     const snap = backup.createLocalSnapshot('cli');
-    console.log(`本地快照：${snap.name}（${backup.fmtBytes(snap.bytes)}，${snap.resources} 个图片资源）`);
+    console.log(`本地快照：${snap.name}（${backup.fmtBytes(snap.bytes)}，${snap.resources} 个图片资源、${snap.wallets} 个钱包、${snap.manualAssets} 条手动资产、${snap.assetPositions} 条资产仓位）`);
     if (cmd === 'backup') {
       const cfg = backup.getBackupConfig();
       if (cfg.webdavEnabled && cfg.webdavUrl) {

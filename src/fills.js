@@ -171,6 +171,112 @@ export function matchFills(fills, source, { longOnly = false } = {}) {
 }
 
 /**
+ * 现货回合配对：T 回合优先，未闭环的成交按 long-only FIFO 兜底。
+ *
+ * 做T 的判定（窗口默认 24 小时，两腿数量须完全闭环）：
+ *   - 反T：持仓 > 0 时卖出、且卖出后仍留有底仓，窗口内足额买回；
+ *   - 正T：已有持仓时买入，窗口内足额卖出同数量。
+ * 闭环的 T 记为一条自洽记录（kind='t_shot'，side = 第一腿方向：先买 → long，先卖 → short），
+ * 不消耗底仓批次、不改变持仓成本；未闭环的成交沿用旧 FIFO 口径（减仓/清仓记录）。
+ */
+export function matchSpotRounds(fills, source, { windowMs = 24 * 3600_000 } = {}) {
+  const sorted = [...fills].filter((f) => f && f.time && f.symbol && f.qty > 0 && f.price > 0)
+    .sort((a, b) => a.time - b.time);
+  const n = sorted.length;
+  const remain = sorted.map((f) => Math.abs(num(f.qty)));
+  const origQty = sorted.map((f) => Math.abs(num(f.qty)));
+  const feeOf = sorted.map((f) => num(f.fee));
+  const eps = 1e-12;
+
+  // 每笔成交前的净持仓（原始口径即可：T 回合两腿数量相等，是否消费不影响持仓轨迹）
+  const posBefore = new Array(n);
+  const pos = new Map();
+  for (let i = 0; i < n; i++) {
+    const sym = sorted[i].symbol;
+    const cur = pos.get(sym) || 0;
+    posBefore[i] = cur;
+    pos.set(sym, cur + (sorted[i].side === 'buy' ? remain[i] : -remain[i]));
+  }
+
+  const out = [];
+  const seen = new Map();
+  const emitT = (i, closeLegs) => {
+    const f = sorted[i];
+    const size = remain[i];
+    const dir = f.side === 'buy' ? 1 : -1;
+    let closeQty = 0, closeNotional = 0, closeFee = 0, closeTime = 0;
+    for (const [j, take] of closeLegs) {
+      closeQty += take;
+      closeNotional += sorted[j].price * take;
+      closeFee += feeOf[j] * (take / Math.abs(num(sorted[j].qty)));
+      closeTime = Math.max(closeTime, sorted[j].time);
+      remain[j] -= take;
+    }
+    const exitPrice = closeNotional / closeQty;
+    // 开仓腿可能先被更早的 T 当作平仓腿消耗过一部分：手续费按剩余数量摊派
+    const fee = feeOf[i] * (size / origQty[i]) + closeFee;
+    const trade = {
+      symbol: f.symbol,
+      side: dir === 1 ? 'long' : 'short',
+      order_type: classifyOrderType([f, ...closeLegs.map(([j]) => sorted[j])]),
+      kind: 't_shot',
+      size,
+      notional: f.price * size,
+      entry_price: f.price,
+      exit_price: exitPrice,
+      open_time: new Date(f.time).toISOString(),
+      close_time: new Date(closeTime).toISOString(),
+      pnl: (exitPrice - f.price) * size * dir + fee,
+      fee,
+      funding: 0,
+      source: 'api',
+    };
+    let externalId = `${source}:t:${fingerprintTrade(trade)}`;
+    if (seen.has(externalId)) {
+      const c = seen.get(externalId) + 1;
+      seen.set(externalId, c);
+      externalId = `${externalId}:${c}`;
+    } else {
+      seen.set(externalId, 1);
+    }
+    out.push({ ...trade, external_id: externalId });
+    remain[i] = 0;
+  };
+
+  for (let i = 0; i < n; i++) {
+    if (remain[i] <= eps) continue;
+    const f = sorted[i];
+    const buy = f.side === 'buy';
+    // 开仓腿前提：正T 买入时已有持仓；反T 卖出后仍留有底仓（清仓后重新买入不算做T）
+    if (buy ? posBefore[i] <= eps : posBefore[i] - remain[i] <= eps) continue;
+    const closeSide = buy ? 'sell' : 'buy';
+    const deadline = f.time + windowMs;
+    const legs = [];
+    let need = remain[i];
+    for (let j = i + 1; j < n && sorted[j].time <= deadline; j++) {
+      if (sorted[j].symbol !== f.symbol || sorted[j].side !== closeSide || remain[j] <= eps) continue;
+      const take = Math.min(need, remain[j]);
+      legs.push([j, take]);
+      need -= take;
+      if (need <= eps) break;
+    }
+    // 只在足额闭环时记 T；部分回补（如卖 1.0 只买回 0.4）视为加仓/减仓，交回 FIFO
+    if (need <= eps && legs.length) emitT(i, legs);
+  }
+
+  const leftover = [];
+  for (let i = 0; i < n; i++) {
+    if (remain[i] <= eps) continue;
+    leftover.push({
+      ...sorted[i],
+      qty: remain[i],
+      fee: feeOf[i] * (remain[i] / origQty[i]),
+    });
+  }
+  return [...out, ...matchFills(leftover, source, { longOnly: true })];
+}
+
+/**
  * 净头寸回合配对：同一品种从净持仓 0 → 0 记为一个回合（与 OKX 仓位历史同口径），
  * 回合内的开仓、加仓、减仓、清零都归属同一条记录。
  * 开/平价 = 各腿加权均价；盈亏按「减仓腿 × 当时移动开仓均价」累计（含手续费）。

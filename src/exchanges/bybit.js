@@ -230,6 +230,65 @@ export const bybit = {
     return { fills: fills.slice(0, cap), nextCursor: null };
   },
 
+  /**
+   * 资产总览：统一交易账户 / 资金账户 / Earn。
+   * 统一账户已包含现货与合约，不再单独拆现货桶，避免重复计算。
+   */
+  async fetchAssetPositions(creds) {
+    const positions = [];
+    const buckets = [];
+    const errors = [];
+    const mark = (bucket) => { if (!buckets.includes(bucket)) buckets.push(bucket); };
+    const push = (bucket, asset, amount, source, sourceRef, extra = {}) => {
+      if (!asset || !Number.isFinite(amount) || amount === 0) return;
+      positions.push({ bucket, asset, amount, source, source_ref: sourceRef, ...extra });
+    };
+
+    try {
+      const wallet = await call('/v5/account/wallet-balance', { accountType: 'UNIFIED' }, creds);
+      mark('trading');
+      for (const account of wallet.list || []) {
+        for (const coin of account.coin || []) {
+          push('trading', coin.coin, num(coin.equity ?? coin.walletBalance), 'bybit:/v5/account/wallet-balance', '统一交易账户');
+        }
+      }
+    } catch (err) {
+      errors.push(`统一交易账户：${err?.message || err}`);
+    }
+
+    try {
+      const data = await call('/v5/asset/transfer/query-account-coins-balance', { accountType: 'FUND' }, creds);
+      mark('funding');
+      const balance = data.balance;
+      if (Array.isArray(balance)) {
+        for (const b of balance) {
+          push('funding', b.coin, num(b.walletBalance ?? b.transferBalance), 'bybit:/v5/asset/transfer/query-account-coins-balance', '资金账户');
+        }
+      } else {
+        for (const [coin, b] of Object.entries(balance || {})) {
+          push('funding', coin, num(b.walletBalance ?? b.transferBalance), 'bybit:/v5/asset/transfer/query-account-coins-balance', '资金账户');
+        }
+      }
+    } catch (err) {
+      errors.push(`资金账户：${err?.message || err}`);
+    }
+
+    try {
+      const data = await call('/v5/earn/position', {}, creds);
+      // 接口一次返回全部 Earn 仓位；成功但为空也要清掉旧的三个桶
+      mark('earn_flexible'); mark('earn_locked'); mark('staking');
+      for (const r of data.list || []) {
+        const category = String(r.category || '').toLowerCase();
+        const bucket = /flex/.test(category) ? 'earn_flexible' : (/chain|stake/.test(category) ? 'staking' : 'earn_locked');
+        push(bucket, r.coin, num(r.amount ?? r.totalAmount), 'bybit:/v5/earn/position', 'Bybit Earn', { product: r.category || 'Earn' });
+      }
+    } catch (err) {
+      errors.push(`Bybit Earn：${err?.message || err}`);
+    }
+
+    return { positions, buckets, errors };
+  },
+
   async fetchSpotLive(creds) {
     const wallet = await call('/v5/account/wallet-balance', { accountType: 'UNIFIED' }, creds);
     const balances = [];
@@ -374,6 +433,7 @@ export const bybit = {
           price: num(r.execPrice), qty: num(r.execQty),
           fee: -Math.abs(num(r.execFee)), feeCcy: r.feeTokenCurrency || 'USDT',
           billId: r.execId || '',
+          orderType: r.isMaker === true ? 'limit' : r.isMaker === false ? 'market' : null,
         });
       }
       cursor = result.nextPageCursor;

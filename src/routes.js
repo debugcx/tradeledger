@@ -14,8 +14,10 @@ import { analyze, filterTrades, localMonthKey } from './stats.js';
 import { renderMarkdown } from './markdown.js';
 import { aiSettingsPage } from './views/ai.js';
 import {
-  getLlmConfig, saveLlmConfig, callLlm, LLM_PRESETS,
+  getLlmConfig, saveLlmConfig, callLlm, LLM_PRESETS, buildTradeReviewPrompt,
 } from './llm.js';
+import { tradeBreakdown } from './breakdown.js';
+import { summarizeHoldingCandles } from './trade-context.js';
 import {
   parseCsvSmart, autoMap, mappingFromForm, buildTrades, buildTradesFromFills,
   validateMapping, FIELD_DEFS, mappingFromTemplate, templateFromMapping,
@@ -24,7 +26,7 @@ import {
 import { page } from './views/layout.js';
 import { loginPage } from './views/auth.js';
 import { dashboardPage } from './views/dashboard.js';
-import { journalPage, journalCreatePage, journalEditPage, tradeDetailPage } from './views/journal.js';
+import { journalPage, journalCreatePage, journalEditPage, tradeDetailPage, journalTrashPage } from './views/journal.js';
 import { calendarPage } from './views/calendar.js';
 import { importPage, importPreviewPage } from './views/import.js';
 import { accountsPage, accountNewPage, accountEditPage } from './views/accounts.js';
@@ -34,6 +36,12 @@ import { transfersPage } from './views/transfers.js';
 import { botsPage } from './views/bots.js';
 import { spotPage } from './views/spot.js';
 import { spotSymbolPage } from './views/spot-symbol.js';
+import { assetsPage, walletFormPage } from './views/assets.js';
+import {
+  assetSummary, refreshAssets, refreshWalletAssets, captureAssetSnapshot,
+} from './assets.js';
+import { resolvePrice } from './prices.js';
+import { walletProviderMeta, getWalletProvider } from './wallets/index.js';
 import { tagsPage } from './views/tags.js';
 import { notesPage, noteViewPage, noteEditPage, symbolNotePage } from './views/notes.js';
 import { settingsPage } from './views/settings.js';
@@ -331,6 +339,9 @@ function accountProgress() {
       syncing: isSyncing(row.id),
       lastSyncAt: row.last_sync_at,
       lastSyncStatus: row.last_sync_status,
+      failAttempts: Number(store.getSyncFail(row.id)?.attempts) || 0,
+      retryAt: Number(store.getSyncFail(row.id)?.nextAt) || 0,
+      failError: store.getSyncFail(row.id)?.lastError || '',
     };
   }
   return out;
@@ -367,6 +378,7 @@ route('GET', '/dashboard', (ctx) => requireUser(ctx, (c) => {
       }),
       quickTags: quickTagList(),
       demo: store.demoStatus(),
+      assetSummary: assetSummary(),
       notice: c.query.notice || '',
       error: c.query.error || '',
     }),
@@ -448,6 +460,7 @@ route('GET', '/dashboard/journal', (ctx) => requireUser(ctx, (c) => {
       symbols,
       pagination: { page: pageNo, pageSize: PAGE_SIZE, totalPages, total: filtered.length },
       noteCoverage: stats.noteCoverage,
+      trashedCount: store.countTrashedTrades(),
       notice: c.query.notice || '',
       error: c.query.error || '',
     }),
@@ -596,7 +609,8 @@ async function loadTradeFills(trade) {
   const fromMs = Date.parse(trade.open_time || '');
   const toMs = Date.parse(trade.close_time || '');
   if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) return null;
-  const inputs = detailCacheInputs(trade);
+  // 版本后缀：成交明细结构升级（新增吃挂标记）后旧缓存自动失效
+  const inputs = `${detailCacheInputs(trade)}|fills-v2`;
   const cached = store.getTradeFillsCache(trade.id);
   if (cached && cached.inputs === inputs && cached.fills?.length) {
     return { fills: cached.fills };
@@ -638,10 +652,39 @@ function safeBack(raw) {
   return value.startsWith('/dashboard') ? value : '';
 }
 
+/* ---------------- 垃圾箱：软删除，同步不再导回 ---------------- */
+
+route('GET', '/dashboard/journal/trash', (ctx) => requireUser(ctx, (c) => {
+  return html(page({
+    title: '交易垃圾箱 | TradeLedger',
+    user: c.user,
+    body: journalTrashPage({
+      user: c.user,
+      trades: store.listTrashedTrades(),
+      notice: c.query.notice || '',
+      error: c.query.error || '',
+    }),
+  }));
+}));
+
+route('POST', '/dashboard/journal/:id/trash', (ctx) => requireUser(ctx, async (c) => {
+  const body = await readForm(c.req);
+  store.trashTrade(Number(c.params.id));
+  const back = safeBack(val(body, 'back'));
+  return redirect(back ? withNotice(back, '已移入垃圾箱，同步不会再导回这条记录')
+    : '/dashboard/journal?notice=' + encodeURIComponent('已移入垃圾箱，同步不会再导回这条记录'));
+}));
+
+route('POST', '/dashboard/journal/:id/restore', (ctx) => requireUser(ctx, async (c) => {
+  store.restoreTrade(Number(c.params.id));
+  return redirect('/dashboard/journal/trash?notice=' + encodeURIComponent('已恢复，记录回到交易记录'));
+}));
+
 route('GET', '/dashboard/journal/:id', (ctx) => requireUser(ctx, async (c) => {
   const trade = store.getTrade(c.params.id);
   if (!trade) return redirect('/dashboard/journal?error=' + encodeURIComponent('交易记录不存在'));
   const [curve, ops] = await Promise.all([loadTradeCurve(trade), loadTradeFills(trade)]);
+  const llmCfg = getLlmConfig();
   return html(page({
     title: `${trade.symbol} | TradeLedger`,
     user: c.user,
@@ -651,6 +694,9 @@ route('GET', '/dashboard/journal/:id', (ctx) => requireUser(ctx, async (c) => {
       curve,
       ops,
       quickTags: quickTagList(),
+      allTags: store.listTagsWithCounts(),
+      aiReady: Boolean(llmCfg.hasKey || llmCfg.provider === 'ollama'),
+      aiModel: `${llmCfg.provider} · ${llmCfg.model}`,
       back: safeBack(c.query.back),
       notice: c.query.notice || '',
       error: c.query.error || '',
@@ -700,11 +746,13 @@ route('POST', '/dashboard/journal/:id/edit', (ctx) => requireUser(ctx, async (c)
   }
 }));
 
+// 彻底删除（仅垃圾箱页入口）：删掉后若交易所侧仍有数据，下次同步会重新导入
 route('POST', '/dashboard/journal/:id/delete', (ctx) => requireUser(ctx, async (c) => {
   const body = await readForm(c.req);
   store.deleteTrade(Number(c.params.id));
   const back = safeBack(val(body, 'back'));
-  return redirect(back ? withNotice(back, '交易已删除') : '/dashboard/journal?notice=' + encodeURIComponent('交易已删除'));
+  return redirect(back ? withNotice(back, '已彻底删除')
+    : '/dashboard/journal/trash?notice=' + encodeURIComponent('已彻底删除'));
 }));
 
 route('POST', '/dashboard/journal/:id/note', (ctx) => requireUser(ctx, async (c) => {
@@ -733,6 +781,48 @@ route('POST', '/api/trades/:id/note', async (ctx) => {
     return json({ ok: true });
   } catch (err) {
     return json({ ok: false, error: err.message || '保存失败' }, 400);
+  }
+});
+
+/** 单笔交易的 AI 复盘：只把这一笔交易的数据交给模型，生成结果由前端填进笔记框 */
+route('POST', '/api/trades/:id/ai-review', async (ctx) => {
+  if (!ctx.user) return json({ error: 'unauthorized' }, 401);
+  const trade = store.getTrade(ctx.params.id);
+  if (!trade) return json({ ok: false, error: '交易不存在' }, 404);
+  if (trade.trashed_at) {
+    return json({ ok: false, error: '这条记录在垃圾箱里，已排除在复盘范围之外；先到交易记录 → 垃圾箱恢复它' }, 400);
+  }
+  const cfg = getLlmConfig({ withSecret: true });
+  if (!cfg.hasKey && cfg.provider !== 'ollama') {
+    return json({ ok: false, error: '请先在 设置与数据 → AI 模型 配置 API Key' }, 400);
+  }
+  let fills = [];
+  try {
+    const ops = await loadTradeFills(trade);
+    fills = Array.isArray(ops?.fills) ? ops.fills : [];
+  } catch { /* 明细拉取失败不阻塞复盘 */ }
+  // 持仓期行情：复用详情页曲线缓存（通常已命中），把 K 线压缩成走势摘要
+  let market = null;
+  try {
+    const curve = await loadTradeCurve(trade);
+    if (curve?.candles?.length) {
+      market = summarizeHoldingCandles({
+        candles: curve.candles,
+        bar: curve.bar,
+        side: trade.side,
+        entry: Number(trade.entry_price),
+        exit: Number(trade.exit_price),
+        openMs: Date.parse(trade.open_time || ''),
+        closeMs: Date.parse(trade.close_time || ''),
+      });
+    }
+  } catch { /* 行情不可用时省略这一段 */ }
+  const prompt = buildTradeReviewPrompt(trade, { breakdown: tradeBreakdown(trade), fills, market });
+  try {
+    const text = await callLlm({ messages: [{ role: 'user', content: prompt }], config: cfg, timeout: 120_000 });
+    return json({ ok: true, text });
+  } catch (err) {
+    return json({ ok: false, error: String(err?.message || err).slice(0, 300) }, 400);
   }
 });
 
@@ -900,6 +990,12 @@ route('POST', '/dashboard/import/templates/delete', (ctx) => requireUser(ctx, as
 route('GET', '/dashboard/spot', (ctx) => requireUser(ctx, (c) => {
   const accounts = store.listAccounts();
   const accountId = accountIdFromQuery(c.query, accounts);
+  const noteFilter = c.query.note === 'no' ? 'no' : 'all';
+  let spotTrades = store.listSpotTrades(200, accountId);
+  const unwritten = spotTrades.filter((t) => !t.note || !String(t.note).trim()).length;
+  if (noteFilter === 'no') {
+    spotTrades = spotTrades.filter((t) => !t.note || !String(t.note).trim());
+  }
   return html(page({
   title: '现货 | TradeLedger',
   user: c.user,
@@ -910,7 +1006,9 @@ route('GET', '/dashboard/spot', (ctx) => requireUser(ctx, (c) => {
     balances: store.listSpotBalances(accountId),
     holdings: store.listSpotHoldings(accountId),
     fills: store.listSpotFills({ accountId, limit: 200 }),
-    spotTrades: store.listSpotTrades(50, accountId),
+    spotTrades,
+    noteFilter,
+    unwrittenCount: unwritten,
     notice: c.query.notice || '',
     error: c.query.error || '',
   }),
@@ -953,22 +1051,52 @@ route('POST', '/dashboard/spot/note', (ctx) => requireUser(ctx, async (c) => {
 route('GET', '/dashboard/spot/symbol/:symbol', (ctx) => requireUser(ctx, (c) => {
   const symbol = String(c.params.symbol || '');
   if (!symbol) return redirect('/dashboard/spot');
+  const holdings = store.listSpotHoldings(null, symbol);
+  // 手动日志的账户下拉：优先这个交易对有持仓的账户，否则退回全部账户
+  const logAccounts = holdings.length
+    ? holdings.map((h) => ({ id: h.account_id, name: h.account_name }))
+    : store.listAccounts().map((a) => ({ id: a.id, name: a.name }));
   return html(page({
     title: `${symbol} 现货详情 | TradeLedger`,
     user: c.user,
     body: spotSymbolPage({
       user: c.user,
       symbol,
-      holdings: store.listSpotHoldings(null, symbol),
+      holdings,
       fills: store.listSpotFills({ symbol, limit: 2000 }),
       trades: store.listSpotTradesBySymbol(symbol, 200),
       transfers: store.listTransfers({ asset: symbol.split('/')[0] || symbol, limit: 200 }),
       archiveNote: store.getNoteByCategory('symbol', symbol),
       spotNotes: store.listNotes({ category: 'spot', subject: symbol }),
+      log: store.listSpotLogBySymbol(symbol),
+      logAccounts,
       notice: c.query.notice || '',
       error: c.query.error || '',
     }),
   }));
+}));
+
+route('POST', '/dashboard/spot/log', (ctx) => requireUser(ctx, async (c) => {
+  const body = await readForm(c.req);
+  const symbol = String(val(body, 'symbol') || '').trim();
+  const back = `/dashboard/spot/symbol/${encodeURIComponent(symbol)}`;
+  try {
+    const accountId = Number(val(body, 'account_id'));
+    const text = String(val(body, 'text') || '');
+    if (!accountId || !symbol) throw new Error('账户和交易对不能为空');
+    store.addSpotLog({ accountId, symbol, text });
+    return redirect(`${back}?notice=` + encodeURIComponent('日志已记录'));
+  } catch (err) {
+    return redirect(`${back}?error=` + encodeURIComponent(err?.message || String(err)));
+  }
+}));
+
+route('POST', '/dashboard/spot/log/delete', (ctx) => requireUser(ctx, async (c) => {
+  const body = await readForm(c.req);
+  const symbol = String(val(body, 'symbol') || '').trim();
+  const back = `/dashboard/spot/symbol/${encodeURIComponent(symbol)}`;
+  store.deleteSpotLog(Number(val(body, 'id')));
+  return redirect(`${back}?notice=` + encodeURIComponent('日志已删除'));
 }));
 
 route('GET', '/dashboard/bots', (ctx) => requireUser(ctx, (c) => {
@@ -1023,6 +1151,308 @@ route('GET', '/dashboard/transfers', (ctx) => requireUser(ctx, (c) => {
     }),
   }));
 }));
+
+/* =========================================================
+ *  资产总览 / 手动资产 / 钱包
+ * ========================================================= */
+
+const ASSET_TABS = new Set(['overview', 'manual', 'wallets', 'sources']);
+
+function assetVenueKey(row) {
+  return row.venue_kind === 'manual'
+    ? `manual:${row.venue_name || ''}`
+    : `${row.venue_kind}:${row.venue_id}`;
+}
+
+function assetPageData(c) {
+  const tab = ASSET_TABS.has(c.query.tab) ? c.query.tab : 'overview';
+  const filters = {
+    venue: c.query.venue || 'all',
+    bucket: c.query.bucket || 'all',
+    q: c.query.q || '',
+  };
+  const summary = assetSummary();
+  const q = filters.q.trim().toLowerCase();
+  const rows = summary.rows.filter((r) => {
+    if (filters.venue !== 'all' && assetVenueKey(r) !== filters.venue) return false;
+    if (filters.bucket !== 'all' && r.bucket !== filters.bucket) return false;
+    if (q) {
+      const haystack = [r.asset, r.product, r.protocol, r.venue_name, r.chain]
+        .map((x) => String(x || '').toLowerCase()).join(' ');
+      if (!haystack.includes(q)) return false;
+    }
+    return true;
+  });
+  const manual = store.listManualAssets();
+  const editId = Number(c.query.edit) || 0;
+  const editAsset = editId ? manual.find((a) => a.id === editId) || null : null;
+  const providers = walletProviderMeta.map((m) => ({
+    ...m,
+    config: store.getWalletProviderConfig(m.id) || {},
+  }));
+  return {
+    tab, filters, summary, rows, manual, editAsset,
+    providers,
+    wallets: store.listWallets(),
+    runs: store.listAssetSyncRuns(100),
+    prices: store.listPrices(100),
+    snapshots: store.listAssetSnapshots(180),
+    walletRefreshMinutes: store.getWalletRefreshSetting() ?? config.walletRefreshMinutes,
+  };
+}
+
+function manualAssetForm(body) {
+  return {
+    venue_name: val(body, 'venue_name'),
+    bucket: val(body, 'bucket'),
+    product: val(body, 'product'),
+    asset: val(body, 'asset'),
+    amount: val(body, 'amount'),
+    price_usd: val(body, 'price_usd'),
+    value_usd: val(body, 'value_usd'),
+    locked_until: localInputToIso(val(body, 'locked_until')),
+    status: val(body, 'status'),
+    note: val(body, 'note'),
+  };
+}
+
+async function fillManualValue(asset) {
+  if (!asset) return;
+  if (asset.value_usd !== null && asset.value_usd !== undefined) return;
+  let price = asset.price_usd === null || asset.price_usd === undefined ? null : Number(asset.price_usd);
+  if (price === null) {
+    const found = await resolvePrice(asset.asset);
+    if (found) price = found.price;
+  }
+  if (price === null) return;
+  store.updateManualAsset(asset.id, {
+    price_usd: price,
+    value_usd: (Number(asset.amount) || 0) * price,
+  });
+}
+
+route('GET', '/dashboard/assets', (ctx) => requireUser(ctx, (c) => {
+  const data = assetPageData(c);
+  return html(page({
+    title: '资产总览 | TradeLedger',
+    user: c.user,
+    body: assetsPage({
+      user: c.user,
+      activeTab: data.tab,
+      summary: data.summary,
+      rows: data.rows,
+      snapshots: data.snapshots,
+      filters: data.filters,
+      manual: data.manual,
+      editAsset: data.editAsset,
+      wallets: data.wallets,
+      providers: data.providers,
+      runs: data.runs,
+      prices: data.prices,
+      walletRefreshMinutes: data.walletRefreshMinutes,
+      notice: c.query.notice || '',
+      error: c.query.error || '',
+    }),
+  }));
+}));
+
+route('POST', '/dashboard/assets/refresh', (ctx) => requireUser(ctx, async (c) => {
+  const body = await readForm(c.req);
+  const kind = ['exchange', 'wallet'].includes(val(body, 'kind')) ? val(body, 'kind') : 'all';
+  refreshAssets({ force: true, kind }).catch((err) => console.error('[assets] 手动刷新失败:', err?.message || err));
+  const tab = kind === 'wallet' ? 'wallets' : 'overview';
+  return redirect(`/dashboard/assets?tab=${tab}&notice=` + encodeURIComponent('已在后台刷新资产；稍后刷新本页查看结果，失败原因见「同步记录」'));
+}));
+
+route('POST', '/dashboard/assets/manual/new', (ctx) => requireUser(ctx, async (c) => {
+  const body = await readForm(c.req);
+  try {
+    const asset = store.createManualAsset(manualAssetForm(body));
+    await fillManualValue(asset);
+    captureAssetSnapshot(assetSummary());
+    return redirect('/dashboard/assets?tab=manual&notice=' + encodeURIComponent('手动资产已添加'));
+  } catch (err) {
+    return redirect('/dashboard/assets?tab=manual&error=' + encodeURIComponent(err?.message || '添加失败'));
+  }
+}));
+
+route('POST', '/dashboard/assets/manual/:id/update', (ctx) => requireUser(ctx, async (c) => {
+  const body = await readForm(c.req);
+  try {
+    const asset = store.updateManualAsset(Number(c.params.id), manualAssetForm(body));
+    await fillManualValue(asset);
+    captureAssetSnapshot(assetSummary());
+    return redirect('/dashboard/assets?tab=manual&notice=' + encodeURIComponent('手动资产已更新'));
+  } catch (err) {
+    return redirect('/dashboard/assets?tab=manual&error=' + encodeURIComponent(err?.message || '更新失败'));
+  }
+}));
+
+route('POST', '/dashboard/assets/manual/:id/delete', (ctx) => requireUser(ctx, (c) => {
+  store.deleteManualAsset(Number(c.params.id));
+  captureAssetSnapshot(assetSummary());
+  return redirect('/dashboard/assets?tab=manual&notice=' + encodeURIComponent('手动资产已删除'));
+}));
+
+route('POST', '/dashboard/assets/providers', (ctx) => requireUser(ctx, async (c) => {
+  const body = await readForm(c.req);
+  const id = String(val(body, 'provider') || '').toLowerCase();
+  if (!getWalletProvider(id)) {
+    return redirect('/dashboard/assets?tab=wallets&error=' + encodeURIComponent('不支持的索引服务'));
+  }
+  try {
+    store.saveWalletProvider(id, {
+      apiKey: String(val(body, 'api_key') || '').trim(),
+      baseUrl: val(body, 'base_url'),
+      clearKey: val(body, 'clear_key') === '1',
+    });
+    if (String(val(body, 'api_key') || '').trim()) {
+      refreshAssets({ force: true, kind: 'wallet' }).catch((err) => console.error('[assets] 钱包刷新失败:', err?.message || err));
+    }
+    return redirect('/dashboard/assets?tab=wallets&notice=' + encodeURIComponent('索引服务配置已保存'));
+  } catch (err) {
+    return redirect('/dashboard/assets?tab=wallets&error=' + encodeURIComponent(err?.message || '保存失败'));
+  }
+}));
+
+route('POST', '/dashboard/assets/wallet-settings', (ctx) => requireUser(ctx, async (c) => {
+  const body = await readForm(c.req);
+  try {
+    const minutes = store.setWalletRefreshSetting(val(body, 'wallet_refresh_minutes'));
+    return redirect('/dashboard/assets?tab=wallets&notice=' + encodeURIComponent(`钱包同步周期已更新：每 ${minutes} 分钟`));
+  } catch (err) {
+    return redirect('/dashboard/assets?tab=wallets&error=' + encodeURIComponent(err?.message || '保存失败'));
+  }
+}));
+
+route('GET', '/dashboard/assets/wallets/new', (ctx) => requireUser(ctx, (c) => html(page({
+  title: '添加钱包 | TradeLedger',
+  user: c.user,
+  body: walletFormPage({ user: c.user, providers: walletProviderMeta, notice: c.query.notice || '', error: c.query.error || '' }),
+}))));
+
+route('POST', '/dashboard/assets/wallets/new', (ctx) => requireUser(ctx, async (c) => {
+  const body = await readForm(c.req);
+  const provider = getWalletProvider(val(body, 'provider'));
+  const address = String(val(body, 'address') || '').trim();
+  const chains = list(body, 'chains');
+  const draft = {
+    name: val(body, 'name'),
+    address,
+    provider: provider?.id || val(body, 'provider'),
+    chains: JSON.stringify(chains),
+    enabled: val(body, 'enabled') === '1' ? 1 : 0,
+  };
+  const fail = (message) => html(page({
+    title: '添加钱包 | TradeLedger',
+    user: c.user,
+    body: walletFormPage({
+      user: c.user, wallet: draft, providers: walletProviderMeta, error: message,
+    }),
+  }), 400);
+
+  if (!provider) return fail('请选择索引服务');
+  if (!address) return fail('请填写钱包地址');
+  if (!provider.supportsAddress(address)) return fail(`地址格式与 ${provider.name} 不匹配：${provider.addressHint}`);
+
+  try {
+    const wallet = store.createWallet({
+      name: draft.name, address, chains, provider: provider.id, enabled: draft.enabled,
+    });
+    refreshWalletAssets(wallet)
+      .then(() => captureAssetSnapshot(assetSummary()))
+      .catch((err) => console.error('[assets] 新钱包同步失败:', err?.message || err));
+    return redirect('/dashboard/assets?tab=wallets&notice=' + encodeURIComponent('钱包已添加，正在后台同步链上仓位'));
+  } catch (err) {
+    const raw = err?.message || String(err);
+    if (/UNIQUE constraint failed/i.test(raw)) return fail('这个地址已经添加过了（同一索引服务下不能重复）');
+    return fail(raw);
+  }
+}));
+
+route('GET', '/dashboard/assets/wallets/:id/edit', (ctx) => requireUser(ctx, (c) => {
+  const wallet = store.getWallet(c.params.id);
+  if (!wallet) return redirect('/dashboard/assets?tab=wallets');
+  return html(page({
+    title: `编辑钱包 ${wallet.name} | TradeLedger`,
+    user: c.user,
+    body: walletFormPage({
+      user: c.user, wallet, providers: walletProviderMeta,
+      notice: c.query.notice || '', error: c.query.error || '',
+    }),
+  }));
+}));
+
+route('POST', '/dashboard/assets/wallets/:id/edit', (ctx) => requireUser(ctx, async (c) => {
+  const id = Number(c.params.id);
+  const wallet = store.getWallet(id);
+  if (!wallet) return redirect('/dashboard/assets?tab=wallets');
+  const body = await readForm(c.req);
+  const provider = getWalletProvider(val(body, 'provider'));
+  const address = String(val(body, 'address') || '').trim();
+  if (!provider) return redirect(`/dashboard/assets/wallets/${id}/edit?error=` + encodeURIComponent('请选择索引服务'));
+  if (!provider.supportsAddress(address)) {
+    return redirect(`/dashboard/assets/wallets/${id}/edit?error=` + encodeURIComponent(`地址格式与 ${provider.name} 不匹配`));
+  }
+  try {
+    const updated = store.updateWallet(id, {
+      name: val(body, 'name'),
+      address,
+      chains: list(body, 'chains'),
+      provider: provider.id,
+      enabled: val(body, 'enabled') === '1' ? 1 : 0,
+    });
+    refreshWalletAssets(updated)
+      .then(() => captureAssetSnapshot(assetSummary()))
+      .catch((err) => console.error('[assets] 钱包同步失败:', err?.message || err));
+    return redirect('/dashboard/assets?tab=wallets&notice=' + encodeURIComponent('钱包已更新，正在后台同步'));
+  } catch (err) {
+    const raw = err?.message || String(err);
+    const message = /UNIQUE constraint failed/i.test(raw) ? '这个地址已经添加过了' : raw;
+    return redirect(`/dashboard/assets/wallets/${id}/edit?error=` + encodeURIComponent(message));
+  }
+}));
+
+route('POST', '/dashboard/assets/wallets/:id/sync', (ctx) => requireUser(ctx, async (c) => {
+  const wallet = store.getWallet(c.params.id);
+  if (!wallet) return redirect('/dashboard/assets?tab=wallets&error=' + encodeURIComponent('钱包不存在'));
+  try {
+    const result = await refreshWalletAssets(wallet);
+    captureAssetSnapshot(assetSummary());
+    const detail = [...(result.errors || []), ...(result.notes || [])];
+    const suffix = detail.length ? `；${detail.join('；')}` : '';
+    return redirect('/dashboard/assets?tab=wallets&notice=' + encodeURIComponent(`同步完成，写入 ${result.inserted} 条${suffix}`));
+  } catch (err) {
+    return redirect('/dashboard/assets?tab=wallets&error=' + encodeURIComponent(`同步失败：${err?.message || err}`));
+  }
+}));
+
+route('POST', '/dashboard/assets/wallets/:id/delete', (ctx) => requireUser(ctx, (c) => {
+  store.deleteWallet(Number(c.params.id));
+  captureAssetSnapshot(assetSummary());
+  return redirect('/dashboard/assets?tab=wallets&notice=' + encodeURIComponent('钱包及链上仓位记录已删除'));
+}));
+
+route('GET', '/api/assets/summary', (ctx) => {
+  if (!ctx.user) return json({ error: 'unauthorized' }, 401);
+  const summary = assetSummary();
+  return json({
+    total_usd: summary.total,
+    net_usd: summary.net,
+    liabilities_usd: summary.liabilities,
+    unpriced: summary.unpriced,
+    updated_at: summary.updatedAt,
+    by_bucket: summary.byBucket,
+    by_venue: summary.byVenue,
+    by_asset: summary.byAsset,
+  });
+});
+
+route('GET', '/api/assets/positions', (ctx) => {
+  if (!ctx.user) return json({ error: 'unauthorized' }, 401);
+  const summary = assetSummary();
+  return json({ count: summary.rows.length, positions: summary.rows });
+});
 
 /* =========================================================
  *  交易所账户与同步
@@ -1806,7 +2236,7 @@ route('POST', '/dashboard/settings/reset', (ctx) => requireUser(ctx, (c) => {
 route('POST', '/dashboard/settings/backup/local', (ctx) => requireUser(ctx, (c) => {
   try {
     const snap = backup.createLocalSnapshot('manual');
-    return backupRedirect(`已创建本地快照 ${snap.name}（${backup.fmtBytes(snap.bytes)}，含 ${snap.resources} 个图片资源）`);
+    return backupRedirect(`已创建本地快照 ${snap.name}（${backup.fmtBytes(snap.bytes)}，含 ${snap.resources} 个图片资源、${snap.wallets} 个钱包、${snap.manualAssets} 条手动资产、${snap.assetPositions} 条资产仓位）`);
   } catch (err) {
     return backupRedirect('', err?.message || String(err));
   }
@@ -2018,6 +2448,8 @@ route('GET', '/api/docs', (ctx) => html(page({
       <tr><td>GET</td><td>/api/trades</td><td>明细，支持 side/result/symbol/tag/sort/from/to/limit</td></tr>
       <tr><td>GET</td><td>/api/transfers</td><td>资金流水（充提 / 内部划转）</td></tr>
       <tr><td>GET</td><td>/api/spot</td><td>现货余额、持仓成本与逐笔成交</td></tr>
+      <tr><td>GET</td><td>/api/assets/summary</td><td>资产总览：净资产、负债、按桶/场所/币种汇总</td></tr>
+      <tr><td>GET</td><td>/api/assets/positions</td><td>全部资产仓位（含来源与抓取时间）</td></tr>
       <tr><td>GET</td><td>/api/tags</td><td>标签</td></tr>
       <tr><td>GET</td><td>/api/notes</td><td>独立笔记</td></tr>
       <tr><td>GET</td><td>/api/reconcile</td><td>对账报告（复算一致率、差异最大的交易）</td></tr>

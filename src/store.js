@@ -5,7 +5,7 @@
 import { all, get, run, tx } from './db.js';
 import { nowIso, uid } from './http.js';
 import { encryptSecret, decryptSecret, hintKey } from './crypto.js';
-import { remainingLots } from './fills.js';
+import { remainingLots, matchSpotRounds } from './fills.js';
 import { setExchangeProxyProvider } from './http-client.js';
 
 /* ---------------- 账户 ---------------- */
@@ -85,6 +85,21 @@ export function resetAccountSync(id) {
      WHERE id = ?`,
     Number(id),
   );
+  setSyncFail(Number(id), null);
+}
+
+/** 连续同步失败的退避状态（同步层维护，供 worker 与账户页读取） */
+export function getSyncFail(accountId) {
+  try {
+    const raw = getMeta(`sync_fail_${Number(accountId)}`, '');
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setSyncFail(accountId, state) {
+  setMeta(`sync_fail_${Number(accountId)}`, state ? JSON.stringify(state) : '');
 }
 
 export function updateAccountTransferSync(id) {
@@ -100,7 +115,12 @@ export function resetAccountSpotSync(id) {
 }
 
 export function deleteAccount(id) {
-  run('DELETE FROM accounts WHERE id = ? AND is_demo = 0', Number(id));
+  const accountId = Number(id);
+  tx((db) => {
+    db.prepare("DELETE FROM asset_positions WHERE venue_kind = 'exchange' AND venue_id = ?").run(accountId);
+    db.prepare("DELETE FROM asset_sync_runs WHERE venue_kind = 'exchange' AND venue_id = ?").run(accountId);
+    db.prepare('DELETE FROM accounts WHERE id = ? AND is_demo = 0').run(accountId);
+  });
 }
 
 /** 解密后的凭据；wallet 与 apiKey 同源（Hyperliquid 只填地址） */
@@ -189,7 +209,8 @@ export function applyFundingEvents(accountId = null) {
       : db.prepare('SELECT * FROM funding_events WHERE trade_id IS NULL ORDER BY time').all();
     const find = db.prepare(
       `SELECT id FROM trades
-       WHERE account_id = ? AND symbol = ? AND open_time <= ? AND close_time >= ?
+       WHERE account_id = ? AND symbol = ? AND trashed_at IS NULL
+         AND open_time <= ? AND close_time >= ?
        ORDER BY close_time ASC LIMIT 1`,
     );
     const add = db.prepare('UPDATE trades SET funding = funding + ?, pnl = pnl + ?, updated_at = ? WHERE id = ?');
@@ -375,7 +396,7 @@ export function insertSpotFills(fills, accountId) {
         Number(accountId), String(ext).slice(0, 200), String(f.symbol),
         f.side === 'sell' ? 'sell' : 'buy',
         Number(f.price) || 0, Number(f.qty) || 0, Number(f.fee) || 0,
-        time, f.order_type || null, nowIso(),
+        time, f.order_type ?? f.orderType ?? null, nowIso(),
       );
       inserted += Number(r.changes) || 0;
     }
@@ -423,6 +444,179 @@ export function recomputeSpotCostBasis(accountId) {
     }
   });
   return lots.length;
+}
+
+/* ---------------- 现货回合重算（T 回合 + FIFO） ---------------- */
+
+/** 全量原始现货成交（升序、无 LIMIT），供回合重算使用 */
+export function listAllSpotFills(accountId, symbol = null) {
+  const params = [Number(accountId)];
+  let sql = 'SELECT symbol, side, price, qty, fee, time, order_type FROM spot_fills WHERE account_id = ?';
+  if (symbol) { sql += ' AND symbol = ?'; params.push(String(symbol)); }
+  sql += ' ORDER BY time ASC, id ASC';
+  return all(sql, ...params);
+}
+
+const trimNum = (v) => String(Number(Number(v).toPrecision(8)));
+
+/**
+ * 清理被新配对口径取代的现货 API 记录；写过复盘笔记的先搬进交易对档案，避免内容丢失。
+ */
+export function pruneSpotTradesNotIn(accountId, exchange, symbol, keepIds) {
+  const keep = new Set((keepIds || []).map(String));
+  const rows = all(
+    `SELECT id, external_id, side, pnl, close_time, note FROM trades
+     WHERE account_id = ? AND source = 'api' AND market = 'spot'
+       AND symbol = ? AND trashed_at IS NULL AND external_id LIKE ?`,
+    Number(accountId), String(symbol), `spot:${exchange}:%`,
+  );
+  const dead = rows.filter((r) => !keep.has(String(r.external_id)));
+  if (!dead.length) return 0;
+  const withNote = dead.filter((r) => r.note && String(r.note).trim());
+  if (withNote.length) salvageSpotTradeNotes(accountId, symbol, withNote);
+  return tx((db) => {
+    const release = db.prepare('UPDATE funding_events SET trade_id = NULL WHERE trade_id = ?');
+    const del = db.prepare('DELETE FROM trades WHERE id = ?');
+    let n = 0;
+    for (const r of dead) {
+      release.run(r.id);
+      n += Number(del.run(r.id).changes) || 0;
+    }
+    return n;
+  });
+}
+
+/** 旧逐手配对记录被 T 回合取代时，把用户写的复盘原文归档到交易对档案 */
+function salvageSpotTradeNotes(accountId, symbol, rows) {
+  const lines = rows.map((r) => {
+    const day = String(r.close_time || '').slice(0, 10);
+    const pnl = Number(r.pnl) || 0;
+    const sideLabel = r.side === 'short' ? '做空' : '做多';
+    return `- **${day} ${sideLabel} ${pnl >= 0 ? '+' : '-'}${Math.abs(pnl).toFixed(2)}**：${String(r.note).trim().slice(0, 500)}`;
+  });
+  const block = `\n\n### 迁移的逐笔复盘\n\n> 以下复盘写于旧版逐手配对的现货记录；该记录已被 T 回合 / 新配对取代，原文搬到这里。\n\n${lines.join('\n')}\n`;
+  const existing = getNoteByCategory('symbol', symbol);
+  if (existing) {
+    run('UPDATE notes SET content = ?, updated_at = ? WHERE id = ?',
+      `${String(existing.content || '')}${block}`, nowIso(), existing.id);
+  } else {
+    saveNote({
+      title: `${symbol} 交易对档案`,
+      content: block.trim(),
+      category: 'symbol',
+      subject: symbol,
+    });
+  }
+}
+
+/**
+ * 用现货成交全量重算回合（T 回合优先 + FIFO 兜底），幂等 upsert 并清理旧口径记录。
+ * 新产生的 T 回合会自动写入一条持仓日志。symbols 限定重算范围；不传则覆盖该账户全部现货品种。
+ */
+export function recomputeSpotTrades(accountId, exchange, { symbols = null } = {}) {
+  const syms = symbols && symbols.length
+    ? symbols.map(String)
+    : all('SELECT DISTINCT symbol FROM spot_fills WHERE account_id = ?', Number(accountId))
+      .map((r) => r.symbol);
+  if (!syms.length) return { inserted: 0, updated: 0, pruned: 0, trades: 0 };
+
+  const recomputed = [];
+  for (const sym of syms) {
+    const fills = listAllSpotFills(accountId, sym).map((r) => ({
+      symbol: r.symbol, side: r.side, price: r.price, qty: r.qty,
+      fee: r.fee, time: Date.parse(r.time), orderType: r.order_type || 'other',
+    }));
+    if (fills.length) recomputed.push(...matchSpotRounds(fills, `spot:${exchange}`));
+  }
+
+  // 只给「本次真正新增」的 T 回合写日志：先记录库里已存在的外部 ID
+  const existingIds = new Set(all(
+    `SELECT external_id FROM trades WHERE account_id = ? AND market = 'spot' AND external_id IS NOT NULL`,
+    Number(accountId),
+  ).map((r) => r.external_id));
+  const newTShots = recomputed.filter((t) => t.kind === 't_shot' && !existingIds.has(t.external_id));
+
+  const withMarket = recomputed.map((t) => ({ ...t, market: 'spot', source: 'api' }));
+  const res = withMarket.length
+    ? importTrades(withMarket, accountId, { upsert: true })
+    : { inserted: 0, updated: 0, skipped: 0 };
+
+  for (const t of newTShots) {
+    const tradeRow = get(
+      'SELECT id, account_id, symbol, side, size, entry_price, exit_price, pnl FROM trades WHERE account_id = ? AND external_id = ?',
+      Number(accountId), t.external_id,
+    );
+    if (!tradeRow) continue;
+    const action = tradeRow.side === 'long'
+      ? `做T：买入 ${trimNum(tradeRow.size)} @ ${trimNum(tradeRow.entry_price)} → 卖出 @ ${trimNum(tradeRow.exit_price)}`
+      : `做T：卖出 ${trimNum(tradeRow.size)} @ ${trimNum(tradeRow.entry_price)} → 买回 @ ${trimNum(tradeRow.exit_price)}`;
+    const pnl = Number(tradeRow.pnl) || 0;
+    addSpotLog({
+      accountId,
+      symbol: tradeRow.symbol,
+      tradeId: tradeRow.id,
+      text: `${action}，盈亏 ${pnl >= 0 ? '+' : '-'}${Math.abs(pnl).toFixed(2)}`,
+      source: 'auto',
+    });
+  }
+
+  let pruned = 0;
+  for (const sym of syms) {
+    pruned += pruneSpotTradesNotIn(
+      accountId, exchange, sym,
+      recomputed.filter((t) => t.symbol === sym).map((t) => t.external_id),
+    );
+  }
+  return { inserted: res.inserted, updated: res.updated || 0, pruned, trades: recomputed.length };
+}
+
+/** 一次性迁移：把所有账户的现货记录从旧逐手配对重算为 T 回合 + FIFO（meta 标记防重跑） */
+export function migrateSpotRoundsOnce() {
+  if (getMeta('spot_t_rounds_v1', '')) return null;
+  let accounts = 0;
+  let inserted = 0;
+  let pruned = 0;
+  for (const acc of listAccounts()) {
+    const hasFills = get('SELECT 1 AS x FROM spot_fills WHERE account_id = ? LIMIT 1', Number(acc.id));
+    if (!hasFills) continue;
+    const r = recomputeSpotTrades(acc.id, acc.exchange);
+    accounts++;
+    inserted += r.inserted;
+    pruned += r.pruned;
+  }
+  setMeta('spot_t_rounds_v1', `accounts:${accounts},inserted:${inserted},pruned:${pruned}`);
+  return { accounts, inserted, pruned };
+}
+
+/* ---------------- 现货持仓日志 ---------------- */
+
+export function addSpotLog({ accountId, symbol, tradeId = null, text, source = 'manual' }) {
+  const clean = String(text || '').trim().slice(0, 500);
+  if (!clean) throw new Error('日志内容不能为空');
+  const r = run(
+    `INSERT INTO spot_log (account_id, symbol, trade_id, text, source, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    Number(accountId), String(symbol), tradeId ? Number(tradeId) : null,
+    clean, source === 'auto' ? 'auto' : 'manual', nowIso(),
+  );
+  return Number(r.lastInsertRowid);
+}
+
+/** 一个交易对的日志时间线（跨账户，最新的在最前） */
+export function listSpotLogBySymbol(symbol, limit = 80) {
+  return all(
+    `SELECT l.*, a.name AS account_name
+       FROM spot_log l
+       JOIN accounts a ON a.id = l.account_id
+      WHERE l.symbol = ?
+      ORDER BY l.id DESC
+      LIMIT ?`,
+    String(symbol), Math.min(Math.max(Number(limit) || 80, 1), 200),
+  );
+}
+
+export function deleteSpotLog(id) {
+  run('DELETE FROM spot_log WHERE id = ?', Number(id));
 }
 
 /* ---------------- 资金流水（充提 / 划转） ---------------- */
@@ -510,7 +704,7 @@ export function listBotTrades(accountId = null) {
     JOIN trade_tags tt ON tt.trade_id = tr.id
     JOIN tags g ON g.id = tt.tag_id AND g.name = '策略机器人'
     JOIN accounts a ON a.id = tr.account_id
-    WHERE 1=1`;
+    WHERE tr.trashed_at IS NULL`;
   if (accountId) { sql += ' AND tr.account_id = ?'; params.push(Number(accountId)); }
   sql += ' GROUP BY tr.id ORDER BY tr.close_time DESC LIMIT 500';
   return all(sql, ...params);
@@ -691,7 +885,7 @@ export function pruneTradesNotIn(accountId, exchange, symbol, keepIds) {
   const rows = all(
     `SELECT id, external_id FROM trades
      WHERE account_id = ? AND source = 'api' AND market = 'futures'
-       AND symbol = ? AND external_id LIKE ?`,
+       AND symbol = ? AND trashed_at IS NULL AND external_id LIKE ?`,
     Number(accountId), String(symbol), `${exchange}:%`,
   );
   const dead = rows.filter((r) => !keep.has(String(r.external_id))).map((r) => Number(r.id));
@@ -735,25 +929,26 @@ function attachTagsToRows(rows) {
 export function listTrades({ accountId = null, limit = null } = {}) {
   const params = [];
   let sql = `SELECT tr.*, a.name AS account_name, a.exchange AS account_exchange
-             FROM trades tr JOIN accounts a ON a.id = tr.account_id`;
-  if (accountId) { sql += ' WHERE tr.account_id = ?'; params.push(Number(accountId)); }
+             FROM trades tr JOIN accounts a ON a.id = tr.account_id
+             WHERE tr.trashed_at IS NULL`;
+  if (accountId) { sql += ' AND tr.account_id = ?'; params.push(Number(accountId)); }
   sql += ' ORDER BY tr.close_time DESC, tr.id DESC';
   if (limit) { sql += ' LIMIT ?'; params.push(Number(limit)); }
   return attachTagsToRows(all(sql, ...params));
 }
 
 export function countTrades() {
-  return Number(get('SELECT COUNT(*) AS n FROM trades').n);
+  return Number(get('SELECT COUNT(*) AS n FROM trades WHERE trashed_at IS NULL').n);
 }
 
 /** 只取数量的轻量统计，避免为计数拉全表 */
 export function countTradesBySource(source) {
-  return Number(get('SELECT COUNT(*) AS n FROM trades WHERE source = ?', String(source)).n);
+  return Number(get('SELECT COUNT(*) AS n FROM trades WHERE trashed_at IS NULL AND source = ?', String(source)).n);
 }
 
 export function countTradesBetween(fromIso, toIso) {
   return Number(get(
-    'SELECT COUNT(*) AS n FROM trades WHERE close_time >= ? AND close_time <= ?',
+    'SELECT COUNT(*) AS n FROM trades WHERE trashed_at IS NULL AND close_time >= ? AND close_time <= ?',
     String(fromIso), String(toIso),
   ).n);
 }
@@ -865,6 +1060,36 @@ export function deleteTrade(id) {
   run('DELETE FROM trades WHERE id = ?', Number(id));
 }
 
+/* ---------------- 垃圾箱（软删除） ---------------- */
+//
+// 交易所同步按 external_id 去重：硬删除的记录下次同步会被原样导回。
+// 移入垃圾箱的行保留在 trades 表里（trashed_at 非空），同步按「已存在」跳过，
+// 因此不会再出现；所有统计/列表查询都会排除它，恢复即回到原状态（标签、笔记一起保留）。
+
+export function trashTrade(id) {
+  run('UPDATE trades SET trashed_at = ?, updated_at = ? WHERE id = ? AND trashed_at IS NULL',
+    nowIso(), nowIso(), Number(id));
+}
+
+export function restoreTrade(id) {
+  run('UPDATE trades SET trashed_at = NULL, updated_at = ? WHERE id = ?', nowIso(), Number(id));
+}
+
+export function listTrashedTrades({ limit = 200 } = {}) {
+  return all(
+    `SELECT tr.*, a.name AS account_name, a.exchange AS account_exchange
+       FROM trades tr JOIN accounts a ON a.id = tr.account_id
+      WHERE tr.trashed_at IS NOT NULL
+      ORDER BY tr.trashed_at DESC, tr.id DESC
+      LIMIT ?`,
+    Math.min(Math.max(Number(limit) || 200, 1), 500),
+  );
+}
+
+export function countTrashedTrades() {
+  return Number(get('SELECT COUNT(*) AS n FROM trades WHERE trashed_at IS NOT NULL').n) || 0;
+}
+
 /** 批量导入（带事务、去重、标签） */
 export function importTrades(trades, accountId, { upsert = false } = {}) {
   const at = nowIso();
@@ -874,25 +1099,29 @@ export function importTrades(trades, accountId, { upsert = false } = {}) {
     let updated = 0;
     const insert = db.prepare(
       `INSERT INTO trades (account_id, external_id, symbol, side, order_type, size, notional,
-         entry_price, exit_price, open_time, close_time, pnl, fee, funding, source, market, note,
+         entry_price, exit_price, open_time, close_time, pnl, fee, funding, source, market, kind, note,
          note_updated_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const exists = db.prepare(
-      'SELECT id, source, funding, pnl FROM trades WHERE account_id = ? AND external_id = ?',
+      'SELECT id, source, funding, pnl, trashed_at FROM trades WHERE account_id = ? AND external_id = ?',
     );
     // OKX 偶尔补写行的 openTime（如从 cTime 整秒值精化为实际成交时间），同一回合
     // 会带着新外部 ID 再来一次。按 posId + 盈亏/数量指纹做二次匹配：命中则改键并回写，
     // 而不是插入重复记录。时间窗口 180s 内，避免误并同 posId 的相邻独立回合。
     const byFingerprint = db.prepare(
-      `SELECT id, funding FROM trades WHERE account_id = ? AND source = 'api' AND external_id LIKE ?
+      `SELECT id, funding, trashed_at FROM trades WHERE account_id = ? AND source = 'api' AND external_id LIKE ?
          AND symbol = ? AND ABS(pnl - ?) < 1e-9 AND ABS(size - ?) < 1e-9
          AND ABS(strftime('%s', close_time) * 1000 - ?) < 180000 LIMIT 1`,
     );
     const rekey = db.prepare('UPDATE trades SET external_id = ? WHERE id = ?');
     // upsert 只更新交易所侧字段；复盘笔记、标签、创建时间保留。
+    // order_type 入参为 'other'（未知）时保留库值：OKX 的 positions-history 恒给 'other'，
+    // 直接覆盖会把 enrichIdle 刚补好的吃挂分类冲掉，造成反复重分类。
     const updateApi = db.prepare(
-      `UPDATE trades SET symbol = ?, side = ?, order_type = ?, size = ?, notional = ?,
+      `UPDATE trades SET symbol = ?, side = ?,
+         order_type = CASE WHEN ? = 'other' THEN order_type ELSE ? END,
+         size = ?, notional = ?,
          entry_price = ?, exit_price = ?, open_time = ?, close_time = ?, pnl = ?, fee = ?, funding = ?,
          updated_at = ? WHERE id = ?`,
     );
@@ -912,11 +1141,14 @@ export function importTrades(trades, accountId, { upsert = false } = {}) {
       if (seen.has(ext)) { skipped++; continue; }
       const found = exists.get(Number(accountId), ext);
       if (found) {
+        // 垃圾箱记录：用户明确不要这条数据，同步不再导回/回写（恢复后才会重新参与）
+        if (found.trashed_at) { skipped++; seen.add(ext); continue; }
         // OKX 部分平仓会原地更新仓位历史行：api 行允许回写最终状态，其余来源一律跳过
         if (upsert && found.source === 'api' && trade.source === 'api') {
           const mf = mergeFunding(trade.funding, found.funding);
+          const ot = trade.order_type || 'other';
           updateApi.run(
-            String(trade.symbol || ''), String(trade.side || 'long'), trade.order_type || 'other',
+            String(trade.symbol || ''), String(trade.side || 'long'), ot, ot,
             Number(trade.size) || 0, Number(trade.notional) || 0,
             Number(trade.entry_price) || 0, Number(trade.exit_price) || 0,
             trade.open_time, trade.close_time,
@@ -940,11 +1172,17 @@ export function importTrades(trades, accountId, { upsert = false } = {}) {
               Number(trade.pnl) || 0, Number(trade.size) || 0, closeMs,
             )
           : null;
+        if (twin && twin.trashed_at) {
+          skipped++;
+          seen.add(ext);
+          continue;
+        }
         if (twin) {
           const mf = mergeFunding(trade.funding, twin.funding);
           rekey.run(ext, twin.id);
+          const ot = trade.order_type || 'other';
           updateApi.run(
-            String(trade.symbol || ''), String(trade.side || 'long'), trade.order_type || 'other',
+            String(trade.symbol || ''), String(trade.side || 'long'), ot, ot,
             Number(trade.size) || 0, Number(trade.notional) || 0,
             Number(trade.entry_price) || 0, Number(trade.exit_price) || 0,
             trade.open_time, trade.close_time,
@@ -963,6 +1201,7 @@ export function importTrades(trades, accountId, { upsert = false } = {}) {
         trade.open_time, trade.close_time,
         Number(trade.pnl) || 0, Number(trade.fee) || 0, Number(trade.funding) || 0,
         trade.source || 'csv', trade.market === 'spot' ? 'spot' : 'futures',
+        trade.kind === 't_shot' ? 't_shot' : null,
         trade.note || null, trade.note ? at : null, at, at,
       );
       const tradeId = Number(r.lastInsertRowid);
@@ -1077,7 +1316,7 @@ export function listUnclassifiedEpisodes(accountId = null, limit = 1) {
   let sql = `SELECT tr.id, tr.symbol, tr.market, tr.side, tr.entry_price, tr.exit_price, tr.size,
       tr.open_time, tr.close_time, a.exchange
     FROM trades tr JOIN accounts a ON a.id = tr.account_id
-    WHERE tr.source = 'api' AND tr.order_type = 'other' AND tr.close_time >= ?`;
+    WHERE tr.source = 'api' AND tr.trashed_at IS NULL AND tr.order_type = 'other' AND tr.close_time >= ?`;
   if (accountId) { sql += ' AND tr.account_id = ?'; params.push(Number(accountId)); }
   sql += ' ORDER BY tr.close_time DESC LIMIT ?';
   params.push(Math.max(1, Math.min(50, Number(limit) || 1)));
@@ -1088,7 +1327,7 @@ export function listUnclassifiedEpisodes(accountId = null, limit = 1) {
   const params = [Number(threshold)];
   let sql = `SELECT tr.*, a.name AS account_name, a.exchange AS account_exchange
     FROM trades tr JOIN accounts a ON a.id = tr.account_id
-    WHERE tr.pnl <= ? AND (tr.note IS NULL OR tr.note = '')`;
+    WHERE tr.trashed_at IS NULL AND tr.pnl <= ? AND (tr.note IS NULL OR tr.note = '')`;
   if (accountId) { sql += ' AND tr.account_id = ?'; params.push(Number(accountId)); }
   sql += ' ORDER BY tr.pnl ASC LIMIT ?';
   params.push(Math.max(1, Math.min(20, Number(limit) || 8)));
@@ -1281,7 +1520,7 @@ export function listSymbolsWithTradeNotes() {
   return all(
     `SELECT symbol, COUNT(*) AS count, MAX(close_time) AS last_time
        FROM trades
-      WHERE note IS NOT NULL AND TRIM(note) <> ''
+      WHERE trashed_at IS NULL AND note IS NOT NULL AND TRIM(note) <> ''
       GROUP BY symbol
       ORDER BY last_time DESC`,
   );
@@ -1291,7 +1530,7 @@ export function listTradeNotesBySymbol(symbol, limit = 50) {
   return all(
     `SELECT id, symbol, side, market, close_time, pnl, note
        FROM trades
-      WHERE symbol = ? AND note IS NOT NULL AND TRIM(note) <> ''
+      WHERE trashed_at IS NULL AND symbol = ? AND note IS NOT NULL AND TRIM(note) <> ''
       ORDER BY close_time DESC
       LIMIT ?`,
     String(symbol), Number(limit),
@@ -1302,7 +1541,7 @@ export function listRecentTradeNotes(limit = 20) {
   return all(
     `SELECT id, symbol, side, market, close_time, pnl, note
        FROM trades
-      WHERE note IS NOT NULL AND TRIM(note) <> ''
+      WHERE trashed_at IS NULL AND note IS NOT NULL AND TRIM(note) <> ''
       ORDER BY COALESCE(note_updated_at, close_time) DESC
       LIMIT ?`,
     Number(limit),
@@ -1323,7 +1562,7 @@ export function listSpotTrades(limit = 50, accountId = null) {
   let sql = `SELECT t.*, a.name AS account_name
        FROM trades t
        JOIN accounts a ON a.id = t.account_id
-      WHERE t.market = 'spot'`;
+      WHERE t.market = 'spot' AND t.trashed_at IS NULL`;
   if (accountId) { sql += ' AND t.account_id = ?'; params.push(Number(accountId)); }
   sql += ' ORDER BY t.close_time DESC LIMIT ?';
   params.push(Number(limit));
@@ -1335,7 +1574,7 @@ export function listSpotTradesBySymbol(symbol, limit = 200) {
     `SELECT t.*, a.name AS account_name
        FROM trades t
        JOIN accounts a ON a.id = t.account_id
-      WHERE t.market = 'spot' AND t.symbol = ?
+      WHERE t.market = 'spot' AND t.trashed_at IS NULL AND t.symbol = ?
       ORDER BY t.close_time DESC
       LIMIT ?`,
     String(symbol), Number(limit),
@@ -1491,6 +1730,8 @@ export function statsOverview() {  return {
 export function clearDemoData() {
   return tx((db) => {
     const before = db.prepare('SELECT COUNT(*) AS n FROM trades WHERE account_id IN (SELECT id FROM accounts WHERE is_demo = 1)').get();
+    db.prepare("DELETE FROM asset_positions WHERE venue_kind = 'exchange' AND venue_id IN (SELECT id FROM accounts WHERE is_demo = 1)").run();
+    db.prepare("DELETE FROM asset_sync_runs WHERE venue_kind = 'exchange' AND venue_id IN (SELECT id FROM accounts WHERE is_demo = 1)").run();
     db.prepare('DELETE FROM accounts WHERE is_demo = 1').run();
     db.prepare('DELETE FROM imports WHERE account_id NOT IN (SELECT id FROM accounts)').run();
     return { trades: Number(before.n) };
@@ -1499,15 +1740,429 @@ export function clearDemoData() {
 
 export function clearAllData() {
   tx((db) => {
-    db.exec('DELETE FROM spot_fills; DELETE FROM spot_cost_basis; DELETE FROM spot_balances; DELETE FROM spot_holdings; DELETE FROM transfers; DELETE FROM funding_events; DELETE FROM balances; DELETE FROM positions; DELETE FROM resources; DELETE FROM sync_runs; DELETE FROM import_templates; DELETE FROM trade_tags; DELETE FROM trades; DELETE FROM tags; DELETE FROM notes; DELETE FROM imports; DELETE FROM sessions; DELETE FROM accounts;');
-    try { db.exec("DELETE FROM sqlite_sequence WHERE name IN ('trades','accounts','tags','notes','imports','sync_runs','import_templates','funding_events','transfers')"); } catch { /* 没有 AUTOINCREMENT 表 */ }
+    db.exec('DELETE FROM spot_fills; DELETE FROM spot_cost_basis; DELETE FROM spot_balances; DELETE FROM spot_holdings; DELETE FROM transfers; DELETE FROM funding_events; DELETE FROM balances; DELETE FROM positions; DELETE FROM resources; DELETE FROM sync_runs; DELETE FROM import_templates; DELETE FROM trade_tags; DELETE FROM trades; DELETE FROM tags; DELETE FROM notes; DELETE FROM imports; DELETE FROM sessions; DELETE FROM asset_positions; DELETE FROM manual_assets; DELETE FROM asset_snapshots; DELETE FROM asset_sync_runs; DELETE FROM prices; DELETE FROM wallets; DELETE FROM wallet_providers; DELETE FROM accounts;');
+    try { db.exec("DELETE FROM sqlite_sequence WHERE name IN ('trades','accounts','tags','notes','imports','sync_runs','import_templates','funding_events','transfers','wallets','manual_assets','asset_positions','asset_sync_runs')"); } catch { /* 没有 AUTOINCREMENT 表 */ }
   });
+}
+
+/* ---------------- 资产总览 / 钱包 / 手动台账 ---------------- */
+
+const WALLET_COLS = `id, name, address, chains, provider, enabled, last_sync_at,
+  last_sync_status, last_sync_message, created_at`;
+
+export function listWallets() {
+  return all(`SELECT ${WALLET_COLS} FROM wallets ORDER BY id ASC`);
+}
+
+export function getWallet(id) {
+  return get(`SELECT ${WALLET_COLS} FROM wallets WHERE id = ?`, Number(id)) || null;
+}
+
+export function createWallet({ name = '', address = '', chains = [], provider = 'debank', enabled = 1 } = {}) {
+  const at = nowIso();
+  const addr = String(address || '').trim();
+  if (!addr) throw new Error('钱包地址不能为空');
+  const chainList = Array.isArray(chains) ? chains : String(chains || '').split(',');
+  const r = run(
+    `INSERT INTO wallets (name, address, chains, provider, enabled, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    String(name || '').trim().slice(0, 60) || addr.slice(0, 12),
+    addr,
+    JSON.stringify([...new Set(chainList.map((x) => String(x).trim()).filter(Boolean))]),
+    String(provider || 'debank').trim().toLowerCase(),
+    enabled ? 1 : 0,
+    at,
+  );
+  return getWallet(Number(r.lastInsertRowid));
+}
+
+export function updateWallet(id, { name, address, chains, provider, enabled } = {}) {
+  const current = get('SELECT * FROM wallets WHERE id = ?', Number(id));
+  if (!current) throw new Error('钱包不存在');
+  const chainList = chains === undefined
+    ? null
+    : (Array.isArray(chains) ? chains : String(chains || '').split(','));
+  run(
+    `UPDATE wallets SET name = ?, address = ?, chains = ?, provider = ?, enabled = ? WHERE id = ?`,
+    name === undefined ? current.name : (String(name).trim().slice(0, 60) || current.name),
+    address === undefined ? current.address : String(address).trim(),
+    chainList === null ? current.chains : JSON.stringify([...new Set(chainList.map((x) => String(x).trim()).filter(Boolean))]),
+    provider === undefined ? current.provider : String(provider).trim().toLowerCase(),
+    enabled === undefined ? current.enabled : (enabled ? 1 : 0),
+    Number(id),
+  );
+  return getWallet(id);
+}
+
+export function deleteWallet(id) {
+  return tx((db) => {
+    db.prepare("DELETE FROM asset_positions WHERE venue_kind = 'wallet' AND venue_id = ?").run(Number(id));
+    db.prepare('DELETE FROM wallets WHERE id = ?').run(Number(id));
+  });
+}
+
+export function updateWalletSync(id, { status = 'ok', message = '', at = nowIso() } = {}) {
+  run(
+    'UPDATE wallets SET last_sync_at = ?, last_sync_status = ?, last_sync_message = ? WHERE id = ?',
+    at, String(status || 'ok').slice(0, 30), String(message || '').slice(0, 500), Number(id),
+  );
+}
+
+/** 钱包索引服务配置；密钥加密存储，对外只给 hint */
+export function listWalletProviders() {
+  return all('SELECT id, api_key_hint, base_url, updated_at FROM wallet_providers ORDER BY id ASC');
+}
+
+export function getWalletProviderConfig(id) {
+  const row = get('SELECT * FROM wallet_providers WHERE id = ?', String(id || '').toLowerCase());
+  if (!row) return null;
+  return {
+    id: row.id,
+    hasKey: Boolean(row.api_key_enc),
+    apiKeyHint: row.api_key_hint || '',
+    baseUrl: row.base_url || '',
+    updatedAt: row.updated_at,
+  };
+}
+
+export function getWalletProviderCredentials(id) {
+  const row = get('SELECT * FROM wallet_providers WHERE id = ?', String(id || '').toLowerCase());
+  if (!row) return { apiKey: '', baseUrl: '' };
+  return {
+    apiKey: row.api_key_enc ? decryptSecret(row.api_key_enc) : '',
+    baseUrl: row.base_url || '',
+  };
+}
+
+export function saveWalletProvider(id, { apiKey, baseUrl, clearKey = false } = {}) {
+  const providerId = String(id || '').trim().toLowerCase();
+  if (!providerId) throw new Error('缺少索引服务');
+  const current = get('SELECT * FROM wallet_providers WHERE id = ?', providerId);
+  const nextKeyEnc = clearKey
+    ? null
+    : (apiKey !== undefined && apiKey !== '' ? encryptSecret(String(apiKey).trim()) : current?.api_key_enc || null);
+  const nextHint = clearKey
+    ? null
+    : (apiKey !== undefined && apiKey !== '' ? hintKey(String(apiKey).trim()) : current?.api_key_hint || null);
+  const nextBase = baseUrl === undefined ? (current?.base_url || null) : (String(baseUrl).trim() || null);
+  run(
+    `INSERT INTO wallet_providers (id, api_key_enc, api_key_hint, base_url, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       api_key_enc = excluded.api_key_enc,
+       api_key_hint = excluded.api_key_hint,
+       base_url = excluded.base_url,
+       updated_at = excluded.updated_at`,
+    providerId, nextKeyEnc, nextHint, nextBase, nowIso(),
+  );
+  return getWalletProviderConfig(providerId);
+}
+
+/* 钱包自动同步周期（分钟）：页面可改，env 只作初始默认 */
+const WALLET_REFRESH_MIN = 5;
+const WALLET_REFRESH_MAX = 20160; // 14 天
+
+export function getWalletRefreshSetting() {
+  const n = Number(getMeta('wallet_refresh_minutes', ''));
+  if (Number.isFinite(n) && n >= WALLET_REFRESH_MIN) return Math.min(WALLET_REFRESH_MAX, Math.round(n));
+  return null;
+}
+
+export function setWalletRefreshSetting(minutes) {
+  const n = Number(minutes);
+  if (!Number.isFinite(n) || n < WALLET_REFRESH_MIN) {
+    throw new Error(`刷新周期不能小于 ${WALLET_REFRESH_MIN} 分钟`);
+  }
+  setMeta('wallet_refresh_minutes', String(Math.min(WALLET_REFRESH_MAX, Math.round(n))));
+  return getWalletRefreshSetting();
+}
+
+/* ---------------- 统一资产仓位 ---------------- */
+
+function assetPositionRow(p) {
+  const amount = Number(p.amount);
+  const price = p.price_usd === null || p.price_usd === undefined || p.price_usd === ''
+    ? null : Number(p.price_usd);
+  const value = p.value_usd === null || p.value_usd === undefined || p.value_usd === ''
+    ? null : Number(p.value_usd);
+  return {
+    venue_kind: String(p.venue_kind || '').trim(),
+    venue_id: Number(p.venue_id),
+    bucket: String(p.bucket || 'other').trim().toLowerCase(),
+    asset: String(p.asset || '').trim().toUpperCase(),
+    chain: String(p.chain || '').trim().toLowerCase(),
+    protocol: String(p.protocol || '').trim(),
+    product: String(p.product || '').trim(),
+    amount: Number.isFinite(amount) ? amount : 0,
+    price_usd: Number.isFinite(price) ? price : null,
+    value_usd: Number.isFinite(value) ? value : null,
+    source: String(p.source || 'unknown').slice(0, 300),
+    source_ref: String(p.source_ref || '').slice(0, 300),
+    fetched_at: p.fetched_at || nowIso(),
+  };
+}
+
+/**
+ * 替换某场所的资产仓位。
+ * buckets 非空时只替换这些桶（单个桶拉取失败不会抹掉其他桶的旧数据）。
+ */
+export function replaceAssetPositions(venueKind, venueId, positions = [], buckets = null) {
+  const kind = String(venueKind || '').trim();
+  const id = Number(venueId);
+  if (!kind || !id) throw new Error('资产仓位缺少场所');
+  const bucketList = Array.isArray(buckets)
+    ? [...new Set(buckets.map((b) => String(b || '').trim().toLowerCase()).filter(Boolean))]
+    : [];
+  return tx((db) => {
+    if (bucketList.length) {
+      const placeholders = bucketList.map(() => '?').join(',');
+      db.prepare(`DELETE FROM asset_positions WHERE venue_kind = ? AND venue_id = ? AND bucket IN (${placeholders})`)
+        .run(kind, id, ...bucketList);
+    } else {
+      db.prepare('DELETE FROM asset_positions WHERE venue_kind = ? AND venue_id = ?').run(kind, id);
+    }
+    const stmt = db.prepare(
+      `INSERT INTO asset_positions
+         (venue_kind, venue_id, bucket, asset, chain, protocol, product,
+          amount, price_usd, value_usd, source, source_ref, fetched_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(venue_kind, venue_id, bucket, asset, chain, protocol, product) DO UPDATE SET
+         amount = excluded.amount,
+         price_usd = excluded.price_usd,
+         value_usd = excluded.value_usd,
+         source = excluded.source,
+         source_ref = excluded.source_ref,
+         fetched_at = excluded.fetched_at`,
+    );
+    let inserted = 0;
+    const allowedBuckets = bucketList.length ? new Set(bucketList) : null;
+    // 同一个 (桶, 币种, 链, 协议, 产品) 可能来自多条原始仓位（同一池子的多个 token 明细、
+    // 或钱包里同名代币）。先合并再写，避免 UNIQUE 冲突导致“写入 5 条只剩 1 条”。
+    const merged = new Map();
+    for (const raw of positions || []) {
+      const row = assetPositionRow({ ...raw, venue_kind: kind, venue_id: id });
+      if (!row.asset || !Number.isFinite(row.amount) || row.amount === 0) continue;
+      if (allowedBuckets && !allowedBuckets.has(row.bucket)) continue;
+      const key = [row.bucket, row.asset, row.chain, row.protocol, row.product].join('\u0001');
+      const current = merged.get(key);
+      if (!current) {
+        merged.set(key, row);
+        continue;
+      }
+      current.amount += row.amount;
+      if (row.price_usd !== null) current.price_usd = row.price_usd;
+      // 任一明细拿不到估值时整个合并行保持未估值，避免把不完整的金额当成总额
+      current.value_usd = (current.value_usd === null || row.value_usd === null)
+        ? null
+        : current.value_usd + row.value_usd;
+      if (!current.source_ref && row.source_ref) current.source_ref = row.source_ref;
+      if (row.fetched_at > current.fetched_at) current.fetched_at = row.fetched_at;
+    }
+    for (const row of merged.values()) {
+      stmt.run(
+        row.venue_kind, row.venue_id, row.bucket, row.asset, row.chain, row.protocol, row.product,
+        row.amount, row.price_usd, row.value_usd, row.source, row.source_ref, row.fetched_at,
+      );
+      inserted++;
+    }
+    return inserted;
+  });
+}
+
+export function deleteAssetPositions(venueKind, venueId) {
+  run('DELETE FROM asset_positions WHERE venue_kind = ? AND venue_id = ?', String(venueKind), Number(venueId));
+}
+
+export function listAssetPositions({ venueKind = null, venueId = null, bucket = null } = {}) {
+  const where = [];
+  const params = [];
+  if (venueKind) { where.push('p.venue_kind = ?'); params.push(String(venueKind)); }
+  if (venueId) { where.push('p.venue_id = ?'); params.push(Number(venueId)); }
+  if (bucket) { where.push('p.bucket = ?'); params.push(String(bucket)); }
+  const sql = `SELECT p.*,
+      COALESCE(a.name, w.name, '') AS venue_name,
+      COALESCE(a.exchange, w.provider, '') AS venue_meta,
+      w.address AS wallet_address,
+      a.is_demo AS account_is_demo
+    FROM asset_positions p
+    LEFT JOIN accounts a ON p.venue_kind = 'exchange' AND a.id = p.venue_id
+    LEFT JOIN wallets w ON p.venue_kind = 'wallet' AND w.id = p.venue_id
+    ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+    ORDER BY p.venue_kind, p.venue_id, p.value_usd DESC, p.asset ASC`;
+  return all(sql, ...params);
+}
+
+/* ---------------- 手动资产（打新 / 锁仓理财） ---------------- */
+
+export function listManualAssets({ status = null } = {}) {
+  const where = status ? 'WHERE status = ?' : '';
+  return all(`SELECT * FROM manual_assets ${where} ORDER BY status ASC, locked_until ASC, id DESC`,
+    ...(status ? [String(status)] : []));
+}
+
+export function getManualAsset(id) {
+  return get('SELECT * FROM manual_assets WHERE id = ?', Number(id)) || null;
+}
+
+function manualAssetInput(input = {}) {
+  const amount = Number(input.amount);
+  const price = input.price_usd === null || input.price_usd === undefined || input.price_usd === ''
+    ? null : Number(input.price_usd);
+  const value = input.value_usd === null || input.value_usd === undefined || input.value_usd === ''
+    ? null : Number(input.value_usd);
+  return {
+    venue_name: String(input.venue_name || '').trim().slice(0, 80),
+    bucket: String(input.bucket || 'launchpool').trim().toLowerCase().slice(0, 40) || 'launchpool',
+    product: String(input.product || '').trim().slice(0, 120),
+    asset: String(input.asset || '').trim().toUpperCase().slice(0, 40),
+    amount: Number.isFinite(amount) ? amount : 0,
+    price_usd: Number.isFinite(price) ? price : null,
+    value_usd: Number.isFinite(value) ? value : null,
+    locked_until: input.locked_until || null,
+    status: input.status === 'redeemed' ? 'redeemed' : 'active',
+    note: String(input.note || '').slice(0, 1000),
+  };
+}
+
+export function createManualAsset(input) {
+  const row = manualAssetInput(input);
+  if (!row.venue_name) throw new Error('请填写场所/产品来源');
+  if (!row.asset) throw new Error('请填写币种');
+  const at = nowIso();
+  const r = run(
+    `INSERT INTO manual_assets
+       (venue_name, bucket, product, asset, amount, price_usd, value_usd, locked_until, status, note, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    row.venue_name, row.bucket, row.product, row.asset, row.amount, row.price_usd, row.value_usd,
+    row.locked_until, row.status, row.note, at, at,
+  );
+  return getManualAsset(Number(r.lastInsertRowid));
+}
+
+export function updateManualAsset(id, input) {
+  const current = getManualAsset(id);
+  if (!current) throw new Error('手动资产不存在');
+  const row = manualAssetInput({ ...current, ...input });
+  if (!row.venue_name) throw new Error('请填写场所/产品来源');
+  if (!row.asset) throw new Error('请填写币种');
+  run(
+    `UPDATE manual_assets SET venue_name = ?, bucket = ?, product = ?, asset = ?, amount = ?,
+       price_usd = ?, value_usd = ?, locked_until = ?, status = ?, note = ?, updated_at = ?
+     WHERE id = ?`,
+    row.venue_name, row.bucket, row.product, row.asset, row.amount, row.price_usd, row.value_usd,
+    row.locked_until, row.status, row.note, nowIso(), Number(id),
+  );
+  return getManualAsset(id);
+}
+
+export function deleteManualAsset(id) {
+  run('DELETE FROM manual_assets WHERE id = ?', Number(id));
+}
+
+/* ---------------- 资产同步记录 / 快照 / 价格缓存 ---------------- */
+
+export function startAssetSyncRun(venueKind, venueId, source = '') {
+  const at = nowIso();
+  const r = run(
+    'INSERT INTO asset_sync_runs (venue_kind, venue_id, started_at, status, source) VALUES (?, ?, ?, ?, ?)',
+    String(venueKind), Number(venueId), at, 'running', String(source || '').slice(0, 200),
+  );
+  return Number(r.lastInsertRowid);
+}
+
+export function finishAssetSyncRun(id, { status = 'ok', message = '', positions = 0 } = {}) {
+  run(
+    'UPDATE asset_sync_runs SET finished_at = ?, status = ?, message = ?, positions = ? WHERE id = ?',
+    nowIso(), String(status || 'ok').slice(0, 30), String(message || '').slice(0, 800), Number(positions) || 0, Number(id),
+  );
+}
+
+export function listAssetSyncRuns(limit = 50) {
+  return all(
+    `SELECT r.*,
+       COALESCE(a.name, w.name, '') AS venue_name,
+       r.venue_kind AS kind
+     FROM asset_sync_runs r
+     LEFT JOIN accounts a ON r.venue_kind = 'exchange' AND a.id = r.venue_id
+     LEFT JOIN wallets w ON r.venue_kind = 'wallet' AND w.id = r.venue_id
+     ORDER BY r.id DESC LIMIT ?`,
+    Math.max(1, Math.min(500, Number(limit) || 50)),
+  );
+}
+
+/** 进程被杀时同步记录会停在 running；启动后把超时未完成的标记为失败 */
+export function failStaleAssetSyncRuns(maxAgeMinutes = 30) {
+  const cutoff = new Date(Date.now() - maxAgeMinutes * 60_000).toISOString();
+  const r = run(
+    `UPDATE asset_sync_runs SET finished_at = ?, status = 'error', message = '进程中断，未完成'
+     WHERE finished_at IS NULL AND started_at < ?`,
+    nowIso(), cutoff,
+  );
+  return Number(r.changes) || 0;
+}
+
+export function saveAssetSnapshot({ date, total_usd = 0, net_usd = 0, liabilities_usd = 0, unpriced = 0, by_bucket = {}, by_venue = {} }) {
+  run(
+    `INSERT INTO asset_snapshots
+       (snapshot_date, total_usd, net_usd, liabilities_usd, unpriced, by_bucket, by_venue, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(snapshot_date) DO UPDATE SET
+       total_usd = excluded.total_usd,
+       net_usd = excluded.net_usd,
+       liabilities_usd = excluded.liabilities_usd,
+       unpriced = excluded.unpriced,
+       by_bucket = excluded.by_bucket,
+       by_venue = excluded.by_venue,
+       created_at = excluded.created_at`,
+    String(date), Number(total_usd) || 0, Number(net_usd) || 0, Number(liabilities_usd) || 0,
+    Number(unpriced) || 0, JSON.stringify(by_bucket || {}), JSON.stringify(by_venue || {}), nowIso(),
+  );
+}
+
+export function listAssetSnapshots(limit = 365) {
+  return all(
+    'SELECT * FROM asset_snapshots ORDER BY snapshot_date DESC LIMIT ?',
+    Math.max(1, Math.min(2000, Number(limit) || 365)),
+  ).reverse();
+}
+
+export function savePrices(entries = []) {
+  if (!entries.length) return;
+  const at = nowIso();
+  tx((db) => {
+    const stmt = db.prepare(
+      `INSERT INTO prices (asset, price_usd, source, fetched_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(asset) DO UPDATE SET price_usd = excluded.price_usd, source = excluded.source, fetched_at = excluded.fetched_at`,
+    );
+    for (const p of entries) {
+      const asset = String(p.asset || '').toUpperCase();
+      const price = Number(p.price_usd);
+      if (!asset || !Number.isFinite(price)) continue;
+      stmt.run(asset, price, String(p.source || '').slice(0, 200), p.fetched_at || at);
+    }
+  });
+}
+
+export function getCachedPrice(asset) {
+  const row = get('SELECT * FROM prices WHERE asset = ?', String(asset || '').toUpperCase());
+  return row || null;
+}
+
+export function listPrices(limit = 500) {
+  return all('SELECT * FROM prices ORDER BY asset ASC LIMIT ?', Math.max(1, Number(limit) || 500));
 }
 
 export function exportAll() {
   return {
     exported_at: nowIso(),
     accounts: listAccounts(),
+    wallets: listWallets(),
+    wallet_providers: listWalletProviders(),
+    manual_assets: listManualAssets(),
+    asset_positions: listAssetPositions(),
+    asset_snapshots: listAssetSnapshots(2000),
+    asset_sync_runs: listAssetSyncRuns(1000),
+    prices: listPrices(2000),
     trades: listTrades(),
     tags: listTags(),
     notes: listNotes(),

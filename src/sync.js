@@ -211,6 +211,7 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
     let ledgerInserted = 0;
     let spotInserted = 0;
     let spotFillsInserted = 0;
+    let spotPruned = 0;
     if (typeof adapter.fetchTransfers === 'function') {
       const lastTransfer = Date.parse(account.last_transfer_sync_at || '') || 0;
       const due = !lastTransfer || (now - lastTransfer > 6 * 3600_000);
@@ -289,11 +290,12 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
           if (fills.length) {
             spotFillsInserted = store.insertSpotFills(fills, accountId);
             store.recomputeSpotCostBasis(accountId);
-          }
-          const spotTrades = matchFills(fills, `spot:${account.exchange}`, { longOnly: true })
-            .map((t) => ({ ...t, market: 'spot', source: 'api' }));
-          if (spotTrades.length) {
-            spotInserted = store.importTrades(spotTrades, accountId, { upsert: true }).inserted;
+            // T 回合 + FIFO：按触及 symbol 的全量成交重算（T 回合可能跨同步批次闭环），
+            // 并清理被新口径取代的旧记录
+            const touched = [...new Set(fills.map((f) => f.symbol))];
+            const rec = store.recomputeSpotTrades(accountId, account.exchange, { symbols: touched });
+            spotInserted = rec.inserted;
+            spotPruned = rec.pruned;
           }
           store.updateAccountSpotSync(accountId);
         } catch (err) {
@@ -314,8 +316,9 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
         + (transfersInserted ? `, transfers ${transfersInserted}` : '')
         + (botsInserted ? `, bots ${botsInserted}` : '')
         + (ledgerInserted ? `, ledger ${ledgerInserted}` : '')
-        + (spotInserted ? `, spot ${spotInserted}` : '')
-        + (spotFillsInserted ? `, spot fills ${spotFillsInserted}` : '')
+      + (spotInserted ? `, spot ${spotInserted}` : '')
+      + (spotFillsInserted ? `, spot fills ${spotFillsInserted}` : '')
+      + (spotPruned ? `, spot pruned ${spotPruned}` : '')
         + (warnings.length ? `, warn: ${warnings[0]}` : ''),
     });
     store.finishSyncRun(runId, {
@@ -326,6 +329,8 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
       status: 'ok',
       message: done ? 'batch complete' : 'more history available',
     });
+    // 成功一次即清零连续失败计数
+    store.setSyncFail(accountId, null);
 
     return {
       ok: true,
@@ -350,6 +355,15 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
       to: new Date(toMs).toISOString(),
     };
   } catch (err) {
+    // 连续失败退避：计数持久化，第 5 次起暂停 24 小时（重启也生效）
+    const prevFail = store.getSyncFail(accountId);
+    const attempts = (Number(prevFail?.attempts) || 0) + 1;
+    store.setSyncFail(accountId, {
+      attempts,
+      nextAt: Date.now() + nextSyncDelay(attempts),
+      lastError: String(err?.message || err).slice(0, 300),
+      at: new Date().toISOString(),
+    });
     store.updateAccountSyncState(accountId, {
       state: account.sync_done ? null : previous,
       done: account.sync_done,
@@ -362,6 +376,13 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
     });
     throw err;
   }
+}
+
+/** 连续失败退避：前 4 次快速重试（15s→60s），第 5 次起改为 24 小时后再试 */
+export function nextSyncDelay(attempts) {
+  const n = Math.max(1, Number(attempts) || 1);
+  if (n >= 5) return 24 * 3600_000;
+  return Math.min(300_000, 15_000 * n);
 }
 
 /** CLI / 定时任务用：把所有真实账户拉到没有更多历史为止 */

@@ -1,6 +1,6 @@
 import { escapeHtml as e, fmtMoney, fmtNum, fmtPrice, fmtDateTime, fmtDuration } from '../http.js';
 import { renderMarkdown } from '../markdown.js';
-import { shell } from './layout.js';
+import { shell, tradeSideLabel } from './layout.js';
 
 const TYPE_LABEL = {
   deposit: '充值',
@@ -33,7 +33,8 @@ function holdingStart(fills) {
 }
 
 export function spotSymbolPage({
-  user, symbol, holdings = [], fills = [], trades = [], transfers = [], archiveNote = null, spotNotes = [], notice, error,
+  user, symbol, holdings = [], fills = [], trades = [], transfers = [], archiveNote = null, spotNotes = [],
+  log = [], logAccounts = [], notice, error,
 }) {
   const totalQty = holdings.reduce((a, h) => a + (Number(h.quantity) || 0), 0);
   const spotValue = holdings.reduce((a, h) => a + (Number(h.value) || 0), 0);
@@ -109,12 +110,34 @@ export function spotSymbolPage({
     <td class="small">${e(fmtDateTime(t.open_time))}</td>
     <td class="small">${e(fmtDateTime(t.close_time))}</td>
     <td class="small">${e(fmtDuration(Date.parse(t.close_time) - Date.parse(t.open_time)))}</td>
-    <td><span class="side-tag ${t.side}">${t.side === 'long' ? '做多' : '做空'}</span></td>
+    <td><span class="side-tag ${t.side}">${e(tradeSideLabel(t))}</span></td>
     <td>${fmtNum(t.size, 8)}</td>
     <td>${fmtPrice(t.entry_price)} → ${fmtPrice(t.exit_price)}</td>
     <td class="${t.pnl > 0 ? 'pos' : t.pnl < 0 ? 'neg' : ''}">${fmtMoney(t.pnl)}</td>
     <td><a class="btn btn-ghost small" href="/dashboard/journal/${t.id}">详情</a></td>
   </tr>`).join('');
+
+  // 持仓日志时间线：手动记的一笔 + 同步产生新 T 回合时的自动记录
+  const logItems = log.map((l) => `<div class="log-item">
+    <span class="log-time">${e(fmtDateTime(l.created_at))}</span>
+    <span class="log-text">${e(l.text)}</span>
+    ${l.trade_id ? `<a class="muted small" href="/dashboard/journal/${l.trade_id}">交易</a>` : ''}
+    <span class="status-badge ${l.source === 'auto' ? 'muted' : 'blue'}">${l.source === 'auto' ? '自动' : '手动'}</span>
+    <span class="muted small log-account">${e(l.account_name || '')}</span>
+    ${l.source === 'manual' ? `<form method="post" action="/dashboard/spot/log/delete" class="inline" onsubmit="return confirm('删除这条日志？')">
+      <input type="hidden" name="id" value="${l.id}">
+      <input type="hidden" name="symbol" value="${e(symbol)}">
+      <button class="log-del" type="submit" title="删除" aria-label="删除这条日志">✕</button>
+    </form>` : ''}
+  </div>`).join('');
+  const logForm = logAccounts.length ? `<form method="post" action="/dashboard/spot/log" class="spot-log-form">
+    <input type="hidden" name="symbol" value="${e(symbol)}">
+    ${logAccounts.length > 1
+      ? `<select name="account_id" aria-label="账户">${logAccounts.map((a) => `<option value="${e(a.id)}">${e(a.name)}</option>`).join('')}</select>`
+      : `<input type="hidden" name="account_id" value="${e(logAccounts[0].id)}">`}
+    <input name="text" required maxlength="500" placeholder="记一笔：加仓理由、做T感受、目标价、焦虑点…">
+    <button class="btn btn-primary small" type="submit">记录</button>
+  </form>` : '';
 
   const assetOfSymbol = symbol.split('/')[0] || symbol;
   const transfersForAsset = (transfers || []).filter((t) =>
@@ -168,6 +191,13 @@ export function spotSymbolPage({
     </section>
 
     <section class="panel">
+      <div class="panel-head"><h2>持仓日志</h2>
+        <span class="muted small">随想随记，按时间倒序；新做T回合会自动记一条</span></div>
+      ${logForm}
+      ${logItems || '<p class="muted small" style="margin:10px 0 0">还没有日志。持仓中的判断、做T 的感受、加减仓理由，一句话记下来，回看时最有用。</p>'}
+    </section>
+
+    <section class="panel">
       <div class="panel-head"><h2>买入 / 卖出记录</h2>
         <span class="muted small">最近 ${fills.length} 笔现货成交</span></div>
       <table class="table">
@@ -178,7 +208,7 @@ export function spotSymbolPage({
 
     <section class="panel">
       <div class="panel-head"><h2>已实现交易</h2>
-        <span class="muted small">FIFO 配对后的现货交易；复盘笔记在交易详情页编辑</span></div>
+        <span class="muted small">24 小时内同数量闭环的买卖记为一个做T回合（正T/反T）；其余按 FIFO 配对</span></div>
       <table class="table">
         <thead><tr><th>开仓时间</th><th>平仓时间</th><th>持仓时长</th><th>方向</th><th>数量</th><th>开 → 平</th><th>盈亏</th><th></th></tr></thead>
         <tbody>${tradeRows || '<tr><td colspan="8" class="muted center">还没有已实现的现货交易。买入后卖出，配对完成才会出现在这里。</td></tr>'}</tbody>

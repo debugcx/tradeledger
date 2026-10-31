@@ -12,7 +12,6 @@ import { classifyOrderType } from './fills.js';
 
 let timer = null;
 let busy = false;
-const backoff = new Map(); // accountId -> { until, attempts }
 const enrichFails = new Map(); // episodeId -> { attempts, nextAt }：分类不出的回合退避，避免每 tick 空拉
 
 /**
@@ -31,7 +30,7 @@ async function enrichIdle() {
     if (!pending.length) continue;
     const episode = pending[0];
     const failed = enrichFails.get(episode.id);
-    if (failed && failed.nextAt > Date.now()) return false; // 队首在退避期，本 tick 跳过
+    if (failed && failed.nextAt > Date.now()) continue; // 队首在退避期：跳过该账户，别挡其他账户
     const noteFail = () => {
       const cur = enrichFails.get(episode.id) || { attempts: 0, nextAt: 0 };
       cur.attempts += 1;
@@ -89,16 +88,15 @@ async function tick() {
       .filter((a) => !a.sync_done || a.sync_state || transferDue(a) || spotDue(a));
     for (const account of accounts) {
       if (isSyncing(account.id)) continue;
-      const wait = backoff.get(account.id);
-      if (wait && wait.until > Date.now()) continue;
+      // 退避状态由同步层持久化：连续失败 5 次后 24 小时内不再自动重试
+      const fail = store.getSyncFail(account.id);
+      if (fail?.nextAt && fail.nextAt > Date.now()) continue;
       try {
         await syncAccount(account.id, { limit: config.syncBatchLimit });
-        backoff.delete(account.id);
       } catch (err) {
-        const attempts = (wait?.attempts || 0) + 1;
-        const delay = Math.min(300_000, 15_000 * attempts);
-        backoff.set(account.id, { until: Date.now() + delay, attempts });
-        console.error(`[sync-worker] ${account.name}: ${err?.message || err}`);
+        const next = store.getSyncFail(account.id);
+        const waitMin = next?.nextAt ? Math.max(1, Math.round((next.nextAt - Date.now()) / 60_000)) : 0;
+        console.error(`[sync-worker] ${account.name}: ${err?.message || err}${waitMin ? `（${waitMin} 分钟后重试）` : ''}`);
       }
     }
     // 逐笔回填吃挂分类（每 tick 最多 1 笔，enrichIdle 内部跳过正在同步的账户）

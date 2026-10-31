@@ -100,9 +100,11 @@ console.log('\n▶ 登录');
 
 console.log('\n▶ 登录后页面');
 const protectedPaths = ['/dashboard', '/dashboard/calendar', '/dashboard/journal', '/dashboard/journal/new',
-  '/dashboard/transfers', '/dashboard/spot', '/dashboard/import', '/dashboard/accounts', '/dashboard/accounts/new',
+  '/dashboard/transfers', '/dashboard/spot', '/dashboard/assets', '/dashboard/assets?tab=manual',
+  '/dashboard/assets?tab=wallets', '/dashboard/assets?tab=sources', '/dashboard/assets/wallets/new',
+  '/dashboard/import', '/dashboard/accounts', '/dashboard/accounts/new',
   '/dashboard/reconcile', '/dashboard/review', '/dashboard/tags', '/dashboard/notes',
-  '/dashboard/notes/new', '/dashboard/settings', '/api/docs'];
+  '/dashboard/notes/new', '/dashboard/settings', '/api/docs', '/api/assets/summary', '/api/assets/positions'];
 for (const path of protectedPaths) {
   const res = await req(path);
   record(res.status === 200, `GET ${path} → 200`, `→ ${res.status}`);
@@ -195,6 +197,13 @@ console.log('\n▶ P1 交易所与对账');
     && Array.isArray(spotApi.fills), '现货 API 结构正确');
   const spotSummary = await jsonOf(await req('/api/summary?market=spot'));
   record(spotSummary.market === 'spot' && spotSummary.total_trades === 0, '市场过滤：演示库无现货交易');
+
+  const assetsHtml = await text(await req('/dashboard/assets'));
+  record(assetsHtml.includes('净资产（USD）') && assetsHtml.includes('按资产桶') && assetsHtml.includes('资产明细'),
+    '资产总览渲染正常');
+  const assetsApi = await jsonOf(await req('/api/assets/summary'));
+  record(typeof assetsApi.net_usd === 'number' && Array.isArray(assetsApi.by_bucket),
+    '资产 API 结构正确');
 
   const badExchange = await req('/dashboard/accounts/new', {
     method: 'POST', form: { exchange: 'notreal', name: 'x' },
@@ -530,12 +539,14 @@ console.log('\n▶ 交易详情盈亏曲线');
   const action = (dash.match(/action="(\/dashboard\/journal\/\d+\/tag)"/) || [])[1];
   record(Boolean(action), `快捷标签表单 action 指向路由（${action || '未找到'}）`);
   if (action) {
+    // 标签库中已存在的标签也会在详情页「更多标签」里渲染按钮，判断时只看激活态
+    const activeTag = (html, name) => new RegExp(`class="tag-pill active"[^>]*>${name}<`).test(html);
     await req(action, { method: 'POST', form: { tag: 'smoke-quick', back: '/dashboard' } });
     const afterAdd = await text(await req(action.replace(/\/tag$/, '')));
-    record(afterAdd.includes('smoke-quick'), '快捷标签 POST 挂上');
+    record(activeTag(afterAdd, 'smoke-quick'), '快捷标签 POST 挂上');
     await req(action, { method: 'POST', form: { tag: 'smoke-quick', back: '/dashboard' } });
     const afterDel = await text(await req(action.replace(/\/tag$/, '')));
-    record(!afterDel.includes('smoke-quick'), '快捷标签 POST 再点移除');
+    record(!activeTag(afterDel, 'smoke-quick'), '快捷标签 POST 再点移除');
   }
 
   const list = (await jsonOf(await req('/api/trades?limit=5'))).trades;

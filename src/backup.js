@@ -81,9 +81,16 @@ export function inspectSnapshot(file) {
   try {
     const integrity = db.prepare('PRAGMA integrity_check').get()?.integrity_check;
     if (integrity !== 'ok') throw new Error(`快照完整性校验失败：${integrity || 'unknown'}`);
-    const trades = db.prepare('SELECT COUNT(*) AS c FROM trades').get()?.c || 0;
-    const resources = db.prepare('SELECT COUNT(*) AS c FROM resources').get()?.c || 0;
-    return { integrity, trades, resources };
+    // 旧版本快照可能没有资产相关表，缺失时按 0 处理，不能因此判定备份损坏
+    const count = (table) => {
+      try { return Number(db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get()?.c) || 0; } catch { return 0; }
+    };
+    const trades = count('trades');
+    const resources = count('resources');
+    const wallets = count('wallets');
+    const manualAssets = count('manual_assets');
+    const assetPositions = count('asset_positions');
+    return { integrity, trades, resources, wallets, manualAssets, assetPositions };
   } finally {
     db.close();
   }

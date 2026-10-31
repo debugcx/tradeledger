@@ -16,7 +16,11 @@ function statusOf(account) {
   return { label: '未同步', cls: 'muted' };
 }
 
-function stateHint(account) {
+function stateHint(account, prog) {
+  // 连续同步失败退避中：明确告诉用户暂停原因与重试时间
+  if (prog && prog.retryAt && prog.retryAt > Date.now()) {
+    return `连续失败 ${prog.failAttempts} 次，已暂停自动同步，${fmtDateTime(new Date(prog.retryAt).toISOString())} 后重试`;
+  }
   if (!account.sync_state) return '';
   try {
     const st = JSON.parse(account.sync_state);
@@ -50,8 +54,8 @@ export function accountsPage({ user, accounts, meta, runs, accountStats = {}, st
   const real = accounts.filter((a) => !a.is_demo && a.exchange !== 'manual');
   const rows = accounts.map((a) => {
     const st = statusOf(a);
-    const hint = stateHint(a);
     const prog = accountStats[a.id];
+    const hint = stateHint(a, prog);
     const showProgress = !a.is_demo && a.exchange !== 'manual';
     return `<tr data-account-row="${a.id}">
       <td><b>${e(exchangeName(meta, a.exchange))}</b></td>

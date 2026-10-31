@@ -192,6 +192,49 @@ export const hyperliquid = {
     return { fills: fills.slice(0, cap), nextCursor: null };
   },
 
+  /**
+   * 资产总览：永续账户 / 现货 / HYPE 链上质押。
+   * 只需要公开地址；质押数据来自 info 的 delegatorSummary。
+   */
+  async fetchAssetPositions(creds) {
+    const positions = [];
+    const buckets = [];
+    const errors = [];
+    const mark = (bucket) => { if (!buckets.includes(bucket)) buckets.push(bucket); };
+    const push = (bucket, asset, amount, source, sourceRef, extra = {}) => {
+      if (!asset || !Number.isFinite(amount) || amount === 0) return;
+      positions.push({ bucket, asset, amount, source, source_ref: sourceRef, ...extra });
+    };
+
+    try {
+      const state = await info({ type: 'clearinghouseState', user: creds.wallet });
+      mark('futures');
+      push('futures', 'USDC', num(state?.marginSummary?.accountValue), 'hyperliquid:clearinghouseState', '永续账户');
+    } catch (err) {
+      errors.push(`永续账户：${err?.message || err}`);
+    }
+
+    try {
+      const state = await info({ type: 'spotClearinghouseState', user: creds.wallet });
+      mark('spot');
+      for (const b of state?.balances || []) {
+        push('spot', b.coin, num(b.total), 'hyperliquid:spotClearinghouseState', '现货账户');
+      }
+    } catch (err) {
+      errors.push(`现货账户：${err?.message || err}`);
+    }
+
+    try {
+      const summary = await info({ type: 'delegatorSummary', user: creds.wallet });
+      mark('staking');
+      push('staking', 'HYPE', num(summary?.delegated), 'hyperliquid:delegatorSummary', 'HYPE 质押', { product: 'Staking' });
+    } catch (err) {
+      errors.push(`HYPE 质押：${err?.message || err}`);
+    }
+
+    return { positions, buckets, errors };
+  },
+
   async fetchSpotLive(creds) {
     const state = await info({ type: 'spotClearinghouseState', user: creds.wallet });
     const balances = [];
@@ -301,6 +344,8 @@ export const hyperliquid = {
         side: String(r.side || '').toUpperCase() === 'B' ? 'buy' : 'sell',
         price: num(r.px), qty: num(r.sz),
         fee: -Math.abs(num(r.fee)), feeCcy: 'USDC', billId: r.tid || '',
+        // crossed=true 表示主动吃单（taker）
+        orderType: typeof r.crossed === 'boolean' ? (r.crossed ? 'market' : 'limit') : null,
       }))
       .filter((f) => f.t >= Number(fromMs) && f.t <= Number(toMs))
       .sort((a, b) => a.t - b.t);

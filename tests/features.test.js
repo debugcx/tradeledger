@@ -230,6 +230,34 @@ test('importTrades upsert：api 行回写最终状态，笔记保留，其他来
   closeDb();
 });
 
+test('importTrades upsert：order_type 为 other 时保留已分类值（regression：OKX 冲掉 enrich 结果）', async () => {
+  const { openDb, setDb, closeDb } = await import('../src/db.js');
+  setDb(openDb(':memory:'));
+  const store = await import('../src/store.js');
+  const acc = store.createAccount({ exchange: 'fake', name: 'OT', apiKey: 'k', apiSecret: 's' });
+  const base = {
+    external_id: 'okx:222:3000', symbol: 'ETH/USDT', side: 'long', order_type: 'other',
+    size: 1, notional: 100, entry_price: 100, exit_price: 110,
+    open_time: '2026-10-20T00:00:00.000Z', close_time: '2026-10-21T00:00:00.000Z',
+    pnl: 10, fee: -0.1, source: 'api', market: 'futures',
+  };
+  store.importTrades([base], acc.id);
+  const id = store.listTrades({ accountId: acc.id })[0].id;
+
+  // enrich 补出吃挂分类后，OKX 再同步（恒 order_type='other'）不得冲掉
+  store.setTradeOrderType(id, 'limit');
+  const r = store.importTrades([{ ...base, pnl: 10.5 }], acc.id, { upsert: true });
+  assert.equal(r.updated, 1);
+  assert.equal(store.listTrades({ accountId: acc.id })[0].order_type, 'limit');
+
+  // 交易所真的报告了明确类型时，仍要回写
+  store.importTrades([{ ...base, order_type: 'market' }], acc.id, { upsert: true });
+  assert.equal(store.listTrades({ accountId: acc.id })[0].order_type, 'market');
+
+  store.clearAllData();
+  closeDb();
+});
+
 test('行为诊断指标 + 多空统计排除无方向记录 + 复盘队列与快捷标签', async () => {
   const { openDb, setDb, closeDb } = await import('../src/db.js');
   setDb(openDb(':memory:'));

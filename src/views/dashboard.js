@@ -1,7 +1,7 @@
 import { escapeHtml as e, fmtMoney, fmtNum, fmtPct, fmtDuration, fmtDateTime, fmtPrice } from '../http.js';
 import { config } from '../config.js';
 import { donut, lineChart, barChart, weekHourHeatmap, PALETTE } from '../charts.js';
-import { shell } from './layout.js';
+import { shell, quickNoteBtn } from './layout.js';
 
 const sign = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : 'flat');
 
@@ -91,7 +91,8 @@ function reviewQueuePanel(queue, quickTags, backQuery, hasTrades = true) {
       <td class="small">${e(fmtDuration(Date.parse(t.close_time) - Date.parse(t.open_time)))}</td>
       <td class="quick-tag-cell">
         ${quickTags.map((x) => tagBtn(t.id, x.name, current.has(x.name))).join(' ')}
-        <a class="muted small" href="/dashboard/journal/${t.id}">写复盘 →</a>
+        ${quickNoteBtn(t)}
+        <a class="muted small" href="/dashboard/journal/${t.id}">写长复盘 →</a>
       </td>
     </tr>`;
   }).join('');
@@ -350,16 +351,26 @@ function fmtRate(v) {
   return `${(Number(v) * 100).toFixed(4)}%`;
 }
 
-function livePositionsPanel({ accounts, balances, positions, spotBalances = [], spotHoldings = [], accountId = null }) {
+const STABLE_ASSETS = new Set([
+  'USD', 'USDT', 'USDC', 'DAI', 'FDUSD', 'TUSD', 'USDD', 'USDE', 'USDS',
+  'BUSD', 'PYUSD', 'GUSD', 'FRAX', 'LUSD', 'CRVUSD', 'GHO', 'USD1', 'USDT.E', 'USDC.E',
+]);
+
+function livePositionsPanel({ accounts, balances, positions, spotBalances = [], spotHoldings = [], accountId = null, assetSummary = null }) {
   const real = accounts.filter((a) => !a.is_demo && a.exchange !== 'manual');
-  if (!real.length) {
+  const hasAssets = Boolean(assetSummary?.rows?.length);
+  if (!real.length && !hasAssets) {
     return `<section class="panel" data-live-panel>
       <div class="panel-head"><h2>实时持仓</h2></div>
-      <p class="muted">还没有接入真实交易所。<a href="/dashboard/accounts/new">添加只读 API</a> 后，这里会定时刷新余额、持仓和资金费率。</p>
+      <p class="muted">还没有接入真实交易所或钱包。<a href="/dashboard/accounts/new">添加只读 API</a> 或 <a href="/dashboard/assets?tab=wallets">添加钱包</a> 后，这里会定时刷新余额、持仓和资金费率。</p>
     </section>`;
   }
 
-  const totalEquity = balances.reduce((a, b) => a + (Number(b.total) || 0), 0);
+  // 合约余额里的币种单位不同（BTC / ETH / USDT），不能直接相加。
+  // 这里只统计稳定币，其余币种给出数量提示；全资产净值看资产总览。
+  const stableBalances = balances.filter((b) => STABLE_ASSETS.has(String(b.asset || '').toUpperCase()));
+  const totalEquity = stableBalances.reduce((a, b) => a + (Number(b.total) || 0), 0);
+  const nonStableCount = balances.filter((b) => !STABLE_ASSETS.has(String(b.asset || '').toUpperCase()) && Math.abs(Number(b.total) || 0) > 0).length;
   const unrealized = positions.reduce((a, p) => a + (Number(p.unrealized) || 0), 0);
   const updatedAt = [...balances, ...positions].map((x) => x.updated_at).sort().at(-1) || null;
 
@@ -383,7 +394,13 @@ function livePositionsPanel({ accounts, balances, positions, spotBalances = [], 
       </div>
     </div>
     <div class="mini-strip" style="margin-bottom:14px">
-      <div class="mini-stat"><span>总资产（已同步账户）</span><b data-live-equity>${fmtMoney(totalEquity, { sign: false })}</b></div>
+      <div class="mini-stat"><span>净资产（全资产，USD）</span>
+        <b class="${(assetSummary?.net || 0) < 0 ? 'neg' : ''}">${assetSummary ? fmtMoney(assetSummary.net, { sign: false }) : '—'}</b>
+        <div class="muted small"><a href="/dashboard/assets">资产总览</a>${assetSummary?.unpriced ? ` · ${assetSummary.unpriced} 项未估值` : ''}</div>
+      </div>
+      <div class="mini-stat"><span>合约稳定币余额</span><b data-live-equity>${fmtMoney(totalEquity, { sign: false })}</b>
+        <div class="muted small" data-live-nonstable>${nonStableCount ? `${nonStableCount} 个非稳定币未折算` : '仅稳定币口径'}</div>
+      </div>
       <div class="mini-stat"><span>当前持仓</span><b data-live-count>${positions.length}</b></div>
       <div class="mini-stat"><span>未实现盈亏</span><b data-live-unrealized class="${sign(unrealized)}">${fmtMoney(unrealized)}</b></div>
     </div>
@@ -418,7 +435,7 @@ function livePositionsPanel({ accounts, balances, positions, spotBalances = [], 
   </section>`;
 }
 
-export function dashboardPage({ user, stats, trades, market = 'all', accounts = [], accountId = null, balances = [], positions = [], spotBalances = [], spotHoldings = [], funding = null, rebates = null, reviewQueue = [], quickTags = [], demo, notice, error }) {
+export function dashboardPage({ user, stats, trades, market = 'all', accounts = [], accountId = null, balances = [], positions = [], spotBalances = [], spotHoldings = [], funding = null, rebates = null, reviewQueue = [], quickTags = [], demo, assetSummary = null, notice, error }) {
   const tabHref = (m) => `/dashboard?market=${m}${accountId ? `&account_id=${accountId}` : ''}`;
   const accountOptions = ['<option value="all">全部账户（聚合）</option>']
     .concat(accounts.map((a) => `<option value="${a.id}" ${accountId && String(accountId) === String(a.id) ? 'selected' : ''}>${e(a.name)}（${e(a.exchange)}${a.is_demo ? ' · 演示' : ''}）</option>`))
@@ -454,7 +471,7 @@ export function dashboardPage({ user, stats, trades, market = 'all', accounts = 
     ${diagnosisPanel(stats)}
     ${reviewQueuePanel(reviewQueue, quickTags, `?market=${market}${accountId ? `&account_id=${accountId}` : ''}`, stats.total > 0)}
     ${statPanel(stats)}
-    ${livePositionsPanel({ accounts, balances, positions, spotBalances, spotHoldings, accountId })}
+    ${livePositionsPanel({ accounts, balances, positions, spotBalances, spotHoldings, accountId, assetSummary })}
     ${sideRow('多单', stats.longs, 'green')}
     ${sideRow('空单', stats.shorts, 'red')}
     ${analysisPanel(stats)}

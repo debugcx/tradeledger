@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS trades (
   funding REAL NOT NULL DEFAULT 0,
   source TEXT NOT NULL DEFAULT 'manual',
   market TEXT NOT NULL DEFAULT 'futures',
+  kind TEXT,
+  trashed_at TEXT,
   note TEXT,
   note_updated_at TEXT,
   created_at TEXT NOT NULL,
@@ -198,6 +200,18 @@ CREATE TABLE IF NOT EXISTS spot_cost_basis (
   PRIMARY KEY (account_id, symbol)
 );
 
+-- 现货持仓日志：按时间追加的短记录（手动记一笔 + 同步产生新 T 回合时自动写入）
+CREATE TABLE IF NOT EXISTS spot_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  symbol TEXT NOT NULL,
+  trade_id INTEGER REFERENCES trades(id) ON DELETE SET NULL,
+  text TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'manual',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_spot_log_symbol ON spot_log(symbol, id DESC);
+
 CREATE TABLE IF NOT EXISTS transfers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -249,6 +263,101 @@ CREATE TABLE IF NOT EXISTS report_generations (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_report_generations ON report_generations(period_kind, period_label);
+
+-- 链上钱包（只读公开地址）与组合索引服务凭据
+CREATE TABLE IF NOT EXISTS wallets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  address TEXT NOT NULL,
+  chains TEXT NOT NULL DEFAULT '[]',
+  provider TEXT NOT NULL DEFAULT 'debank',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_sync_at TEXT,
+  last_sync_status TEXT,
+  last_sync_message TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(provider, address)
+);
+
+CREATE TABLE IF NOT EXISTS wallet_providers (
+  id TEXT PRIMARY KEY,
+  api_key_enc TEXT,
+  api_key_hint TEXT,
+  base_url TEXT,
+  updated_at TEXT NOT NULL
+);
+
+-- 统一资产仓位：交易所各账户桶 + 链上钱包/DeFi 仓位。
+-- 空字符串代表“不适用”，避免 SQLite UNIQUE 对 NULL 失效导致重复行。
+CREATE TABLE IF NOT EXISTS asset_positions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  venue_kind TEXT NOT NULL,
+  venue_id INTEGER NOT NULL,
+  bucket TEXT NOT NULL,
+  asset TEXT NOT NULL,
+  chain TEXT NOT NULL DEFAULT '',
+  protocol TEXT NOT NULL DEFAULT '',
+  product TEXT NOT NULL DEFAULT '',
+  amount REAL NOT NULL DEFAULT 0,
+  price_usd REAL,
+  value_usd REAL,
+  source TEXT NOT NULL,
+  source_ref TEXT NOT NULL DEFAULT '',
+  fetched_at TEXT NOT NULL,
+  UNIQUE(venue_kind, venue_id, bucket, asset, chain, protocol, product)
+);
+CREATE INDEX IF NOT EXISTS ix_asset_positions_venue ON asset_positions(venue_kind, venue_id);
+CREATE INDEX IF NOT EXISTS ix_asset_positions_bucket ON asset_positions(bucket);
+
+-- 手动资产台账：打新、双币赢、无法通过 API 查询的理财/锁仓产品
+CREATE TABLE IF NOT EXISTS manual_assets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  venue_name TEXT NOT NULL,
+  bucket TEXT NOT NULL DEFAULT 'launchpool',
+  product TEXT NOT NULL DEFAULT '',
+  asset TEXT NOT NULL,
+  amount REAL NOT NULL DEFAULT 0,
+  price_usd REAL,
+  value_usd REAL,
+  locked_until TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_manual_assets_status ON manual_assets(status);
+
+-- 每日资产快照（总览曲线与结构变化）
+CREATE TABLE IF NOT EXISTS asset_snapshots (
+  snapshot_date TEXT PRIMARY KEY,
+  total_usd REAL NOT NULL DEFAULT 0,
+  net_usd REAL NOT NULL DEFAULT 0,
+  liabilities_usd REAL NOT NULL DEFAULT 0,
+  unpriced INTEGER NOT NULL DEFAULT 0,
+  by_bucket TEXT NOT NULL DEFAULT '{}',
+  by_venue TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS asset_sync_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  venue_kind TEXT NOT NULL,
+  venue_id INTEGER NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  status TEXT NOT NULL DEFAULT 'running',
+  message TEXT NOT NULL DEFAULT '',
+  positions INTEGER NOT NULL DEFAULT 0,
+  source TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_asset_sync_runs ON asset_sync_runs(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS prices (
+  asset TEXT PRIMARY KEY,
+  price_usd REAL NOT NULL,
+  source TEXT NOT NULL DEFAULT '',
+  fetched_at TEXT NOT NULL
+);
 `;
 
 /** 增量迁移：给已有数据库补上交易所同步所需字段 */
@@ -273,6 +382,15 @@ function migrate(db) {
   const tradeCols = new Set(db.prepare('PRAGMA table_info(trades)').all().map((c) => c.name));
   if (!tradeCols.has('market')) {
     db.exec("ALTER TABLE trades ADD COLUMN market TEXT NOT NULL DEFAULT 'futures'");
+  }
+  if (!tradeCols.has('kind')) {
+    // kind='t_shot' 标记现货 T 回合（先卖后买回 / 先买后卖出的闭环短打）
+    db.exec('ALTER TABLE trades ADD COLUMN kind TEXT');
+  }
+  if (!tradeCols.has('trashed_at')) {
+    // 垃圾箱：软删除时间戳；非 NULL 的记录不参与统计展示，同步也不会再导回
+    db.exec('ALTER TABLE trades ADD COLUMN trashed_at TEXT');
+    db.exec('CREATE INDEX IF NOT EXISTS ix_trades_trashed ON trades(trashed_at)');
   }
 
   // 笔记分类：周期复盘 / 交易对档案 / 策略手册 / 现货备注 / 自由笔记

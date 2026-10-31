@@ -109,6 +109,12 @@ test('parseTimeValue：epoch、无时区字符串、时区偏移', () => {
   assert.equal(parseTimeValue('not-a-date'), null);
 });
 
+test('parseTimeValue：小数秒 1–9 位截断为毫秒（regression：>3 位曾整行拒收）', () => {
+  assert.equal(parseTimeValue('2024-01-02 03:04:05.1', 0), '2024-01-02T03:04:05.100Z');
+  assert.equal(parseTimeValue('2024-01-02 03:04:05.123456', 0), '2024-01-02T03:04:05.123Z');
+  assert.equal(parseTimeValue('2024-01-02 03:04:05.123456789', 0), '2024-01-02T03:04:05.123Z');
+});
+
 test('normalizeSide / normalizeOrderType', () => {
   assert.equal(normalizeSide('Buy'), 'long');
   assert.equal(normalizeSide('Sell'), 'short');

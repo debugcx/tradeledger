@@ -5,7 +5,7 @@
  * 就能通过「自动映射 + 人工改映射」把数据导进来。
  */
 
-import { matchFills, fingerprintTrade } from './fills.js';
+import { matchFills, matchSpotRounds, fingerprintTrade } from './fills.js';
 
 export const FIELD_DEFS = [
   {
@@ -355,8 +355,11 @@ export function buildTradesFromFills(headers, rows, mapping, opts = {}) {
     }
   });
 
-  const trades = matchFills(fills, 'csv', { longOnly: market === 'spot' })
-    .map((t) => ({ ...t, source: 'csv', market }));
+  // 现货与 API 同步同口径：T 回合优先 + FIFO 兜底；合约沿用 FIFO
+  const paired = market === 'spot'
+    ? matchSpotRounds(fills, 'csv')
+    : matchFills(fills, 'csv');
+  const trades = paired.map((t) => ({ ...t, source: 'csv', market }));
   return { trades, errors };
 }
 
@@ -430,7 +433,8 @@ export function parseTimeValue(value, tzOffsetHours = 0) {
   }
 
   const s = raw.replace(/\//g, '-').replace(/\s+/g, ' ').trim();
-  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?)?$/);
+  // 小数秒接受 1–9 位（微秒/纳秒精度的时间串），超出毫秒的部分截断
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,9}))?)?$/);
   let year, month, day, hour = 0, minute = 0, second = 0, ms = 0;
   if (m) {
     [, year, month, day, hour = 0, minute = 0, second = 0, ms = 0] = m;
@@ -450,7 +454,8 @@ export function parseTimeValue(value, tzOffsetHours = 0) {
 
   const utc = Date.UTC(
     Number(year), Number(month) - 1, Number(day),
-    Number(hour), Number(minute), Number(second), Number(String(ms).padEnd(3, '0')),
+    Number(hour), Number(minute), Number(second),
+    Number(String(ms).slice(0, 3).padEnd(3, '0')),
   );
   const shifted = utc - Number(tzOffsetHours || 0) * 3600_000;
   const d = new Date(shifted);
