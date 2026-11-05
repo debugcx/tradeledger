@@ -402,29 +402,27 @@ export const binance = {
     }
 
     try {
-      // /sapi/v1/staking/position 的 product 必填：STAKING / ON_CHAIN_DEFI / DEFI_STAKING。
-      // 逐个产品拉取，单个产品失败不阻塞其余。
-      const STAKING_PRODUCTS = ['STAKING', 'ON_CHAIN_DEFI', 'DEFI_STAKING'];
-      const stakingRows = [];
-      const stakingErrors = [];
-      for (const product of STAKING_PRODUCTS) {
-        try {
-          const data = await call(`/sapi/v1/staking/position?product=${product}&current=1&size=100`, creds, { baseUrl: BASE_SAPI });
-          for (const r of rowsOf(data)) stakingRows.push(r);
-        } catch (err) {
-          stakingErrors.push(`${product}：${err?.message || err}`);
-        }
-      }
-      if (stakingRows.length) mark('staking');
-      for (const r of stakingRows) {
+      // 旧 /sapi/v1/staking/position 现在仅接受 product=STAKING：
+      // ON_CHAIN_DEFI / DEFI_STAKING 已迁走，作为枚举值会被当作“参数缺失”报 -1102。
+      const data = await call('/sapi/v1/staking/position?product=STAKING&current=1&size=100', creds, { baseUrl: BASE_SAPI });
+      mark('staking');
+      for (const r of rowsOf(data)) {
         push('staking', r.asset, num(r.amount ?? r.totalAmount), 'binance:/sapi/v1/staking/position', '链上质押', { product: r.productName || 'Staking' });
-      }
-      // 全部产品都失败才上报，避免单个空产品刷屏
-      if (stakingRows.length === 0 && stakingErrors.length) {
-        throw new Error(stakingErrors.join(' | '));
       }
     } catch (err) {
       errors.push(`链上质押：${err?.message || err}`);
+    }
+
+    try {
+      // 链上质押（锁仓）已迁移到 On-chain Yields 接口族；账户无持仓时返回空数组。
+      // 响应字段名按官方文档可能有 amount/positionAmt 两种形态，防御性读取。
+      const data = await call('/sapi/v1/onchain-yields/locked/position?current=1&size=100', creds, { baseUrl: BASE_SAPI });
+      mark('staking');
+      for (const r of rowsOf(data)) {
+        push('staking', r.asset ?? r.productAsset, num(r.amount ?? r.positionAmt ?? r.totalAmount ?? r.locked), 'binance:/sapi/v1/onchain-yields/locked/position', '链上质押', { product: r.productName || (r.productId ? `onchain #${r.productId}` : 'On-chain Yields') });
+      }
+    } catch (err) {
+      errors.push(`链上质押（On-chain Yields）：${err?.message || err}`);
     }
 
     return { positions, buckets, errors };
