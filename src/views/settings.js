@@ -1,5 +1,16 @@
 import { escapeHtml as e, fmtBytes, fmtNum, fmtDateTime } from '../http.js';
+import fs from 'node:fs';
 import { shell, settingsNav } from './layout.js';
+
+/** 前端资源构建时间（app.js 的修改时间，模块加载时取一次；重启服务即刷新）。
+ *  排查「页面还是旧版」用：浏览器里跑的是旧 JS 时这个时间对不上。 */
+const BUILD_TIME = (() => {
+  try {
+    return fmtDateTime(fs.statSync(new URL('../../public/app.js', import.meta.url)).mtime.toISOString());
+  } catch {
+    return '未知';
+  }
+})();
 
 function backupSection({ config = {}, local = [], remote = null, remoteError = '', remoteRequested = false }) {
   const pending = config.pending;
@@ -208,7 +219,7 @@ export function settingsPage({ user, overview, dbBytes, seededAt, notice, error,
       ${seededAt ? `<p class="muted small">演示数据生成于 ${e(fmtDateTime(seededAt))}</p>` : ''}
       <div class="danger-row">
         <div><b class="danger-text">清空全部数据</b>
-          <p class="muted small">删除交易、标签、笔记、导入记录与所有账户。不可恢复，请先导出备份。</p></div>
+          <p class="muted small">删除交易、成交缓存、标签、笔记、导入记录、AI 报告、设置、已保存密钥与所有账户。不可恢复，请先导出备份。</p></div>
         <form method="post" action="/dashboard/settings/reset" onsubmit="return confirm('最后确认：清空全部数据？此操作不可恢复。')">
           <button class="btn btn-ghost danger" type="submit">清空全部数据</button>
         </form>
@@ -219,6 +230,7 @@ export function settingsPage({ user, overview, dbBytes, seededAt, notice, error,
       <div class="panel-head"><h2>关于</h2></div>
       <p class="muted small">
         TradeLedger v0.1 · 本地优先 · 单密码登录 · 零第三方依赖。<br>
+        前端资源构建于 ${e(BUILD_TIME)}——页面显示的界面与这里对不上时，强刷一次浏览器（Ctrl+F5）即可对齐。<br>
         访问密码来自环境变量 <code>TRADELEDGER_PASSWORD</code>，修改后需要重启服务；
         已登录的会话最长 30 天有效。<br>
         部署到 UTC 服务器时，可设置环境变量 <code>TRADELEDGER_TZ=Asia/Shanghai</code>，

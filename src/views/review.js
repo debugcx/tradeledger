@@ -1,6 +1,6 @@
 import { escapeHtml as e, fmtMoney, fmtNum, fmtPct, fmtDateTime } from '../http.js';
 import { renderMarkdown } from '../markdown.js';
-import { shell } from './layout.js';
+import { shell, tradesDrillTable } from './layout.js';
 
 const sign = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : 'flat');
 const pct = (v) => `${(Number(v) * 100).toFixed(1)}%`;
@@ -27,15 +27,15 @@ export function reportPage({
     if (p.kind === 'year') return `kind=year&year=${p.label}${accQ}`;
     return `kind=week&week=${p.label}${accQ}`;
   };
+  // 账户筛选：分段控件（与周期切换标签同风格），比原生下拉更直观
+  const baseQ = kind === 'month'
+    ? `kind=month&month=${e(review.period.label)}`
+    : kind === 'year' ? `kind=year&year=${e(review.period.label)}` : `kind=week&week=${e(review.period.label)}`;
   const accountPicker = accounts.length > 1 ? `
-          <form method="get" action="/dashboard/review" class="week-picker">
-            <input type="hidden" name="kind" value="${e(kind)}">
-            <input type="hidden" name="${kind === 'week' ? 'week' : kind === 'month' ? 'month' : 'year'}" value="${e(review.period.label)}">
-            <select name="account_id" onchange="this.form.submit()">
-              <option value="">全部账户</option>
-              ${accounts.map((a) => `<option value="${a.id}" ${String(a.id) === String(accountId) ? 'selected' : ''}>${e(a.name)}</option>`).join('')}
-            </select>
-          </form>` : '';
+          <div class="seg-picker" role="group" aria-label="按账户筛选报告">
+            <a href="/dashboard/review?${baseQ}" class="${!accountId ? 'active' : ''}" title="全部账户合计">全部账户</a>
+            ${accounts.map((a) => `<a href="/dashboard/review?${baseQ}&account_id=${a.id}" class="${String(a.id) === String(accountId) ? 'active' : ''}" title="只看 ${e(a.name)}">${e(a.name)}</a>`).join('')}
+          </div>` : '';
 
   const periodLabelInput = kind === 'week'
     ? `<input type="week" name="week" value="${e(review.period.label)}">`
@@ -141,11 +141,19 @@ export function reportPage({
         <div class="mini-stat"><span>净盈亏</span><b class="${sign(s.totalPnl)}">${fmtMoney(s.totalPnl)}</b></div>
         <div class="mini-stat"><span>胜率</span><b>${fmtPct(s.winRate)}</b><div class="muted small">${s.wins} 盈 / ${s.losses} 亏</div></div>
         <div class="mini-stat"><span>交易预期</span><b class="${sign(s.expectancy)}">${fmtMoney(s.expectancy)}</b></div>
-        <div class="mini-stat"><span>最大回撤</span><b class="neg">${fmtMoney(s.maxDrawdown, { sign: false })}</b></div>
-        <div class="mini-stat"><span>最大连亏</span><b class="${s.maxConsecutiveLoss >= 3 ? 'neg' : ''}">${s.maxConsecutiveLoss} 笔</b></div>
+        <div class="mini-stat"${review.drawdownWindow ? ' data-details-open="review-dd-detail" title="点击查看回撤区间内的交易"' : ''}><span>最大回撤</span><b class="neg">${fmtMoney(s.maxDrawdown, { sign: false })}</b></div>
+        <div class="mini-stat"${review.lossStreakTrades?.length ? ' data-details-open="review-streak-detail" title="点击查看这段连亏的交易"' : ''}><span>最大连亏</span><b class="${s.maxConsecutiveLoss >= 3 ? 'neg' : ''}">${s.maxConsecutiveLoss} 笔</b></div>
         <div class="mini-stat"><span>复盘覆盖率</span><b>${pct(s.noteCoverage.ratio)}</b></div>
         <div class="mini-stat"><span>对账不一致</span><b class="${s.reconciliations.mismatches ? 'neg' : 'pos'}">${fmtNum(s.reconciliations.mismatches)}</b></div>
       </div>
+      ${review.drawdownWindow ? `<details id="review-dd-detail" class="stat-drill">
+        <summary class="muted small">回撤区间 ${e(review.drawdownWindow.from)} → ${e(review.drawdownWindow.to)} · 窗口内平仓 ${fmtNum(review.drawdownWindow.trades.length)} 笔</summary>
+        ${tradesDrillTable(review.drawdownWindow.trades)}
+      </details>` : ''}
+      ${review.lossStreakTrades?.length ? `<details id="review-streak-detail" class="stat-drill">
+        <summary class="muted small">最大连亏 ${fmtNum(s.maxConsecutiveLoss)} 笔的明细（按平仓时间倒序）</summary>
+        ${tradesDrillTable(review.lossStreakTrades)}
+      </details>` : ''}
     </section>
 
     ${listSection('最亏的 3 个时段', review.worstSlots,
@@ -200,7 +208,7 @@ export function savedReportPage({ user, report, notice, error }) {
   const kindLabel = { week: '周', month: '月', year: '年' }[report.period_kind] || '';
   return shell({
     active: 'review', user, title: 'AI 报告存档',
-    subtitle: `${e(report.period_label)} · 生成于 ${e(fmtDateTime(report.created_at))}${report.model ? ` · ${e(report.model)}` : ''}`,
+    subtitle: `${e(report.period_label)} · ${e(report.account_name || '全部账户')} · 生成于 ${e(fmtDateTime(report.created_at))}${report.model ? ` · ${e(report.model)}` : ''}`,
     notice, error,
     body: `<div class="page-actions">
       <a class="btn btn-ghost small" href="/dashboard/review/ai-reports">← 返回 AI 报告</a>
@@ -223,6 +231,7 @@ export function aiReportsPage({ user, generations, report = null, notice, error 
   const rows = generations.map((g) => `<tr>
     <td class="small">${e(fmtDateTime(g.created_at))}</td>
     <td class="small">${e(g.period_label)} <span class="muted">(${e(kindLabel(g.period_kind))}报)</span></td>
+    <td class="small muted">${e(g.account_name || '全部账户')}</td>
     <td class="small muted">${e(g.model || '—')}</td>
     <td>${fmtNum(g.trades)}</td>
     <td class="small muted">${fmtNum(g.content_len)} 字</td>
@@ -260,7 +269,7 @@ export function aiReportsPage({ user, generations, report = null, notice, error 
     <section class="panel">
       <div class="panel-head"><h2>生成记录</h2><span class="muted small">${generations.length} 条</span></div>
       ${rows ? `<table class="table">
-        <thead><tr><th>时间</th><th>周期</th><th>模型</th><th>交易数</th><th>大小</th><th></th></tr></thead>
+        <thead><tr><th>时间</th><th>周期</th><th>账户</th><th>模型</th><th>交易数</th><th>大小</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>` : '<p class="muted small">还没有生成记录。到<a href="/dashboard/review">周期报告</a>页选一个周期，点「调用 AI 生成解读」。</p>'}
     </section>`,

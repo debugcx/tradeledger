@@ -17,6 +17,7 @@
     "restore": "node --env-file-if-exists=.env src/backup-cli.js restore",
     "restore:stage": "node --env-file-if-exists=.env src/backup-cli.js stage",
     "test": "node --test",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "bench:trades": "node --expose-gc scripts/bench-trades.mjs"
   }
 }

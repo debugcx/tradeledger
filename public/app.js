@@ -41,6 +41,387 @@
     });
   }
 
+  /* ---------------- 隐私模式（头部常驻，打码整个内容区） ----------------
+   * 预渲染脚本（layout head）在首帧前读 localStorage 置 data-privacy，
+   * 所以开启状态下刷新页面不会闪现内容；storage 事件同步其他标签页。 */
+  var PRIVACY_KEY = 'tl-privacy';
+
+  function privacyOn() { return root.dataset.privacy === '1'; }
+
+  function applyPrivacyState() {
+    var toggle = document.getElementById('privacyToggle');
+    if (!toggle) return;
+    var on = privacyOn();
+    toggle.setAttribute('aria-pressed', on ? 'true' : 'false');
+    toggle.classList.toggle('active', on);
+    toggle.title = on ? '隐私模式已开启：点击显示内容' : '隐私模式：打码页面内容（截图分享前开启）';
+  }
+
+  function initPrivacy() {
+    var toggle = document.getElementById('privacyToggle');
+    if (toggle && toggle.dataset.privacyBound !== '1') {
+      toggle.dataset.privacyBound = '1';
+      toggle.addEventListener('click', function () {
+        var on = !privacyOn();
+        if (on) root.dataset.privacy = '1';
+        else delete root.dataset.privacy;
+        try { localStorage.setItem(PRIVACY_KEY, on ? '1' : '0'); } catch (e) { /* 忽略 */ }
+        applyPrivacyState();
+      });
+    }
+    applyPrivacyState();
+  }
+
+  window.addEventListener('storage', function (ev) {
+    if (ev.key !== PRIVACY_KEY) return;
+    if (ev.newValue === '1') root.dataset.privacy = '1';
+    else delete root.dataset.privacy;
+    applyPrivacyState();
+  });
+
+  /* ---------------- 语音输入：给复盘 / 笔记 textarea 加麦克风按钮 ----------------
+   * 麦克风 → AudioWorklet 采集 16kHz 单声道 PCM → 能量 VAD 自动断句（说一句出一句）→
+   * 每句打包 WAV POST /api/asr 服务端转写 → 文本插入光标处。
+   * 依赖 设置 → AI 模型 里的「语音识别」配置；未配置时点击会提示。 */
+
+  const DICTATION_WORKLET_SRC = `
+class AsrCapture extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.ratio = sampleRate / 16000;
+    this.win = new Float32Array(4096);
+    this.winLen = 0;
+  }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) {
+      for (let i = 0; i < ch.length; i++) {
+        this.win[this.winLen++] = ch[i];
+        if (this.winLen === this.win.length) { this.flush(); this.winLen = 0; }
+      }
+    }
+    return true;
+  }
+  flush() {
+    let sumSq = 0, acc = 0, n = 0, oi = 0;
+    const out = new Int16Array(Math.ceil(this.winLen / this.ratio));
+    for (let i = 0; i < this.winLen; i++) {
+      const s = this.win[i];
+      sumSq += s * s;
+      acc += s; n++;
+      if (n >= this.ratio) { out[oi++] = s2i(acc / n); acc = 0; n = 0; }
+    }
+    this.port.postMessage({ rms: Math.sqrt(sumSq / this.winLen), pcm: out }, [out.buffer]);
+  }
+}
+function s2i(s) { return s < -1 ? -32768 : s > 1 ? 32767 : Math.round(s * 32767); }
+registerProcessor('asr-capture', AsrCapture);
+`;
+
+  var activeDictationStop = null; // 全局只允许一路录音
+
+  function wavBlob(samples) { // Int16Array @16k mono → WAV Blob
+    var buf = new ArrayBuffer(44 + samples.length * 2);
+    var v = new DataView(buf);
+    var w = function (off, s) { for (var i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+    w(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); w(8, 'WAVE');
+    w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, 16000, true); v.setUint32(28, 32000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    w(36, 'data'); v.setUint32(40, samples.length * 2, true);
+    new Int16Array(buf, 44).set(samples);
+    return new Blob([buf], { type: 'audio/wav' });
+  }
+
+  function attachDictation(textarea) {
+    if (!textarea || textarea.dataset.dictationBound === '1') return;
+    textarea.dataset.dictationBound = '1';
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-ghost small dictation-btn';
+    btn.title = '语音输入（服务端识别，说一句写一句）';
+    btn.textContent = '🎙 语音';
+    var status = document.createElement('span');
+    status.className = 'muted small dictation-status';
+
+    var session = null;
+    var starting = false; // 防止快速连点导致并发启动多路麦克风
+    var insertAt = -1; // 后续句子的插入位置（追加模式）；-1 = 用当前光标
+
+    function setStatus(msg, isError) {
+      status.textContent = msg || '';
+      status.className = 'muted small dictation-status' + (isError ? ' neg' : '');
+    }
+
+    function insertText(text) {
+      var len = textarea.value.length;
+      var at = insertAt >= 0 ? Math.min(insertAt, len) : (textarea.selectionStart == null ? len : textarea.selectionStart);
+      var end = insertAt >= 0 ? at : (textarea.selectionEnd || at);
+      textarea.value = textarea.value.slice(0, at) + text + textarea.value.slice(end);
+      insertAt = at + text.length;
+      textarea.selectionStart = textarea.selectionEnd = insertAt;
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      return text.length;
+    }
+
+    function upload(pcm) {
+      var fd = new FormData();
+      fd.append('audio', wavBlob(pcm), 'segment.wav');
+      setStatus('识别中…');
+      fetch('/api/asr', { method: 'POST', credentials: 'same-origin', body: fd })
+        .then(function (res) {
+          return res.json().then(
+            function (d) { return { res: res, d: d }; },
+            function () { return { res: res, d: {} }; }
+          );
+        })
+        .then(function (out) {
+          if (!out.res.ok || !out.d.ok) throw new Error((out.d && out.d.error) || ('HTTP ' + out.res.status));
+          var text = String(out.d.text || '');
+          if (window.console && console.debug && out.d.model) {
+            console.debug('[asr] 识别通道：' + (out.d.via || '—') + ' · ' + (out.d.provider || '') + ' · ' + out.d.model);
+          }
+          if (!text) { if (session) setStatus('这句没听清，可以再说一遍'); return; }
+          var n = insertText(text);
+          setStatus('已写入 ' + n + ' 字' + (session ? '，继续说…' : ''));
+        })
+        .catch(function (err) {
+          setStatus('识别失败：' + (err && err.message || err), true);
+        });
+    }
+
+    function stop() {
+      if (!session) return;
+      var s = session;
+      session = null;
+      if (activeDictationStop === stop) activeDictationStop = null;
+      try { if (s.flush) s.flush(); } catch (e) { /* 已清空 */ }
+      try { s.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) { /* 已停止 */ }
+      try { s.ctx.close(); } catch (e) { /* 已关闭 */ }
+      URL.revokeObjectURL(s.workletUrl);
+      btn.textContent = '🎙 语音';
+      btn.classList.remove('active');
+      if (status.textContent.indexOf('聆听中') === 0) setStatus('');
+    }
+
+    async function start() {
+      if (starting) return;
+      starting = true;
+      btn.textContent = '⏳ 启动中…';
+      try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setStatus('语音输入需要 HTTPS 或 localhost 访问（当前地址不是安全上下文）', true);
+          btn.textContent = '🎙 语音';
+          return;
+        }
+        if (activeDictationStop) activeDictationStop();
+        var stream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          });
+        } catch (err) {
+          var name = err && err.name;
+          setStatus(
+            name === 'NotAllowedError' ? '麦克风权限被拒绝：请在浏览器地址栏允许麦克风'
+            : name === 'NotFoundError' ? '没有检测到麦克风设备'
+            : '无法访问麦克风：' + (err && err.message || err),
+            true
+          );
+          btn.textContent = '🎙 语音';
+          return;
+        }
+        var ctx = new (window.AudioContext || window.webkitAudioContext)();
+        var workletUrl = URL.createObjectURL(new Blob([DICTATION_WORKLET_SRC], { type: 'text/javascript' }));
+        try {
+          await ctx.audioWorklet.addModule(workletUrl);
+        } catch (err) {
+          URL.revokeObjectURL(workletUrl);
+          try { ctx.close(); } catch (e) { /* 已关闭 */ }
+          stream.getTracks().forEach(function (t) { t.stop(); });
+          setStatus('浏览器不支持音频采集（AudioWorklet）', true);
+          btn.textContent = '🎙 语音';
+          return;
+        }
+      try { await ctx.resume(); } catch (e) { /* 某些平台无需 resume */ }
+      var source = ctx.createMediaStreamSource(stream);
+      var node = new AudioWorkletNode(ctx, 'asr-capture');
+      var mute = ctx.createGain(); // 零增益接到 destination：保证渲染图持续拉取 worklet，且不外放
+      mute.gain.value = 0;
+      source.connect(node);
+      node.connect(mute);
+      mute.connect(ctx.destination);
+
+      /* VAD 参数：自适应能量阈值（跟环境最安静水平走，照顾小音量/远场麦克风）+ 静音断句 */
+      var END_SILENCE = 700, MIN_SPEECH = 300, MAX_SEG = 60000, PRE_ROLL = 6400;
+      var minRms = 0.001; // 环境噪声下限：立即跟上更安静的瞬间，环境变吵时快速上漂
+      function speechThreshold() { return Math.max(0.005, Math.min(0.03, minRms * 6)); }
+      var chunkMs = 4096 / ctx.sampleRate * 1000;
+      var seg = [], segSamples = 0, pre = [], preSamples = 0;
+      var speaking = false, silenceMs = 0, speechMs = 0, segMs = 0;
+      var listenMs = 0, maxRms = 0, quietHintShown = false;
+
+      function flushSegment() {
+        var chunks = seg, voiced = speechMs, total = segSamples;
+        seg = []; segSamples = 0; speaking = false; silenceMs = 0; speechMs = 0; segMs = 0;
+        if (!total || voiced < MIN_SPEECH) return;
+        var merged = new Int16Array(total);
+        var off = 0;
+        for (var i = 0; i < chunks.length; i++) { merged.set(chunks[i], off); off += chunks[i].length; }
+        upload(merged);
+      }
+
+      node.port.onmessage = function (ev) {
+        if (!session) return;
+        var pcm = new Int16Array(ev.data.pcm);
+        var rms = ev.data.rms;
+        if (!speaking) {
+          listenMs += chunkMs;
+          if (rms > maxRms) maxRms = rms;
+          // 噪声下限：立即跟上更安静的瞬间；环境变吵时快速上漂（约 3 秒跟平），避免噪声误触发
+          minRms += (Math.min(rms, 0.03) - minRms) * (rms < minRms ? 1 : 0.05);
+          var th = speechThreshold();
+          if (!quietHintShown && listenMs > 5000 && maxRms < th * 0.6) {
+            quietHintShown = true;
+            setStatus('聆听中…（没检测到声音，检查麦克风是否选对/静音）');
+          }
+          pre.push(pcm); preSamples += pcm.length;
+          while (pre.length && preSamples - pre[0].length >= PRE_ROLL) preSamples -= pre.shift().length;
+          if (rms >= th) {
+            speaking = true; silenceMs = 0; speechMs = chunkMs; segMs = 0;
+            seg = pre; segSamples = preSamples;
+            pre = []; preSamples = 0;
+            if (quietHintShown) setStatus('聆听中…（听到了，停顿后自动写入）');
+          }
+          return;
+        }
+        seg.push(pcm); segSamples += pcm.length; segMs += chunkMs;
+        if (rms >= speechThreshold()) { silenceMs = 0; speechMs += chunkMs; }
+        else silenceMs += chunkMs;
+        if (silenceMs >= END_SILENCE || segMs >= MAX_SEG) flushSegment();
+      };
+
+      session = { stream: stream, ctx: ctx, workletUrl: workletUrl, flush: flushSegment };
+      activeDictationStop = stop;
+      onCleanup(stop); // 软导航离开时收麦，避免后台一直录音
+      stream.getTracks()[0].addEventListener('ended', stop);
+      btn.textContent = '⏺ 停止';
+      btn.classList.add('active');
+      setStatus('聆听中…（说一句，停顿即写入）');
+      } finally {
+        starting = false;
+      }
+    }
+
+    btn.addEventListener('click', function () {
+      if (session) { stop(); return; }
+      start();
+    });
+
+    var actions = textarea.closest('.quick-note-editor, .form, .panel, form') || textarea.parentNode;
+    var bar = actions.querySelector('.quick-note-actions, .form-actions, .pos-note-actions, .dictation-bar');
+    if (bar) { bar.appendChild(btn); bar.appendChild(status); }
+    else { textarea.parentNode.insertBefore(btn, textarea.nextSibling); textarea.parentNode.insertBefore(status, btn.nextSibling); }
+  }
+
+  var DICTATION_SELECTOR = 'textarea[name="note"], textarea[name="content"], textarea[data-dictation]';
+  var dictationObserver = null;
+
+  function attachDictationAll(root) {
+    var scope = root && root.querySelectorAll ? root : document;
+    var targets = scope.querySelectorAll(DICTATION_SELECTOR);
+    for (var i = 0; i < targets.length; i++) attachDictation(targets[i]);
+  }
+
+  function initDictation() {
+    attachDictationAll(document);
+    // 动态插入的编辑器（实时持仓笔记等）也自动挂上语音按钮
+    if (dictationObserver || !window.MutationObserver) return;
+    dictationObserver = new MutationObserver(function (mutations) {
+      for (var i = 0; i < mutations.length; i++) {
+        var added = mutations[i].addedNodes;
+        for (var j = 0; j < added.length; j++) {
+          var node = added[j];
+          if (!node || node.nodeType !== 1) continue;
+          if (node.matches && node.matches(DICTATION_SELECTOR)) attachDictation(node);
+          attachDictationAll(node);
+        }
+      }
+    });
+    dictationObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
+  /* ---------------- 仪表盘面板排序：拖拽 + 服务端持久化 ---------------- */
+  function initDashboardOrder() {
+    var main = document.querySelector('main.site-main');
+    if (!main) return;
+    var panels = Array.prototype.slice.call(main.querySelectorAll('section[data-panel] .panel-head'));
+    var dragging = null;
+
+    function panelOf(el) { return el && el.closest ? el.closest('section[data-panel]') : null; }
+    function clearMarks() {
+      Array.prototype.forEach.call(main.querySelectorAll('[data-panel].drop-before, [data-panel].drop-after'), function (p) {
+        p.classList.remove('drop-before', 'drop-after');
+      });
+    }
+    function persist() {
+      var ids = Array.prototype.map.call(main.querySelectorAll('section[data-panel]'), function (p) { return p.dataset.panel; });
+      fetch('/api/dashboard/order', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order: ids }),
+      });
+    }
+
+    panels.forEach(function (head) {
+      if (head.querySelector('.drag-grip')) return;
+      var panel = panelOf(head);
+      if (!panel) return;
+      var grip = document.createElement('span');
+      grip.className = 'drag-grip';
+      grip.textContent = '⠿';
+      grip.title = '拖拽调整面板顺序';
+      grip.setAttribute('draggable', 'true');
+      head.insertBefore(grip, head.firstChild);
+      grip.addEventListener('dragstart', function (ev) {
+        dragging = panel;
+        panel.classList.add('dragging');
+        try { ev.dataTransfer.setData('text/plain', panel.dataset.panel); ev.dataTransfer.effectAllowed = 'move'; } catch (e) { /* 忽略 */ }
+      });
+      grip.addEventListener('dragend', function () {
+        panel.classList.remove('dragging');
+        dragging = null;
+        clearMarks();
+        persist();
+      });
+    });
+
+    if (main.dataset.orderDelegated !== '1') {
+      main.dataset.orderDelegated = '1';
+      main.addEventListener('dragover', function (ev) {
+        if (!dragging) return;
+        var target = panelOf(ev.target);
+        if (!target || target === dragging) return;
+        ev.preventDefault();
+        clearMarks();
+        var rect = target.getBoundingClientRect();
+        var before = ev.clientY < rect.top + rect.height / 2;
+        target.classList.add(before ? 'drop-before' : 'drop-after');
+        target.dataset.dropBefore = before ? '1' : '0';
+      });
+      main.addEventListener('drop', function (ev) {
+        if (!dragging) return;
+        var target = panelOf(ev.target);
+        if (!target || target === dragging) return;
+        ev.preventDefault();
+        var before = target.dataset.dropBefore !== '0';
+        target.parentNode.insertBefore(dragging, before ? target : target.nextSibling);
+        clearMarks();
+      });
+    }
+  }
+
   /* ---------------- 页面级交互 ---------------- */
 
   /* 新建交易时给空的时间框填默认值：开仓 2 小时前，平仓现在 */
@@ -201,6 +582,8 @@
     var panel = document.querySelector('[data-live-panel]');
     var rowBox = document.querySelector('[data-live-rows]');
     if (!panel || !rowBox) return;
+    // 持仓笔记编辑中：暂停整表重绘，避免 30 秒刷新把输入框冲掉
+    var noteEditing = false;
 
     function esc(s) {
       return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -244,6 +627,7 @@
           errors: data.errors,
           balances: pick(data.balances),
           positions: pick(data.positions),
+          positionNotes: pick(data.positionNotes),
           spotBalances: pick(data.spotBalances),
           spotHoldings: pick(data.spotHoldings),
         };
@@ -269,19 +653,40 @@
       if (count) count.textContent = String(positions.length);
       if (upl) { upl.textContent = money(unrealized); upl.className = cls(unrealized); }
 
-      rowBox.innerHTML = positions.map(function (p) {
-        return '<tr>' +
-          '<td class="small">' + esc(p.account_name) + '</td>' +
-          '<td><b>' + esc(p.symbol) + '</b></td>' +
-          '<td><span class="side-tag ' + (p.side === 'long' ? 'long' : 'short') + '">' + (p.side === 'long' ? '多' : '空') + '</span></td>' +
-          '<td>' + num(p.size) + '</td>' +
-          '<td>' + price(p.entry_price) + '</td>' +
-          '<td>' + price(p.mark_price) + '</td>' +
-          '<td class="strong ' + cls(Number(p.unrealized)) + '">' + money(p.unrealized) + '</td>' +
-          '<td class="rate">' + rate(p.funding_rate) + '</td>' +
-          '<td class="small muted">' + when(p.next_funding_time) + '</td>' +
-          '</tr>';
-      }).join('') || '<tr><td colspan="9" class="muted center">当前没有合约持仓</td></tr>';
+      // 行内笔记：与服务端 livePositionsPanel 的 noteCell 保持同一结构
+      var noteMap = {};
+      (data.positionNotes || []).forEach(function (n) {
+        noteMap[n.account_id + '|' + n.symbol + '|' + n.side] = n;
+      });
+      function noteCell(p) {
+        var note = noteMap[p.account_id + '|' + p.symbol + '|' + p.side];
+        var attrs = 'data-account="' + esc(p.account_id) + '" data-symbol="' + esc(p.symbol) + '"' +
+          ' data-side="' + (p.side === 'short' ? 'short' : 'long') + '"' +
+          ' data-content="' + esc(note ? note.content : '') + '"';
+        var firstLine = note ? String(note.content).split('\n')[0] : '';
+        var label = note
+          ? '📝 ' + esc(firstLine.slice(0, 20)) + ((firstLine.length > 20 || note.content.indexOf('\n') >= 0) ? '…' : '')
+          : '＋ 笔记';
+        var title = note ? esc(note.content) : '记录这笔持仓的想法，平仓后自动归入交易记录';
+        return '<td class="pos-note-cell"><button type="button" class="pos-note' + (note ? ' has' : '') + '" data-pos-note ' + attrs + ' title="' + title + '">' + label + '</button></td>';
+      }
+
+      if (!noteEditing) {
+        rowBox.innerHTML = positions.map(function (p) {
+          return '<tr>' +
+            '<td class="small">' + esc(p.account_name) + '</td>' +
+            '<td><b>' + esc(p.symbol) + '</b></td>' +
+            '<td><span class="side-tag ' + (p.side === 'long' ? 'long' : 'short') + '">' + (p.side === 'long' ? '多' : '空') + '</span></td>' +
+            noteCell(p) +
+            '<td>' + num(p.size) + '</td>' +
+            '<td>' + price(p.entry_price) + '</td>' +
+            '<td>' + price(p.mark_price) + '</td>' +
+            '<td class="strong ' + cls(Number(p.unrealized)) + '">' + money(p.unrealized) + '</td>' +
+            '<td class="rate">' + rate(p.funding_rate) + '</td>' +
+            '<td class="small muted">' + when(p.next_funding_time) + '</td>' +
+            '</tr>';
+        }).join('') || '<tr><td colspan="10" class="muted center">当前没有合约持仓</td></tr>';
+      }
 
       var spotHoldings = data.spotHoldings || [];
       var spotValue = spotHoldings.reduce(function (a, h) { return a + (Number(h.value) || 0); }, 0);
@@ -309,6 +714,59 @@
         up.textContent = data.updatedAt ? '更新于 ' + when(data.updatedAt).slice(11) : '等待首次刷新';
         if (data.errors && data.errors.length) up.textContent += ' · ' + data.errors[0];
       }
+    }
+
+    // 事件委托绑定在 tbody 上：整表重绘后依然有效
+    rowBox.addEventListener('click', function (ev) {
+      var btn = ev.target && ev.target.closest ? ev.target.closest('[data-pos-note]') : null;
+      if (!btn) return;
+      if (rowBox.querySelector('.pos-note-editor')) return; // 一次只开一个编辑器
+      openNoteEditor(btn);
+    });
+
+    function openNoteEditor(btn) {
+      var cell = btn.closest('td');
+      if (!cell) return;
+      noteEditing = true;
+      cell.innerHTML = '<div class="pos-note-editor">' +
+        '<textarea maxlength="2000" rows="3" data-dictation placeholder="这笔持仓的想法…平仓后自动归入交易记录">' +
+        esc(btn.getAttribute('data-content') || '') +
+        '</textarea>' +
+        '<div class="pos-note-actions">' +
+        '<button type="button" class="btn small" data-note-save>保存</button>' +
+        '<button type="button" class="btn btn-ghost small" data-note-cancel>取消</button>' +
+        '</div></div>';
+      var ta = cell.querySelector('textarea');
+      ta.focus();
+      var acc = btn.getAttribute('data-account');
+      var sym = btn.getAttribute('data-symbol');
+      var side = btn.getAttribute('data-side');
+      cell.querySelector('[data-note-save]').addEventListener('click', async function () {
+        try {
+          var res = await fetch('/api/positions/note', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'account_id=' + encodeURIComponent(acc) +
+              '&symbol=' + encodeURIComponent(sym) +
+              '&side=' + encodeURIComponent(side) +
+              '&note=' + encodeURIComponent(ta.value),
+          });
+          var data = await res.json().catch(function () { return null; });
+          if (!res.ok || !data || !data.ok) {
+            throw new Error((data && (data.message || data.error)) || 'HTTP ' + res.status);
+          }
+        } catch (err) {
+          alert('保存失败：' + err.message);
+          return;
+        }
+        noteEditing = false;
+        poll(false);
+      });
+      cell.querySelector('[data-note-cancel]').addEventListener('click', function () {
+        noteEditing = false;
+        poll(false);
+      });
     }
 
     async function poll(force) {
@@ -465,6 +923,40 @@
         }
       });
     }
+
+    var asrPreset = document.querySelector('[data-asr-preset]');
+    var asrForm = document.getElementById('asr-config-form');
+    if (asrPreset && asrForm) {
+      asrPreset.addEventListener('change', function () {
+        var opt = asrPreset.selectedOptions[0];
+        if (!opt) return;
+        var provider = asrForm.querySelector('[name="provider"]');
+        var base = asrForm.querySelector('[name="baseUrl"]');
+        var model = asrForm.querySelector('[name="model"]');
+        if (provider) provider.value = opt.getAttribute('data-provider') || provider.value;
+        if (base && opt.getAttribute('data-base')) base.value = opt.getAttribute('data-base');
+        if (model && opt.getAttribute('data-model')) model.value = opt.getAttribute('data-model');
+      });
+    }
+
+    var asrTestBtn = document.querySelector('[data-asr-test]');
+    var asrTestOut = document.querySelector('[data-asr-test-result]');
+    if (asrTestBtn) {
+      asrTestBtn.addEventListener('click', async function () {
+        asrTestBtn.disabled = true;
+        if (asrTestOut) { asrTestOut.textContent = '测试中…'; asrTestOut.className = 'muted small'; }
+        try {
+          var res = await fetch('/api/asr/test', { method: 'POST', credentials: 'same-origin' });
+          var data = await res.json();
+          if (!res.ok || !data.ok) throw new Error(data.note || data.error || ('HTTP ' + res.status));
+          if (asrTestOut) asrTestOut.textContent = data.note || '可用';
+        } catch (err) {
+          if (asrTestOut) { asrTestOut.textContent = '失败：' + err.message; asrTestOut.className = 'muted small neg'; }
+        } finally {
+          asrTestBtn.disabled = false;
+        }
+      });
+    }
   }
 
   /* ---------------- Markdown 预览 / 图片上传 ---------------- */
@@ -494,36 +986,52 @@
       });
     }
 
-    var imageInput = document.querySelector('[data-note-image]');
-    if (imageInput && textarea) {
-      imageInput.addEventListener('change', async function () {
-        var file = imageInput.files && imageInput.files[0];
-        if (!file) return;
-        var label = imageInput.closest('label');
-        var labelText = label ? label.querySelector('[data-note-image-label]') : null;
-        var original = labelText ? labelText.textContent : '';
-        if (labelText) labelText.textContent = '上传中…';
-        try {
-          var fd = new FormData();
-          fd.set('image', file);
-          var res = await fetch('/dashboard/notes/upload', { method: 'POST', credentials: 'same-origin', body: fd });
-          var data = await res.json();
-          if (!res.ok || !data.ok) throw new Error(data.error || '上传失败');
-          var start = textarea.selectionStart || textarea.value.length;
-          var before = textarea.value.slice(0, start);
-          var after = textarea.value.slice(start);
-          var prefix = before && !before.endsWith('\n') ? '\n\n' : '';
-          textarea.value = before + prefix + data.markdown + '\n' + after;
-          textarea.focus();
-          textarea.selectionStart = textarea.selectionEnd = (before + prefix + data.markdown + '\n').length;
-        } catch (err) {
-          alert('图片上传失败：' + err.message);
-        } finally {
-          imageInput.value = '';
-          if (labelText) labelText.textContent = original || '插入图片';
-        }
-      });
-    }
+    // 面板内的插入图片按钮：交易详情页复盘框、笔记编辑页共用同一套上传逻辑
+    document.querySelectorAll('[data-note-image]').forEach(function (imageInput) {
+      if (imageInput.dataset.imgBound === '1') return;
+      var panel = imageInput.closest('.panel') || imageInput.closest('form');
+      var target = (panel && panel.querySelector('textarea')) || textarea;
+      if (!target) return;
+      bindImagePicker(imageInput, target);
+    });
+  }
+
+  /* ---------------- 图片上传 + 光标处插入（快评框 / 详情复盘框 / 笔记编辑页共用） ---------------- */
+  function insertIntoTextarea(textarea, text) {
+    var start = typeof textarea.selectionStart === 'number' ? textarea.selectionStart : textarea.value.length;
+    var before = textarea.value.slice(0, start);
+    var after = textarea.value.slice(typeof textarea.selectionEnd === 'number' ? textarea.selectionEnd : start);
+    var prefix = before && !before.endsWith('\n') ? '\n\n' : '';
+    var inserted = prefix + text + '\n';
+    textarea.value = before + inserted + after;
+    textarea.focus();
+    textarea.selectionStart = textarea.selectionEnd = (before + inserted).length;
+  }
+
+  function bindImagePicker(input, textarea, labelText) {
+    if (!input || !textarea || input.dataset.imgBound === '1') return;
+    input.dataset.imgBound = '1';
+    input.addEventListener('change', async function () {
+      var file = input.files && input.files[0];
+      if (!file) return;
+      var label = input.closest('label');
+      var status = labelText || (label ? label.querySelector('[data-note-image-label]') : null);
+      var original = status ? status.textContent : '';
+      if (status) status.textContent = '上传中…';
+      try {
+        var fd = new FormData();
+        fd.set('image', file);
+        var res = await fetch('/dashboard/notes/upload', { method: 'POST', credentials: 'same-origin', body: fd });
+        var data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || '上传失败');
+        insertIntoTextarea(textarea, data.markdown);
+      } catch (err) {
+        alert('图片上传失败：' + (err && err.message || err));
+      } finally {
+        input.value = '';
+        if (status) status.textContent = original || '插入图片';
+      }
+    });
   }
 
   /* ---------------- 周期报告：AI 生成进度 ---------------- */
@@ -803,11 +1311,54 @@
     });
   }
 
+  /* ---------------- 交易记录：批量勾选移入垃圾箱 ---------------- */
+  function initBulkSelect() {
+    var form = document.getElementById('journal-bulk');
+    if (!form || form.dataset.bulkBound === '1') return;
+    form.dataset.bulkBound = '1';
+    var checks = Array.prototype.slice.call(document.querySelectorAll('input.bulk-check[form="journal-bulk"]'));
+    var all = document.querySelector('input[data-bulk-all]');
+    var count = form.querySelector('[data-bulk-count]');
+    var submit = form.querySelector('[data-bulk-submit]');
+    var emptyHint = '勾选左侧复选框可批量移入垃圾箱（只作用于本页）';
+    if (!checks.length) { form.hidden = true; return; }
+
+    function selected() {
+      return checks.filter(function (c) { return c.checked; });
+    }
+    function refresh() {
+      var n = selected().length;
+      if (submit) submit.disabled = n === 0;
+      if (count) count.textContent = n ? '已选 ' + n + ' 条' : emptyHint;
+      if (all) {
+        all.checked = n > 0 && n === checks.length;
+        all.indeterminate = n > 0 && n < checks.length;
+      }
+    }
+    checks.forEach(function (c) { c.addEventListener('change', refresh); });
+    if (all) {
+      all.addEventListener('change', function () {
+        checks.forEach(function (c) { c.checked = all.checked; });
+        refresh();
+      });
+    }
+    form.addEventListener('submit', function (ev) {
+      var n = selected().length;
+      if (!n) { ev.preventDefault(); return; }
+      if (!window.confirm('把选中的 ' + n + ' 条记录移入垃圾箱？\n统计立即排除，交易所同步也不会再导回；可在交易记录 → 垃圾箱里恢复。')) {
+        ev.preventDefault();
+      }
+    });
+    refresh();
+  }
+
   function initPage() {
     initTheme();
+    initPrivacy();
     initTimeDefaults();
     initAlerts();
     initImportGuard();
+    initBulkSelect();
     initSyncButtons();
     initLivePanel();
     initAutoSyncBar();
@@ -821,6 +1372,8 @@
     initChartHover();
     initChartZoom();
     initQuickNote();
+    initDictation();
+    initDashboardOrder();
   }
 
   /* ---------------- 行内快评：表格行下方展开输入框，就地保存 ---------------- */
@@ -887,7 +1440,9 @@
       '<div class="quick-note-actions">' +
       '<button type="button" class="btn btn-primary small" data-qnote-save>保存</button>' +
       '<button type="button" class="btn btn-ghost small" data-qnote-cancel>取消</button>' +
-      '<span class="muted small" data-qnote-status>支持 Markdown；深度复盘请进详情页</span>' +
+      '<label class="btn btn-ghost small"><span data-note-image-label>插入图片</span>' +
+      '<input type="file" accept="image/png,image/jpeg,image/gif,image/webp" data-note-image hidden></label>' +
+      '<span class="muted small" data-qnote-status>支持 Markdown 与图片</span>' +
       '</div></div>';
     editorRow.appendChild(td);
     row.parentNode.insertBefore(editorRow, row.nextSibling);
@@ -895,8 +1450,10 @@
     textarea.value = btn.getAttribute('data-note') || '';
     openEditor = { row: row, editorRow: editorRow, btn: btn };
     onCleanup(closeQuickEditor); // 软导航离开时收起，避免残留
+    attachDictation(textarea);
     td.querySelector('[data-qnote-save]').addEventListener('click', saveQuickNote);
     td.querySelector('[data-qnote-cancel]').addEventListener('click', closeQuickEditor);
+    bindImagePicker(td.querySelector('[data-note-image]'), textarea);
     textarea.addEventListener('keydown', function (ev) {
       if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
         ev.preventDefault();
@@ -1065,6 +1622,17 @@
       if (res.type === 'opaqueredirect' || res.ok) btn.classList.toggle('active', !wasActive);
       else location.reload();
     }).catch(function () { location.reload(); });
+  });
+
+  // 指标下钻：点击带 data-details-open 的统计块，展开并滚动到对应 <details> 明细
+  document.addEventListener('click', function (ev) {
+    if (ev.defaultPrevented || ev.button !== 0) return;
+    var el = ev.target && ev.target.closest ? ev.target.closest('[data-details-open]') : null;
+    if (!el || el.closest('a, button, form')) return;
+    var target = document.getElementById(el.getAttribute('data-details-open'));
+    if (!target) return;
+    target.open = true;
+    target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });
 
   // 全站防重复提交：POST 表单提交后禁用按钮；整页跳转/刷新后自然恢复。

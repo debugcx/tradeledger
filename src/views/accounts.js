@@ -59,7 +59,8 @@ export function accountsPage({ user, accounts, meta, runs, accountStats = {}, st
     const showProgress = !a.is_demo && a.exchange !== 'manual';
     return `<tr data-account-row="${a.id}">
       <td><b>${e(exchangeName(meta, a.exchange))}</b></td>
-      <td>${e(a.name)}<div class="muted small">回溯：${e(lookbackLabel(a.lookback_days))}</div></td>
+      <td>${e(a.name)}<div class="muted small">回溯：${e(lookbackLabel(a.lookback_days))}</div>
+        ${a.assets_only ? '<div class="muted small">仅资产模式 · 不拉交易</div>' : ''}</td>
       <td class="muted small">${a.api_key_hint ? `••••${e(a.api_key_hint)}` : '—'}</td>
       <td><span class="status-badge ${st.cls}">${e(st.label)}</span>
         ${hint ? `<div class="muted small">${e(hint)}</div>` : ''}</td>
@@ -194,6 +195,10 @@ export function accountNewPage({ user, meta, selected, form = {}, error }) {
             <input name="spot_symbols" value="${e(form.spot_symbols || '')}" placeholder="BTCUSDT,ETHUSDT；留空则按现货余额自动推导">
             <div class="muted small">Binance / Bitget / Gate 的现货成交接口需要交易对；OKX / Bybit / Hyperliquid 可自动拉全量</div>
           </label>
+          <label class="field wide"><span>仅资产模式（网格机器人子账户等）</span>
+            <input type="checkbox" name="assets_only" value="1" style="margin-right:8px">
+            <span class="muted small">只做资产总览与资金流水复盘：不回溯交易、不拉现货成交与回合、不记资金费</span>
+          </label>
           <div class="form-actions wide">
             <button class="btn btn-primary" type="submit">验证并保存</button>
             <a class="btn btn-ghost" href="/dashboard/accounts">取消</a>
@@ -243,6 +248,10 @@ export function accountEditPage({ user, account, exchange, error }) {
         <label class="field wide"><span>现货交易对（可选）</span>
           <input name="spot_symbols" value="${e(account.spot_symbols || '')}" placeholder="BTCUSDT,ETHUSDT；留空则按现货余额自动推导">
           <div class="muted small">修改后会重新拉取现货成交；Binance / Bitget / Gate 必填或留空自动推导</div>
+        </label>
+        <label class="field wide"><span>仅资产模式（网格机器人子账户等）</span>
+          <input type="checkbox" name="assets_only" value="1" ${account.assets_only ? 'checked' : ''} style="margin-right:8px">
+          <span class="muted small">只做资产总览与资金流水复盘：不回溯交易、不拉现货成交与回合、不记资金费；已同步的历史交易保留</span>
         </label>
         <div class="form-actions wide">
           <button class="btn btn-primary" type="submit">保存</button>

@@ -211,58 +211,6 @@ export const okx = {
     return { transfers: out.slice(0, cap), nextCursor: null };
   },
 
-  // 策略机器人（网格）已结束回合：合约网格 + 现货网格各拉历史，
-  // 每个机器人一条交易记录。盈亏用 totalPnl（网格利润 + 浮动盈亏），
-  // 投资额记入名义价值使「收益率」有意义；价格/数量对网格无意义，保持 0。
-  async fetchBots({ creds, fromMs, toMs, limit }) {
-    const cap = Math.max(20, Number(limit) || 200);
-    const out = [];
-    const pull = async (algoOrdType, market) => {
-      let after = null;
-      for (let page = 0; page < 3 && out.length < cap; page++) {
-        const q = new URLSearchParams({ algoOrdType, limit: '100' });
-        if (after) q.set('after', after);
-        const rows = await call(`/api/v5/tradingBot/grid/orders-algo-history?${q}`, creds);
-        if (!Array.isArray(rows) || !rows.length) break;
-        for (const row of rows) {
-          const start = Number(row.cTime || 0);
-          const end = Number(row.uTime || 0);
-          if (!start || !end || end < Number(fromMs) || end > Number(toMs)) continue;
-          const gridProfit = num(row.gridProfit);
-          const floatProfit = num(row.floatProfit);
-          const total = row.totalPnl !== undefined && row.totalPnl !== null
-            ? num(row.totalPnl) : gridProfit + floatProfit;
-          out.push({
-            external_id: `okx:grid:${row.algoId}`,
-            symbol: toSymbol(row.instId, 'USDT'),
-            side: String(row.direction || '').toLowerCase() === 'short' ? 'short' : 'long',
-            order_type: 'other',
-            size: 0,
-            notional: num(row.investment),
-            entry_price: 0,
-            exit_price: 0,
-            open_time: msToIso(start),
-            close_time: msToIso(end),
-            pnl: total,
-            fee: num(row.fee),
-            funding: num(row.fundingFee),
-            source: 'api',
-            market,
-            note: `策略机器人·${market === 'spot' ? '现货网格' : '合约网格'}`
-              + ` ${num(row.gridNum)} 格 · 套利 ${num(row.arbitrageNum)} 次`
-              + ` · 网格利润 ${gridProfit} · 浮动盈亏 ${floatProfit}`,
-            tags: ['策略机器人'],
-          });
-        }
-        const last = rows[rows.length - 1]?.algoId;
-        if (!last || last === after || rows.length < 100) break;
-        after = last;
-      }
-    };
-    try { await pull('contract_grid', 'futures'); } catch { /* 无合约网格数据或权限 */ }
-    try { await pull('grid', 'spot'); } catch { /* 无现货网格数据或权限 */ }
-    return { trades: out.slice(0, cap) };
-  },
   // 资金账户账单中的返佣类账单（邀请返佣、返佣卡、Broker 奖励等）。
   // type 代码来自 /api/v5/asset/bills 的账单类型表；只在客户端按白名单过滤，
   // 避免依赖服务端 type 过滤参数的可用性。

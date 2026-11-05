@@ -268,6 +268,13 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; fo
 .mini-stat span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
 .mini-stat b { font-size: 18px; font-weight: 650; }
 .mini-stat b.small { font-size: 13px; }
+/* 可下钻的统计块：点击展开对应 <details> 明细（public/app.js 全局点击代理） */
+[data-details-open] { cursor: pointer; }
+[data-details-open]:hover { border-color: var(--accent, #7DA2FF); }
+.stat-drill { margin-top: 10px; }
+.stat-drill > summary { cursor: pointer; user-select: none; color: var(--muted); font-size: 12px; }
+.stat-drill > summary:hover { color: var(--text); }
+.stat-drill .table-wrap { margin-top: 8px; max-height: 420px; overflow-y: auto; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); }
 
 .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 18px; }
 .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
@@ -451,6 +458,45 @@ td.tags-cell .tag-pill { margin: 0 2px 3px 0; }
 .side-tag { display: inline-block; padding: 1px 7px; border-radius: 6px; font-size: 11px; }
 .side-tag.long { background: var(--green-soft); color: var(--green); }
 .side-tag.short { background: var(--red-soft); color: var(--red); }
+
+/* 实时持仓行内笔记：持仓中记录想法，平仓后归入交易记录 */
+.pos-note-cell { max-width: 200px; }
+.pos-note {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.pos-note:hover { color: var(--text); border-color: var(--blue); }
+.pos-note.has {
+  border-style: solid;
+  background: var(--panel-2);
+  color: var(--text-2);
+  white-space: normal;
+  display: block;
+  text-align: left;
+  line-height: 1.5;
+}
+.pos-note-editor { display: flex; flex-direction: column; gap: 6px; min-width: 220px; }
+.pos-note-editor textarea {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+}
+.pos-note-actions { display: flex; gap: 6px; }
 
 /* ---------------- forms ---------------- */
 
@@ -851,7 +897,7 @@ td.tags-cell .tag-pill { margin: 0 2px 3px 0; }
 }
 
 /* ---------------- 行内快评 ---------------- */
-.quick-note-cell { max-width: 200px; }
+.quick-note-cell { max-width: 260px; min-width: 170px; }
 .quick-note-btn {
   appearance: none;
   border: 1px dashed var(--border);
@@ -859,13 +905,14 @@ td.tags-cell .tag-pill { margin: 0 2px 3px 0; }
   color: var(--muted);
   font: inherit;
   font-size: 12px;
-  padding: 3px 10px;
-  border-radius: 999px;
+  line-height: 1.5;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  text-align: left;
+  word-break: break-word;
   transition: border-color 0.15s, color 0.15s;
 }
 .quick-note-btn:hover { border-color: var(--blue); color: var(--text); }
@@ -874,6 +921,10 @@ td.tags-cell .tag-pill { margin: 0 2px 3px 0; }
   border-color: var(--border);
   background: var(--panel-2);
   color: var(--text-2);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
 }
 tr.quick-note-row > td {
   background: var(--panel-2);
@@ -941,3 +992,57 @@ tr.quick-note-row > td {
   border-radius: 6px;
 }
 .log-del:hover { color: var(--red); background: var(--red-soft); }
+
+/* ---------------- 交易记录批量勾选 ---------------- */
+.bulk-bar { display: flex; align-items: center; gap: 12px; padding: 0 0 10px; }
+td.bulk-cell, th.bulk-cell { width: 30px; text-align: center; }
+.bulk-cell input[type="checkbox"], input[data-bulk-all] {
+  accent-color: var(--blue);
+  width: 15px; height: 15px;
+  cursor: pointer;
+}
+
+/* ---------------- 周期报告账户分段选择 ---------------- */
+.seg-picker {
+  display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px;
+  padding: 3px; background: var(--panel-2);
+  border-radius: 9px; border: 1px solid var(--border);
+  max-width: 420px;
+}
+.seg-picker a {
+  padding: 6px 12px; border-radius: 7px;
+  color: var(--text-2); font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 160px;
+}
+.seg-picker a:hover { background: var(--panel-3); color: var(--text); }
+.seg-picker a.active { background: var(--panel-3); color: var(--text); font-weight: 600; box-shadow: inset 0 0 0 1px var(--border); }
+
+/* ---------------- 隐私模式：打码整个内容区，头部开关始终可点 ---------------- */
+.site-main { transition: filter 0.18s ease; }
+html[data-privacy="1"] .site-main {
+  filter: blur(14px) saturate(0.55);
+  pointer-events: none;
+  user-select: none;
+}
+html[data-privacy="1"] #privacyToggle { color: var(--text); background: var(--panel-2); }
+
+.icon-btn.active { color: var(--text); background: var(--panel-2); }
+
+/* ---------------- 仪表盘面板拖拽排序 ---------------- */
+.drag-grip {
+  cursor: grab;
+  color: var(--text-3, #7a8499);
+  font-size: 13px;
+  padding: 0 4px;
+  user-select: none;
+  letter-spacing: -1px;
+}
+.drag-grip:active { cursor: grabbing; }
+section[data-panel].dragging { opacity: 0.45; }
+section[data-panel].drop-before { box-shadow: 0 -2px 0 0 #7DA2FF; }
+section[data-panel].drop-after { box-shadow: 0 2px 0 0 #7DA2FF; }
+
+/* ---------------- 语音输入 ---------------- */
+.dictation-btn.active { color: #fff; background: #c0504d; border-color: #c0504d; }
+.dictation-status { margin-left: 8px; }

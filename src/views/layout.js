@@ -1,15 +1,15 @@
-import { escapeHtml as e } from '../http.js';
+import { escapeHtml as e, fmtMoney, fmtDuration, fmtDateTime } from '../http.js';
 
 const NAV = [
   { href: '/dashboard', label: '仪表盘', key: 'dashboard' },
   { href: '/dashboard/calendar', label: '盈亏日历', key: 'calendar' },
   { href: '/dashboard/journal', label: '交易记录', key: 'journal' },
+  { href: '/dashboard/missed', label: '错过交易', key: 'missed' },
   { href: '/dashboard/assets', label: '资产总览', key: 'assets' },
   { href: '/dashboard/review', label: '周期报告', key: 'review' },
   { href: '/dashboard/spot', label: '现货', key: 'spot' },
   { href: '/dashboard/notes', label: '笔记', key: 'notes' },
   { href: '/dashboard/transfers', label: '资金流水', key: 'transfers' },
-  { href: '/dashboard/bots', label: '策略机器人', key: 'bots' },
 ];
 
 const SETTINGS_NAV = [
@@ -46,7 +46,7 @@ export function layout({ title = 'TradeLedger', user = null, body = '', descript
 <meta name="robots" content="noindex, nofollow">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%237DA2FF'/><text x='16' y='22' font-size='18' font-family='monospace' text-anchor='middle' fill='%230B0E14'>TL</text></svg>">
 <link rel="stylesheet" href="/style.css">
-<script>try{var t=localStorage.getItem('tl-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;}catch(e){}</script>
+<script>try{var t=localStorage.getItem('tl-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;if(localStorage.getItem('tl-privacy')==='1')document.documentElement.dataset.privacy='1';}catch(e){}</script>
 </head>
 <body>
 <header class="site-header">
@@ -54,6 +54,7 @@ export function layout({ title = 'TradeLedger', user = null, body = '', descript
     <a class="brand" href="/dashboard"><span class="brand-mark">TL</span><span class="brand-name">TradeLedger</span></a>
     <span class="site-motto">前途是光明的，道路是曲折的</span>
     <div class="header-right">
+      <button class="icon-btn" id="privacyToggle" type="button" title="隐私模式：打码页面内容（截图分享前开启）" aria-label="切换隐私模式" aria-pressed="false">👁</button>
       <button class="icon-btn" id="themeToggle" type="button" title="切换主题" aria-label="切换主题">◐</button>
       ${authArea}
     </div>
@@ -75,19 +76,39 @@ export function tradeSideLabel(trade) {
   return trade.side === 'long' ? '做多' : '做空';
 }
 
+/** 指标下钻共用的交易明细表（最大回撤窗口 / 最差 5%，按平仓时间倒序展示） */
+export function tradesDrillTable(list) {
+  const sign = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : 'flat');
+  const rows = [...(list || [])]
+    .sort((a, b) => new Date(b.close_time) - new Date(a.close_time))
+    .map((t) => `<tr>
+    <td class="small">${e(fmtDateTime(t.close_time))}</td>
+    <td><a href="/dashboard/journal/${t.id}"><b>${e(t.symbol)}</b></a>
+      <div class="muted small">${t.market === 'spot' ? '现货' : '合约'} · ${e(t.account_name || '—')}</div></td>
+    <td><span class="side-tag ${t.side}">${e(tradeSideLabel(t))}</span></td>
+    <td class="small">${e(fmtDuration(Date.parse(t.close_time) - Date.parse(t.open_time)))}</td>
+    <td class="num ${sign(t.pnl)} strong">${fmtMoney(t.pnl)}</td>
+  </tr>`).join('');
+  return `<div class="table-wrap"><table class="table">
+    <thead><tr><th>平仓时间</th><th>交易对</th><th>方向</th><th>持仓</th><th class="num">净盈亏</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
+}
+
 /**
  * 行内快评按钮：点击在表格行下方展开输入框（app.js initQuickNote），
  * 回车/Ctrl+Enter 保存到 /api/trades/:id/note，免去进详情页。
  */
-export function quickNoteBtn(trade, { maxPreview = 24, maxPreload = 500 } = {}) {
+export function quickNoteBtn(trade, { maxPreview = 300, maxPreload = 500 } = {}) {
   const note = String(trade.note || '');
   const trimmed = note.trim();
   if (!trimmed) {
-    return `<button type="button" class="quick-note-btn" data-quick-note="${trade.id}" data-note="" title="写一句话快评（回车保存）">+ 快评</button>`;
+    return `<button type="button" class="quick-note-btn" data-quick-note="${trade.id}" data-note="" title="写一句话快评（Ctrl+Enter 保存）">+ 快评</button>`;
   }
   const flat = trimmed.replace(/\s+/g, ' ');
   const preview = flat.length > maxPreview ? `${flat.slice(0, maxPreview)}…` : flat;
-  return `<button type="button" class="quick-note-btn has-note" data-quick-note="${trade.id}" data-note="${e(note.slice(0, maxPreload))}" title="${e(flat.slice(0, 200))}">${e(preview)}</button>`;
+  // 预览尽量多显示：CSS 折行 + 最多 3 行截断（见 style.css .quick-note-btn.has-note）
+  return `<button type="button" class="quick-note-btn has-note" data-quick-note="${trade.id}" data-note="${e(note.slice(0, maxPreload))}" title="${e(flat.slice(0, 300))}">${e(preview)}</button>`;
 }
 
 export function alert(message, kind = 'error') {

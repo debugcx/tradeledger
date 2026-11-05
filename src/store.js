@@ -5,7 +5,8 @@
 import { all, get, run, tx } from './db.js';
 import { nowIso, uid } from './http.js';
 import { encryptSecret, decryptSecret, hintKey } from './crypto.js';
-import { remainingLots, matchSpotRounds } from './fills.js';
+import { remainingLots, matchSpotRounds, hash64 } from './fills.js';
+import { filterTrades, dayKeyOf, localDayStartUtc, localDayEndExclusiveUtc } from './stats.js';
 import { setExchangeProxyProvider } from './http-client.js';
 
 /* ---------------- 账户 ---------------- */
@@ -13,7 +14,8 @@ import { setExchangeProxyProvider } from './http-client.js';
 /** 对外只暴露安全字段，加密后的凭据与原文永不进视图 */
 const ACCOUNT_COLS = `id, exchange, name, is_demo, created_at, api_key_hint,
   sync_state, sync_done, last_sync_at, last_sync_status, last_sync_message,
-  lookback_days, last_transfer_sync_at, spot_symbols, last_spot_sync_at`;
+  lookback_days, last_transfer_sync_at, spot_symbols, last_spot_sync_at,
+  assets_only`;
 
 export function listAccounts() {
   return all(`SELECT ${ACCOUNT_COLS} FROM accounts ORDER BY is_demo ASC, id ASC`);
@@ -31,13 +33,13 @@ export function ensureDefaultAccount() {
   return getAccount(Number(r.lastInsertRowid));
 }
 
-export function createAccount({ exchange, name, apiKey = '', apiSecret = '', passphrase = '', isDemo = 0, lookbackDays = null, spotSymbols = '' }) {
+export function createAccount({ exchange, name, apiKey = '', apiSecret = '', passphrase = '', isDemo = 0, lookbackDays = null, spotSymbols = '', assetsOnly = 0 }) {
   const at = nowIso();
   const key = String(apiKey || '');
   const r = run(
     `INSERT INTO accounts
-       (exchange, name, is_demo, created_at, api_key_enc, api_secret_enc, passphrase_enc, api_key_hint, lookback_days, spot_symbols)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (exchange, name, is_demo, created_at, api_key_enc, api_secret_enc, passphrase_enc, api_key_hint, lookback_days, spot_symbols, assets_only)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     String(exchange || '').trim(),
     String(name || exchange || '未命名').trim().slice(0, 60),
     isDemo ? 1 : 0,
@@ -48,11 +50,12 @@ export function createAccount({ exchange, name, apiKey = '', apiSecret = '', pas
     hintKey(key),
     lookbackDays === null || lookbackDays === undefined || lookbackDays === '' ? null : Number(lookbackDays),
     String(spotSymbols || '').slice(0, 1000),
+    assetsOnly ? 1 : 0,
   );
   return getAccount(Number(r.lastInsertRowid));
 }
 
-export function updateAccount(id, { name, apiKey, apiSecret, passphrase, lookbackDays, spotSymbols } = {}) {
+export function updateAccount(id, { name, apiKey, apiSecret, passphrase, lookbackDays, spotSymbols, assetsOnly } = {}) {
   const current = get('SELECT * FROM accounts WHERE id = ?', Number(id));
   if (!current) throw new Error('账户不存在');
   const nextName = name !== undefined ? String(name).trim().slice(0, 60) : current.name;
@@ -66,12 +69,16 @@ export function updateAccount(id, { name, apiKey, apiSecret, passphrase, lookbac
   const nextSpotSymbols = spotSymbols === undefined
     ? current.spot_symbols
     : String(spotSymbols || '').slice(0, 1000);
+  // assetsOnly 三态：undefined = 保持原值，否则按布尔写 0/1
+  const nextAssetsOnly = assetsOnly === undefined
+    ? Number(current.assets_only) || 0
+    : (assetsOnly ? 1 : 0);
   run(
     `UPDATE accounts
      SET name = ?, api_key_enc = ?, api_secret_enc = ?, passphrase_enc = ?, api_key_hint = ?,
-         lookback_days = ?, spot_symbols = ?
+         lookback_days = ?, spot_symbols = ?, assets_only = ?
      WHERE id = ?`,
-    nextName, nextKeyEnc, nextSecretEnc, nextPassEnc, nextHint, nextLookback, nextSpotSymbols, Number(id),
+    nextName, nextKeyEnc, nextSecretEnc, nextPassEnc, nextHint, nextLookback, nextSpotSymbols, nextAssetsOnly, Number(id),
   );
   return getAccount(id);
 }
@@ -306,6 +313,78 @@ export function listPositions(accountId = null) {
   if (accountId) { sql += ' WHERE p.account_id = ?'; params.push(Number(accountId)); }
   sql += ' ORDER BY a.id, ABS(p.unrealized) DESC';
   return all(sql, ...params);
+}
+
+/* ---------------- 持仓笔记（挂起 → 平仓归档进交易记录） ---------------- */
+
+const POSITION_NOTE_MAX = 2000;
+// 平仓交易的时间可能落在写下笔记之前的几分钟内（刚平仓才写的笔记），
+// 归档匹配向前放宽这个余量，避免笔记变成永远匹配不上交易的僵尸
+const POSITION_NOTE_GRACE_MS = 10 * 60_000;
+
+export function setPositionNote(accountId, symbol, side, note) {
+  const acc = Number(accountId);
+  const sym = String(symbol || '').trim();
+  const dir = side === 'short' ? 'short' : 'long';
+  if (!acc || !sym) throw new Error('账户和交易对不能为空');
+  const text = String(note || '').trim().slice(0, POSITION_NOTE_MAX);
+  const at = nowIso();
+  if (!text) {
+    run('DELETE FROM position_notes WHERE account_id = ? AND symbol = ? AND side = ?', acc, sym, dir);
+    return null;
+  }
+  // 覆盖更新保留首次写入时间：归档按 created_at 判定笔记属于哪个回合
+  run(
+    `INSERT INTO position_notes (account_id, symbol, side, content, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(account_id, symbol, side) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at`,
+    acc, sym, dir, text, at, at,
+  );
+  return { account_id: acc, symbol: sym, side: dir, content: text };
+}
+
+export function listPositionNotes(accountId = null) {
+  return accountId
+    ? all('SELECT * FROM position_notes WHERE account_id = ?', Number(accountId))
+    : all('SELECT * FROM position_notes');
+}
+
+/**
+ * 挂起笔记归档：持仓已平（快照表查无此行）时，把笔记写进本回合平仓产生的
+ * 交易记录（close_time 晚于笔记首次写入），随后消费掉挂起笔记。
+ * 平仓交易尚未同步进来时保持挂起，等下一次同步/刷新再归档。
+ * 在 refreshLive（发现平仓）和 importTrades（交易落库）两处触发。
+ */
+export function archivePositionNotes(accountId = null) {
+  const pending = accountId === null
+    ? all('SELECT * FROM position_notes')
+    : all('SELECT * FROM position_notes WHERE account_id = ?', Number(accountId));
+  let attached = 0;
+  for (const pn of pending) {
+    const holding = get(
+      'SELECT 1 AS x FROM positions WHERE account_id = ? AND symbol = ? AND side = ?',
+      pn.account_id, pn.symbol, pn.side,
+    );
+    if (holding) continue;
+    const since = new Date(Date.parse(pn.created_at) - POSITION_NOTE_GRACE_MS).toISOString();
+    const targets = all(
+      `SELECT id FROM trades
+        WHERE account_id = ? AND symbol = ? AND side = ? AND close_time >= ?
+          AND (note IS NULL OR note = '')
+        ORDER BY close_time ASC`,
+      pn.account_id, pn.symbol, pn.side, since,
+    );
+    if (!targets.length) continue;
+    const at = nowIso();
+    tx((db) => {
+      const upd = db.prepare('UPDATE trades SET note = ?, note_updated_at = ?, updated_at = ? WHERE id = ?');
+      for (const t of targets) upd.run(pn.content, at, at, t.id);
+      db.prepare('DELETE FROM position_notes WHERE account_id = ? AND symbol = ? AND side = ?')
+        .run(pn.account_id, pn.symbol, pn.side);
+    });
+    attached += targets.length;
+  }
+  return attached;
 }
 
 /* ---------------- 现货余额 / 持仓 ---------------- */
@@ -696,22 +775,6 @@ export function transferSummary() {
   };
 }
 
-/** 策略机器人回合（按「策略机器人」标签识别），供机器人页展示 */
-export function listBotTrades(accountId = null) {
-  const params = [];
-  let sql = `SELECT tr.*, a.name AS account_name, a.exchange AS account_exchange
-    FROM trades tr
-    JOIN trade_tags tt ON tt.trade_id = tr.id
-    JOIN tags g ON g.id = tt.tag_id AND g.name = '策略机器人'
-    JOIN accounts a ON a.id = tr.account_id
-    WHERE tr.trashed_at IS NULL`;
-  if (accountId) { sql += ' AND tr.account_id = ?'; params.push(Number(accountId)); }
-  sql += ' GROUP BY tr.id ORDER BY tr.close_time DESC LIMIT 500';
-  return all(sql, ...params);
-}
-
-/* ---------------- 交易详情缓存（K 线 / 逐笔成交，落库持久化） ---------------- */
-
 export function getTradeCurveCache(tradeId) {
   const row = get('SELECT inputs, bar, candles, truncated FROM trade_curves WHERE trade_id = ?', Number(tradeId));
   if (!row) return null;
@@ -819,8 +882,8 @@ export function listSyncRuns(accountId = null, limit = 20) {
 /** 给同步进度条用的账户统计 */
 export function accountTradeStats() {
   return all(
-    `SELECT a.id, a.sync_done, a.sync_state, a.last_sync_at, a.last_sync_status, a.last_sync_message,
-       (SELECT COUNT(*) FROM trades t WHERE t.account_id = a.id) AS trades,
+    `SELECT a.id, a.sync_done, a.sync_state, a.last_sync_at, a.last_sync_status, a.last_sync_message, a.assets_only,
+       (SELECT COUNT(*) FROM trades t WHERE t.account_id = a.id AND t.trashed_at IS NULL) AS trades,
        (SELECT MIN(t.close_time) FROM trades t WHERE t.account_id = a.id) AS oldest_close
      FROM accounts a
      WHERE a.is_demo = 0 AND a.exchange != 'manual'`,
@@ -853,9 +916,11 @@ export function insertTradeFills(accountId, exchange, fills) {
   });
 }
 
-export function listTradeFillSymbols(accountId) {
-  return all('SELECT DISTINCT symbol FROM trade_fills WHERE account_id = ? ORDER BY symbol', Number(accountId))
-    .map((r) => r.symbol);
+export function listTradeFillSymbols(accountId, { exchange = null } = {}) {
+  const rows = exchange
+    ? all('SELECT DISTINCT symbol FROM trade_fills WHERE account_id = ? AND exchange = ? ORDER BY symbol', Number(accountId), String(exchange))
+    : all('SELECT DISTINCT symbol FROM trade_fills WHERE account_id = ? ORDER BY symbol', Number(accountId));
+  return rows.map((r) => r.symbol);
 }
 
 /** 每个 symbol 最早的开仓时间（判断成交覆盖是否够做全量重算） */
@@ -867,26 +932,71 @@ export function listSymbolEarliestOpen(accountId) {
   );
 }
 
-export function listTradeFills(accountId, symbol) {
-  return all(
-    `SELECT external_id, side, price, qty, fee, time, order_type
-     FROM trade_fills WHERE account_id = ? AND symbol = ? ORDER BY time ASC, id ASC`,
-    Number(accountId), String(symbol),
-  );
+export function listTradeFills(accountId, symbol, { exchange = null } = {}) {
+  const rows = exchange
+    ? all(
+      `SELECT external_id, side, price, qty, fee, time, order_type
+       FROM trade_fills WHERE account_id = ? AND symbol = ? AND exchange = ? ORDER BY time ASC, id ASC`,
+      Number(accountId), String(symbol), String(exchange),
+    )
+    : all(
+      `SELECT external_id, side, price, qty, fee, time, order_type
+       FROM trade_fills WHERE account_id = ? AND symbol = ? ORDER BY time ASC, id ASC`,
+      Number(accountId), String(symbol),
+    );
+  return rows;
 }
 
 /**
- * 重算后清理幻影回合：删除该 symbol 下 source=api、external_id 以交易所前缀开头
+ * 持久化 CSV 导入的逐笔成交（exchange='csv' 标记来源通道）。
+ * CSV 通常没有逐笔 ID：用内容指纹 csvf:<hash> 做唯一键，同批内的完全相同成交
+ * （拆单等）按 :n 编号共存。重复导入同一文件时指纹一致 → INSERT OR IGNORE 幂等，
+ * 与回合层 fingerprintTrade 的去重口径一致（跨文件的真·同毫秒同价同量成交视为同笔）。
+ */
+export function insertCsvFills(accountId, fills) {
+  if (!Array.isArray(fills) || !fills.length) return { inserted: 0, skipped: 0 };
+  return tx((db) => {
+    const stmt = db.prepare(
+      `INSERT OR IGNORE INTO trade_fills
+         (account_id, exchange, symbol, external_id, side, price, qty, fee, time, order_type, created_at)
+       VALUES (?, 'csv', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const counts = new Map();
+    let inserted = 0;
+    let skipped = 0;
+    for (const f of fills) {
+      if (!f?.symbol || !Number(f.time) || !(Number(f.qty) > 0) || !(Number(f.price) > 0)) { skipped++; continue; }
+      const side = f.side === 'buy' ? 'buy' : 'sell';
+      const base = f.id
+        ? `csvf:raw:${f.id}`
+        : `csvf:${hash64([f.symbol, side, Number(f.price), Number(f.qty), Number(f.fee) || 0, Math.floor(Number(f.time))].join('|'))}`;
+      const seen = counts.get(base) || 0;
+      counts.set(base, seen + 1);
+      const r = stmt.run(
+        Number(accountId), String(f.symbol), seen ? `${base}:${seen}` : base,
+        side,
+        Number(f.price) || 0, Number(f.qty) || 0, Number(f.fee) || 0,
+        Math.floor(Number(f.time) || 0), f.orderType ? String(f.orderType) : null, nowIso(),
+      );
+      if (Number(r.changes) > 0) inserted++; else skipped++;
+    }
+    return { inserted, skipped };
+  });
+}
+
+/**
+ * 重算后清理幻影回合：删除该 symbol 下指定来源、external_id 以指定前缀开头
  * 但不在重算集合里的交易。删除前把挂在这些交易上的资金费事件释放为未分配，
  * 下一次同步会重新分配到正确回合。
+ * source 默认 'api'（同步管道）；CSV 重建通道传 'csv'，两条通道互不误伤。
  */
-export function pruneTradesNotIn(accountId, exchange, symbol, keepIds) {
+export function pruneTradesNotIn(accountId, exchange, symbol, keepIds, { source = 'api' } = {}) {
   const keep = new Set((keepIds || []).map(String));
   const rows = all(
     `SELECT id, external_id FROM trades
-     WHERE account_id = ? AND source = 'api' AND market = 'futures'
+     WHERE account_id = ? AND source = ? AND market = 'futures'
        AND symbol = ? AND trashed_at IS NULL AND external_id LIKE ?`,
-    Number(accountId), String(symbol), `${exchange}:%`,
+    Number(accountId), String(source), String(symbol), `${exchange}:%`,
   );
   const dead = rows.filter((r) => !keep.has(String(r.external_id))).map((r) => Number(r.id));
   if (!dead.length) return 0;
@@ -899,6 +1009,53 @@ export function pruneTradesNotIn(accountId, exchange, symbol, keepIds) {
       n += Number(del.run(id).changes) || 0;
     }
     return n;
+  });
+}
+
+/**
+ * CSV 重建通道（source='csv'、指定 external_id 前缀）下某 symbol 的现存回合。
+ * source 传 null 时不限来源（跨通道去重时回合可能落在 api 行上）。
+ */
+export function listFillLaneTrades(accountId, symbol, prefix, { source = 'csv' } = {}) {
+  const params = [Number(accountId), String(symbol), `${prefix}:%`];
+  const sourceClause = source ? 'AND tr.source = ?' : '';
+  if (source) params.push(String(source));
+  return all(
+    `SELECT tr.id, tr.external_id, tr.side, tr.open_time, tr.close_time, tr.note,
+       (SELECT COUNT(*) FROM trade_tags tt WHERE tt.trade_id = tr.id) AS tag_count
+     FROM trades tr
+     WHERE tr.account_id = ? AND tr.symbol = ? AND tr.market = 'futures'
+       AND tr.trashed_at IS NULL AND tr.external_id LIKE ? ${sourceClause}`,
+    ...params,
+  );
+}
+
+/**
+ * 把将被清理的旧回合上的复盘内容迁移到重算出的新回合（同方向、开/平时间
+ * 至少一端相差 < 3 分钟，取更近者）。重算改变配对时回合的行 ID 会变，
+ * 没有这一步用户的笔记和标签会跟着旧行一起被删。
+ */
+export function mergeTradeAnnotations(fromId, toId) {
+  const from = Number(fromId);
+  const to = Number(toId);
+  if (!from || !to || from === to) return 0;
+  return tx((db) => {
+    const src = db.prepare('SELECT note FROM trades WHERE id = ?').get(from);
+    const dst = db.prepare('SELECT note FROM trades WHERE id = ?').get(to);
+    if (!src || !dst) return 0;
+    let n = 0;
+    if (src.note && String(src.note).trim() && !(dst.note && String(dst.note).trim())) {
+      db.prepare('UPDATE trades SET note = ?, note_updated_at = ? WHERE id = ?')
+        .run(src.note, nowIso(), to);
+      n++;
+    }
+    const dstHasTags = db.prepare('SELECT COUNT(*) AS c FROM trade_tags WHERE trade_id = ?').get(to).c > 0;
+    if (!dstHasTags) {
+      n += Number(db.prepare(
+        'INSERT OR IGNORE INTO trade_tags (trade_id, tag_id) SELECT ?, tag_id FROM trade_tags WHERE trade_id = ?',
+      ).run(to, from).changes) || 0;
+    }
+    return n > 0 ? 1 : 0;
   });
 }
 
@@ -923,10 +1080,12 @@ function attachTagsToRows(rows) {
     if (!byTrade.has(link.trade_id)) byTrade.set(link.trade_id, []);
     byTrade.get(link.trade_id).push(link.name);
   }
-  return rows.map((r) => ({ ...r, tags: byTrade.get(r.id) || [] }));
+  // 行对象刚从查询构造出来，直接原地挂 tags，避免 10 万行级别的对象展开开销。
+  for (const r of rows) r.tags = byTrade.get(r.id) || [];
+  return rows;
 }
 
-export function listTrades({ accountId = null, limit = null } = {}) {
+export function listTrades({ accountId = null, limit = null, withTags = true } = {}) {
   const params = [];
   let sql = `SELECT tr.*, a.name AS account_name, a.exchange AS account_exchange
              FROM trades tr JOIN accounts a ON a.id = tr.account_id
@@ -934,7 +1093,8 @@ export function listTrades({ accountId = null, limit = null } = {}) {
   if (accountId) { sql += ' AND tr.account_id = ?'; params.push(Number(accountId)); }
   sql += ' ORDER BY tr.close_time DESC, tr.id DESC';
   if (limit) { sql += ' LIMIT ?'; params.push(Number(limit)); }
-  return attachTagsToRows(all(sql, ...params));
+  const rows = all(sql, ...params);
+  return withTags ? attachTagsToRows(rows) : rows;
 }
 
 export function countTrades() {
@@ -946,11 +1106,175 @@ export function countTradesBySource(source) {
   return Number(get('SELECT COUNT(*) AS n FROM trades WHERE trashed_at IS NULL AND source = ?', String(source)).n);
 }
 
-export function countTradesBetween(fromIso, toIso) {
-  return Number(get(
-    'SELECT COUNT(*) AS n FROM trades WHERE trashed_at IS NULL AND close_time >= ? AND close_time <= ?',
-    String(fromIso), String(toIso),
-  ).n);
+/** 区间查询：复盘/日历只需要一个周期或一个月的交易，不应加载全部历史。 */
+export function listTradesBetween(fromIso, toIso, { accountId = null } = {}) {
+  const params = [String(fromIso), String(toIso)];
+  let sql = `SELECT tr.*, a.name AS account_name, a.exchange AS account_exchange
+             FROM trades tr JOIN accounts a ON a.id = tr.account_id
+             WHERE tr.trashed_at IS NULL AND tr.close_time >= ? AND tr.close_time <= ?`;
+  if (accountId) { sql += ' AND tr.account_id = ?'; params.push(Number(accountId)); }
+  sql += ' ORDER BY tr.close_time DESC, tr.id DESC';
+  return attachTagsToRows(all(sql, ...params));
+}
+
+export function countTradesBetween(fromIso, toIso, { accountId = null } = {}) {
+  const params = [String(fromIso), String(toIso)];
+  let sql = 'SELECT COUNT(*) AS n FROM trades WHERE trashed_at IS NULL AND close_time >= ? AND close_time <= ?';
+  if (accountId) { sql += ' AND account_id = ?'; params.push(Number(accountId)); }
+  return Number(get(sql, ...params).n);
+}
+
+/**
+ * 列表页筛选条件下沉到 SQL：与 stats.filterTrades 保持同一口径，
+ * 但只返回当前页（最多 1000 行），避免把整张 trades 表物化进 JS。
+ * 统计类页面走 analyzeCachedLazy；这里服务交易记录、API 列表与导出分批读取。
+ */
+function tradeFilterSql(filters = {}) {
+  const where = ['tr.trashed_at IS NULL'];
+  const params = [];
+  const accountId = filters.accountId ?? filters.account_id;
+  if (accountId && accountId !== 'all') {
+    const id = Number(accountId);
+    if (Number.isFinite(id)) {
+      where.push('tr.account_id = ?');
+      params.push(id);
+    } else {
+      where.push('0'); // 非法 account_id 与旧逻辑一致：返回空集
+    }
+  }
+  if (filters.market && filters.market !== 'all') {
+    where.push("COALESCE(NULLIF(tr.market, ''), 'futures') = ?");
+    params.push(String(filters.market));
+  }
+  if (filters.side && filters.side !== 'all') {
+    where.push('tr.side = ?');
+    params.push(String(filters.side));
+  }
+  if (filters.result === 'win') where.push('tr.pnl > 0');
+  else if (filters.result && filters.result !== 'all') where.push('tr.pnl <= 0');
+  if (filters.symbol && filters.symbol !== 'all') {
+    where.push('tr.symbol = ?');
+    params.push(String(filters.symbol));
+  }
+  if (filters.orderType && filters.orderType !== 'all') {
+    where.push("COALESCE(NULLIF(tr.order_type, ''), 'other') = ?");
+    params.push(String(filters.orderType));
+  }
+  if (filters.tag) {
+    where.push(`EXISTS (
+      SELECT 1 FROM trade_tags tt JOIN tags tg ON tg.id = tt.tag_id
+      WHERE tt.trade_id = tr.id AND tg.name = ?
+    )`);
+    params.push(String(filters.tag));
+  }
+  if (filters.note === 'yes') where.push("TRIM(COALESCE(tr.note, '')) <> ''");
+  else if (filters.note === 'no') where.push("TRIM(COALESCE(tr.note, '')) = ''");
+  if (filters.from) {
+    const start = localDayStartUtc(dayKeyOf(filters.from));
+    if (start) { where.push('tr.close_time >= ?'); params.push(start.toISOString()); }
+  }
+  if (filters.to) {
+    const end = localDayEndExclusiveUtc(dayKeyOf(filters.to));
+    if (end) { where.push('tr.close_time < ?'); params.push(end.toISOString()); }
+  }
+  if (filters.q) {
+    const kw = String(filters.q).trim().toLowerCase();
+    if (kw) {
+      // LIKE 的通配符必须转义，否则用户输入 % / _ 会变成模式匹配。
+      const like = `%${kw.replace(/[\\%_]/g, '\\$&')}%`;
+      where.push(`(
+        LOWER(tr.symbol) LIKE ? ESCAPE '\\'
+        OR LOWER(COALESCE(tr.note, '')) LIKE ? ESCAPE '\\'
+        OR EXISTS (
+          SELECT 1 FROM trade_tags tt JOIN tags tg ON tg.id = tt.tag_id
+          WHERE tt.trade_id = tr.id AND LOWER(tg.name) LIKE ? ESCAPE '\\'
+        )
+      )`);
+      params.push(like, like, like);
+    }
+  }
+  return { whereSql: where.join(' AND '), params };
+}
+
+const TRADE_SORTS = {
+  time: 'tr.close_time DESC, tr.id DESC',
+  timeAsc: 'tr.close_time ASC, tr.id ASC',
+  pnl: 'tr.pnl DESC, tr.close_time DESC, tr.id DESC',
+  // julianday 的浮点尾差会让“同为 2 小时”的交易日排序漂移，统一取整到毫秒。
+  duration: 'CAST(ROUND((julianday(tr.close_time) - julianday(tr.open_time)) * 86400000) AS INTEGER) DESC, tr.close_time DESC, tr.id DESC',
+  size: 'tr.notional DESC, tr.close_time DESC, tr.id DESC',
+};
+
+export function countTradesFiltered(filters = {}) {
+  const { whereSql, params } = tradeFilterSql(filters);
+  return Number(get(`SELECT COUNT(*) AS n FROM trades tr WHERE ${whereSql}`, ...params).n);
+}
+
+export function listTradesPage(filters = {}, { limit = 50, offset = 0, withTags = true } = {}) {
+  const { whereSql, params } = tradeFilterSql(filters);
+  const lim = Math.min(Math.max(Number(limit) || 50, 1), 1000);
+  const off = Math.max(Number(offset) || 0, 0);
+  const order = TRADE_SORTS[filters.sort] || TRADE_SORTS.time;
+  const rows = all(
+    `SELECT tr.*, a.name AS account_name, a.exchange AS account_exchange
+     FROM trades tr JOIN accounts a ON a.id = tr.account_id
+     WHERE ${whereSql}
+     ORDER BY ${order}
+     LIMIT ? OFFSET ?`,
+    ...params, lim, off,
+  );
+  return withTags ? attachTagsToRows(rows) : rows;
+}
+
+/** 列表页 symbol 下拉：只取去重后的符号，不拉交易明细。 */
+export function listTradeSymbols(accountId = null) {
+  const params = [];
+  let sql = 'SELECT DISTINCT symbol FROM trades WHERE trashed_at IS NULL';
+  if (accountId && accountId !== 'all') {
+    const id = Number(accountId);
+    if (!Number.isFinite(id)) return [];
+    sql += ' AND account_id = ?';
+    params.push(id);
+  }
+  sql += ' ORDER BY symbol';
+  return all(sql, ...params).map((r) => r.symbol);
+}
+
+/** 列表页复盘覆盖率：聚合查询，避免为两个数字加载全表。 */
+export function tradeNoteCoverage(accountId = null) {
+  const params = [];
+  let sql = `SELECT COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN TRIM(COALESCE(note, '')) <> '' THEN 1 ELSE 0 END), 0) AS noted
+             FROM trades WHERE trashed_at IS NULL`;
+  if (accountId && accountId !== 'all') {
+    const id = Number(accountId);
+    if (!Number.isFinite(id)) return { total: 0, noted: 0, ratio: 0 };
+    sql += ' AND account_id = ?';
+    params.push(id);
+  }
+  const row = get(sql, ...params);
+  const total = Number(row?.total) || 0;
+  const noted = Number(row?.noted) || 0;
+  return { total, noted, ratio: total ? noted / total : 0 };
+}
+
+/**
+ * 数据版本指纹：analyze 等重计算结果的缓存失效键。
+ * 单次聚合查询，代价远低于全量统计；覆盖行数、盈亏总和、最近更新时间、
+ * 垃圾箱数量与标签挂载数。标签改名不产生新行（盲区仅限标签分组显示名），
+ * 属可接受的取舍。
+ */
+export function tradesVersion() {
+  const row = get(`
+    SELECT COUNT(*) AS n,
+           COALESCE(MAX(id), 0) AS max_id,
+           COALESCE(SUM(ROUND(pnl * 100)), 0) AS pnl_sum,
+           COALESCE(MAX(updated_at), '') AS last_update,
+           COALESCE(MAX(note_updated_at), '') AS last_note,
+           (SELECT COUNT(*) FROM trades WHERE trashed_at IS NOT NULL) AS trashed,
+           (SELECT COUNT(*) FROM trade_tags) AS tag_links
+     FROM trades`);
+  return `${row.n}|${row.max_id}|${row.pnl_sum}|${row.last_update}|${row.last_note}|${row.trashed}|${row.tag_links}`;
 }
 
 export function getTrade(id) {
@@ -969,6 +1293,13 @@ function tradeColumns() {
     'entry_price', 'exit_price', 'open_time', 'close_time', 'pnl', 'fee', 'funding',
     'source', 'market', 'note', 'note_updated_at',
   ];
+}
+
+/** 纪律标记：仅接受 1（按计划）/ 0（违反）/ null（未标记） */
+function followedPlanOf(input) {
+  if (input.followed_plan === undefined) return undefined;
+  if (input.followed_plan === null || input.followed_plan === '') return null;
+  return Number(input.followed_plan) === 1 ? 1 : 0;
 }
 
 export function createTrade(input, { accountId } = {}) {
@@ -1005,6 +1336,8 @@ export function createTrade(input, { accountId } = {}) {
     ...values,
   );
   const id = Number(r.lastInsertRowid);
+  const plan = followedPlanOf(input);
+  if (plan !== undefined) run('UPDATE trades SET followed_plan = ? WHERE id = ?', plan, id);
   if (Array.isArray(input.tags) && input.tags.length) setTradeTags(id, input.tags);
   return id;
 }
@@ -1018,6 +1351,7 @@ export function updateTrade(id, input) {
   };
   const at = nowIso();
   const noteChanged = input.note !== undefined && String(input.note || '') !== String(current.note || '');
+  const plan = followedPlanOf(input);
   run(
     `UPDATE trades SET account_id = ?, symbol = ?, side = ?, order_type = ?, size = ?, notional = ?,
        entry_price = ?, exit_price = ?, open_time = ?, close_time = ?, pnl = ?, fee = ?, funding = ?,
@@ -1040,6 +1374,7 @@ export function updateTrade(id, input) {
     at,
     Number(id),
   );
+  if (plan !== undefined) run('UPDATE trades SET followed_plan = ? WHERE id = ?', plan, Number(id));
   if (Array.isArray(input.tags)) setTradeTags(id, input.tags);
   return getTrade(id);
 }
@@ -1075,14 +1410,25 @@ export function restoreTrade(id) {
   run('UPDATE trades SET trashed_at = NULL, updated_at = ? WHERE id = ?', nowIso(), Number(id));
 }
 
-export function listTrashedTrades({ limit = 200 } = {}) {
-  return all(
-    `SELECT tr.*, a.name AS account_name, a.exchange AS account_exchange
+export function listTrashedTrades({ limit = 200, q = '' } = {}) {
+  const base = `SELECT tr.*, a.name AS account_name, a.exchange AS account_exchange
        FROM trades tr JOIN accounts a ON a.id = tr.account_id
-      WHERE tr.trashed_at IS NOT NULL
-      ORDER BY tr.trashed_at DESC, tr.id DESC
-      LIMIT ?`,
-    Math.min(Math.max(Number(limit) || 200, 1), 500),
+      WHERE tr.trashed_at IS NOT NULL`;
+  const kw = String(q || '').trim();
+  if (!kw) {
+    return all(
+      `${base} ORDER BY tr.trashed_at DESC, tr.id DESC LIMIT ?`,
+      Math.min(Math.max(Number(limit) || 200, 1), 500),
+    );
+  }
+  // 搜索覆盖整个垃圾箱，不套用无关键词时的展示上限；通配符按字面匹配
+  const like = `%${kw.replace(/[\\%_]/g, '\\$&')}%`;
+  return all(
+    `${base} AND (tr.symbol LIKE ? ESCAPE '\\'
+        OR IFNULL(tr.note, '') LIKE ? ESCAPE '\\'
+        OR IFNULL(a.name, '') LIKE ? ESCAPE '\\')
+      ORDER BY tr.trashed_at DESC, tr.id DESC`,
+    like, like, like,
   );
 }
 
@@ -1090,10 +1436,60 @@ export function countTrashedTrades() {
   return Number(get('SELECT COUNT(*) AS n FROM trades WHERE trashed_at IS NOT NULL').n) || 0;
 }
 
+/* ---------------- 错过交易记录 ---------------- */
+
+export const MISSED_STATUSES = ['open', 'win', 'lose', 'expired'];
+const MISSED_STATUS_LABEL = { open: '观察中', win: '方向对', lose: '方向错', expired: '过期' };
+
+/** 假想盈亏比：按方向计算 目标距离 ÷ 止损距离；分母为 0 或价格缺失时返回 null */
+export function missedRr(row) {
+  const entry = Number(row.entry_price);
+  const stop = Number(row.stop_price);
+  const target = Number(row.target_price);
+  if (!(entry > 0) || !(stop > 0) || !(target > 0)) return null;
+  const denom = row.direction === 'short' ? stop - entry : entry - stop;
+  const reward = row.direction === 'short' ? entry - target : target - entry;
+  if (!(denom > 0)) return null;
+  return reward / denom;
+}
+
+export function listMissedTrades({ limit = 200 } = {}) {
+  return all(`SELECT * FROM missed_trades ORDER BY id DESC LIMIT ?`, Number(limit) || 200)
+    .map((r) => ({ ...r, statusLabel: MISSED_STATUS_LABEL[r.status] || r.status, rr: missedRr(r) }));
+}
+
+export function createMissedTrade({ symbol, direction, entryPrice, stopPrice, targetPrice, note }) {
+  const row = {
+    symbol: String(symbol || '').trim().toUpperCase(),
+    direction: direction === 'short' ? 'short' : 'long',
+    entry_price: Number(entryPrice) || null,
+    stop_price: Number(stopPrice) || null,
+    target_price: Number(targetPrice) || null,
+    note: String(note || '').slice(0, 2000),
+  };
+  if (!row.symbol) throw new Error('币种不能为空');
+  const at = nowIso();
+  const r = run(
+    `INSERT INTO missed_trades (symbol, direction, entry_price, stop_price, target_price, note, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+    row.symbol, row.direction, row.entry_price, row.stop_price, row.target_price, row.note, at, at,
+  );
+  return Number(r.lastInsertRowid);
+}
+
+export function setMissedTradeStatus(id, status) {
+  if (!MISSED_STATUSES.includes(String(status))) throw new Error(`未知状态：${status}`);
+  run('UPDATE missed_trades SET status = ?, updated_at = ? WHERE id = ?', String(status), nowIso(), Number(id));
+}
+
+export function deleteMissedTrade(id) {
+  run('DELETE FROM missed_trades WHERE id = ?', Number(id));
+}
+
 /** 批量导入（带事务、去重、标签） */
 export function importTrades(trades, accountId, { upsert = false } = {}) {
   const at = nowIso();
-  return tx((db) => {
+  const result = tx((db) => {
     let inserted = 0;
     let skipped = 0;
     let updated = 0;
@@ -1217,6 +1613,10 @@ export function importTrades(trades, accountId, { upsert = false } = {}) {
     }
     return { inserted, skipped, updated };
   });
+  // 交易落库后尝试归档挂起的持仓笔记（本函数在 sync/csv/重建三条管道都被调用）。
+  // 必须在事务外执行：archivePositionNotes 内部自开事务。
+  archivePositionNotes(accountId);
+  return result;
 }
 
 /* ---------------- 标签 ---------------- */
@@ -1625,36 +2025,51 @@ export function listImports(limit = 20) {
 
 /* ---------------- 周期报告 AI 生成记录 ---------------- */
 
-export function saveReportGeneration({ periodKind, periodLabel, prompt, content, model = null, trades = 0 }) {
+export function saveReportGeneration({ accountId = null, periodKind, periodLabel, prompt, content, model = null, trades = 0 }) {
   const r = run(
-    `INSERT INTO report_generations (period_kind, period_label, prompt, content, model, trades, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO report_generations (account_id, period_kind, period_label, prompt, content, model, trades, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    accountId === null || accountId === undefined ? null : Number(accountId),
     String(periodKind), String(periodLabel), String(prompt || ''), String(content || ''),
     model ? String(model).slice(0, 120) : null, Number(trades) || 0, nowIso(),
   );
   return Number(r.lastInsertRowid);
 }
 
-export function latestReportGeneration(periodKind, periodLabel) {
+export function latestReportGeneration(periodKind, periodLabel, accountId = null) {
   return get(
     `SELECT * FROM report_generations
-      WHERE period_kind = ? AND period_label = ?
+      WHERE period_kind = ? AND period_label = ? AND account_id IS ?
       ORDER BY id DESC LIMIT 1`,
     String(periodKind), String(periodLabel),
+    accountId === null || accountId === undefined ? null : Number(accountId),
   ) || null;
 }
 
-export function listReportGenerations(periodKind = null, limit = 30) {
+export function listReportGenerations(periodKind = null, limit = 30, accountId = undefined) {
   const params = [];
-  let sql = 'SELECT id, period_kind, period_label, model, trades, created_at, LENGTH(content) AS content_len FROM report_generations';
-  if (periodKind) { sql += ' WHERE period_kind = ?'; params.push(String(periodKind)); }
-  sql += ' ORDER BY id DESC LIMIT ?';
+  let sql = `SELECT rg.id, rg.account_id, a.name AS account_name,
+                    rg.period_kind, rg.period_label, rg.model, rg.trades, rg.created_at,
+                    LENGTH(rg.content) AS content_len
+             FROM report_generations rg LEFT JOIN accounts a ON a.id = rg.account_id`;
+  const where = [];
+  if (periodKind) { where.push('rg.period_kind = ?'); params.push(String(periodKind)); }
+  if (accountId !== undefined) {
+    where.push('rg.account_id IS ?');
+    params.push(accountId === null ? null : Number(accountId));
+  }
+  if (where.length) sql += ' WHERE ' + where.join(' AND ');
+  sql += ' ORDER BY rg.id DESC LIMIT ?';
   params.push(Number(limit) || 30);
   return all(sql, ...params);
 }
 
 export function getReportGeneration(id) {
-  return get('SELECT * FROM report_generations WHERE id = ?', Number(id)) || null;
+  return get(
+    `SELECT rg.*, a.name AS account_name FROM report_generations rg
+     LEFT JOIN accounts a ON a.id = rg.account_id WHERE rg.id = ?`,
+    Number(id),
+  ) || null;
 }
 
 export function deleteReportGeneration(id) {
@@ -1666,11 +2081,12 @@ export function deleteReportGeneration(id) {
 const reportJobs = new Map(); // jobId -> { id, status, period, label, startedAt, finishedAt, error, reportId }
 let reportJobSeq = 0;
 
-export function createReportJob({ periodKind, periodLabel, promptLen }) {
+export function createReportJob({ accountId = null, periodKind, periodLabel, promptLen }) {
   reportJobSeq += 1;
   const job = {
     id: `rj-${Date.now()}-${reportJobSeq}`,
     status: 'running',
+    accountId: accountId === null || accountId === undefined ? null : Number(accountId),
     periodKind: String(periodKind),
     periodLabel: String(periodLabel),
     promptLen: Number(promptLen) || 0,
@@ -1740,8 +2156,19 @@ export function clearDemoData() {
 
 export function clearAllData() {
   tx((db) => {
-    db.exec('DELETE FROM spot_fills; DELETE FROM spot_cost_basis; DELETE FROM spot_balances; DELETE FROM spot_holdings; DELETE FROM transfers; DELETE FROM funding_events; DELETE FROM balances; DELETE FROM positions; DELETE FROM resources; DELETE FROM sync_runs; DELETE FROM import_templates; DELETE FROM trade_tags; DELETE FROM trades; DELETE FROM tags; DELETE FROM notes; DELETE FROM imports; DELETE FROM sessions; DELETE FROM asset_positions; DELETE FROM manual_assets; DELETE FROM asset_snapshots; DELETE FROM asset_sync_runs; DELETE FROM prices; DELETE FROM wallets; DELETE FROM wallet_providers; DELETE FROM accounts;');
-    try { db.exec("DELETE FROM sqlite_sequence WHERE name IN ('trades','accounts','tags','notes','imports','sync_runs','import_templates','funding_events','transfers','wallets','manual_assets','asset_positions','asset_sync_runs')"); } catch { /* 没有 AUTOINCREMENT 表 */ }
+    // 先删子表再删父表；成交缓存、错失记录、AI 报告、现货日志与 meta（含密钥/设置）
+    // 也必须清掉，否则“清空全部数据”后旧记录仍会通过 id 复用或统计缓存复活。
+    db.exec(`DELETE FROM spot_log;
+      DELETE FROM spot_fills; DELETE FROM spot_cost_basis; DELETE FROM spot_balances; DELETE FROM spot_holdings;
+      DELETE FROM transfers; DELETE FROM funding_events; DELETE FROM balances; DELETE FROM positions;
+      DELETE FROM position_notes; DELETE FROM resources; DELETE FROM sync_runs; DELETE FROM import_templates;
+      DELETE FROM trade_tags; DELETE FROM trade_curves; DELETE FROM trade_fills_cache; DELETE FROM trade_fills;
+      DELETE FROM missed_trades; DELETE FROM report_generations;
+      DELETE FROM trades; DELETE FROM tags; DELETE FROM notes; DELETE FROM imports; DELETE FROM sessions;
+      DELETE FROM asset_positions; DELETE FROM manual_assets; DELETE FROM asset_snapshots; DELETE FROM asset_sync_runs;
+      DELETE FROM prices; DELETE FROM wallets; DELETE FROM wallet_providers; DELETE FROM accounts;
+      DELETE FROM meta;`);
+    try { db.exec('DELETE FROM sqlite_sequence'); } catch { /* 没有 AUTOINCREMENT 表 */ }
   });
 }
 
@@ -2152,7 +2579,8 @@ export function listPrices(limit = 500) {
   return all('SELECT * FROM prices ORDER BY asset ASC LIMIT ?', Math.max(1, Number(limit) || 500));
 }
 
-export function exportAll() {
+/** 全量导出中 trades 之前/之后的表；trades 单独流式输出。 */
+function exportAllHead() {
   return {
     exported_at: nowIso(),
     accounts: listAccounts(),
@@ -2163,7 +2591,11 @@ export function exportAll() {
     asset_snapshots: listAssetSnapshots(2000),
     asset_sync_runs: listAssetSyncRuns(1000),
     prices: listPrices(2000),
-    trades: listTrades(),
+  };
+}
+
+function exportAllTail() {
+  return {
     tags: listTags(),
     notes: listNotes(),
     imports: listImports(1000),
@@ -2178,26 +2610,97 @@ export function exportAll() {
   };
 }
 
-/** 导出为可再次导入的 CSV */
-export function exportTradesCsv() {
-  const rows = listTrades();
-  const headers = [
-    'symbol', 'side', 'order_type', 'size', 'notional', 'entry_price', 'exit_price',
-    'open_time', 'close_time', 'pnl', 'fee', 'funding', 'external_id', 'tags', 'note',
-  ];
-  const esc = (v) => {
-    let s = String(v ?? '');
-    // 防 CSV 公式注入：电子表格会把 =+-@ 开头的单元格当公式执行
-    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
-    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+export function exportAll() {
+  return {
+    ...exportAllHead(),
+    trades: listTrades(),
+    ...exportAllTail(),
   };
-  const lines = [headers.join(',')];
-  for (const t of [...rows].reverse()) {
-    lines.push([
-      t.symbol, t.side, t.order_type, t.size, t.notional, t.entry_price, t.exit_price,
-      t.open_time, t.close_time, t.pnl, t.fee, t.funding, t.external_id || '',
-      (t.tags || []).join(';'), t.note || '',
-    ].map(esc).join(','));
+}
+
+function jsonIndented(value, spaces) {
+  return JSON.stringify(value, null, 2).replace(/\n/g, `\n${' '.repeat(spaces)}`);
+}
+
+/**
+ * JSON 全量导出流：trades 按 1000 行分批查询，其余表逐表输出。
+ * 输出仍是合法 JSON，可直接导入；避免 JSON.stringify(exportAll()) 的峰值内存翻倍。
+ */
+export async function* exportAllJsonChunks() {
+  yield '{\n';
+  let first = true;
+  for (const [key, value] of Object.entries(exportAllHead())) {
+    yield `${first ? '' : ',\n'}  ${JSON.stringify(key)}: ${jsonIndented(value, 2)}`;
+    first = false;
   }
+
+  yield `${first ? '' : ',\n'}  "trades": [`;
+  const total = countTrades();
+  const batch = 1000;
+  let emitted = 0;
+  for (let offset = 0; offset < total; offset += batch) {
+    const rows = listTradesPage({}, { limit: batch, offset });
+    for (const row of rows) {
+      yield `${emitted === 0 ? '' : ','}\n    ${jsonIndented(row, 4)}`;
+      emitted += 1;
+    }
+  }
+  yield '\n  ]';
+
+  for (const [key, value] of Object.entries(exportAllTail())) {
+    yield `,\n  ${JSON.stringify(key)}: ${jsonIndented(value, 2)}`;
+  }
+  yield '\n}\n';
+}
+
+/** 导出为可再次导入的 CSV */
+const CSV_HEADERS = [
+  'symbol', 'side', 'order_type', 'size', 'notional', 'entry_price', 'exit_price',
+  'open_time', 'close_time', 'pnl', 'fee', 'funding', 'external_id', 'tags', 'note',
+];
+
+function csvCell(v) {
+  let s = String(v ?? '');
+  // 防 CSV 公式注入：电子表格会把 =+-@ 开头的单元格当公式执行
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function tradeCsvLine(t) {
+  return [
+    t.symbol, t.side, t.order_type, t.size, t.notional, t.entry_price, t.exit_price,
+    t.open_time, t.close_time, t.pnl, t.fee, t.funding, t.external_id || '',
+    (t.tags || []).join(';'), t.note || '',
+  ].map(csvCell).join(',');
+}
+
+/**
+ * 导出交易 CSV。query 传入 URL 过滤参数（account_id/market/side/result/symbol/
+ * order_type/tag/note/from/to/q，与列表页同口径）；缺省导出全部。
+ * JSON 全量备份不走这里——备份必须完整，不做过滤。
+ */
+export function exportTradesCsv(query = null) {
+  const rows = query ? filterTrades(listTrades(), query) : listTrades();
+  const lines = [CSV_HEADERS.join(',')];
+  for (const t of [...rows].reverse()) lines.push(tradeCsvLine(t));
   return lines.join('\n');
+}
+
+/**
+ * CSV 流式导出：按 1000 行分批查询，避免一次性物化全表 + 拼接大字符串。
+ * 时间排序走 SQL 升序（等价于旧实现的反转）；其他排序保留旧路径以保证顺序一致。
+ */
+export async function* exportTradesCsvChunks(query = {}) {
+  const q = query || {};
+  if (q.sort && q.sort !== 'time') {
+    for (const line of exportTradesCsv(q).split('\n')) yield line;
+    return;
+  }
+  yield CSV_HEADERS.join(',');
+  const total = countTradesFiltered(q);
+  const batch = 1000;
+  for (let offset = 0; offset < total; offset += batch) {
+    const rows = listTradesPage({ ...q, sort: 'timeAsc' }, { limit: batch, offset });
+    for (const t of rows) yield tradeCsvLine(t);
+  }
 }

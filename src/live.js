@@ -58,6 +58,8 @@ export async function refreshLive({ force = false } = {}) {
       }
     }
     const updatedAt = new Date().toISOString();
+    // 刚写完的快照即最新持仓状态：持仓消失的挂起笔记在这里被识别为已平仓
+    store.archivePositionNotes();
     const snapshot = {
       updatedAt,
       hasRealAccounts: accounts.length > 0,
@@ -66,6 +68,7 @@ export async function refreshLive({ force = false } = {}) {
       positions: store.listPositions(),
       spotBalances: store.listSpotBalances(),
       spotHoldings: store.listSpotHoldings(),
+      positionNotes: store.listPositionNotes(),
       errors,
     };
     cache = snapshot;
@@ -99,6 +102,7 @@ export function liveSnapshot() {
     positions,
     spotBalances,
     spotHoldings,
+    positionNotes: store.listPositionNotes(),
     errors: [],
     cached: true,
   };

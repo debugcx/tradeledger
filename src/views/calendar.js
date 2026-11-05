@@ -1,12 +1,11 @@
 import { escapeHtml as e, fmtMoney, fmtNum, fmtPct } from '../http.js';
+import { localDayKey } from '../stats.js';
 import { shell } from './layout.js';
 
 const sign = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : 'flat');
 const pad = (n) => String(n).padStart(2, '0');
-const localKey = (iso) => {
-  const d = new Date(iso);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-};
+// 与日期筛选/统计共用同一个业务时区口径（TRADELEDGER_TZ）。
+const localKey = (iso) => localDayKey(iso);
 
 /** 日历按本地日期聚合；收益数字与列表页的日期筛选一致 */
 function buildDaily(trades) {

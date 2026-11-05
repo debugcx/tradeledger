@@ -126,7 +126,7 @@ function previewForm({ headers, mapping, trades, errors, rawText, accountId, tzO
             <option value="roundtrip" ${mode !== 'fills' ? 'selected' : ''}>已平仓交易（一行一笔）</option>
             <option value="fills" ${mode === 'fills' ? 'selected' : ''}>逐笔成交（自动 FIFO 配对）</option>
           </select>
-          <div class="muted small">改成逐笔成交后，点下方「重新解析预览」再确认</div>
+          <div class="muted small">改成逐笔成交后，点下方「重新解析预览」再确认${mode === 'fills' && market !== 'spot' ? '。合约逐笔成交在提交时会先入库，再按该账户全部历史成交重算回合——预览只按本文件配对，实际结果可能更完整（补齐之前文件未闭合的回合）' : ''}</div>
         </label>
         ${FIELD_DEFS.map((f) => mappingSelect(f, headers, mapping)).join('')}
         <label class="field wide"><span>保存当前映射为模板（可选）</span>

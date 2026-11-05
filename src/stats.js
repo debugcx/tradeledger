@@ -13,8 +13,14 @@ export const mean = (arr, f = (x) => x) => (arr.length ? sum(arr, f) / arr.lengt
 
 export const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
+const DURATIONS = new WeakMap();
 export function durationOf(trade) {
-  return new Date(trade.close_time).getTime() - new Date(trade.open_time).getTime();
+  let v = DURATIONS.get(trade);
+  if (v === undefined) {
+    v = new Date(trade.close_time).getTime() - new Date(trade.open_time).getTime();
+    DURATIONS.set(trade, v);
+  }
+  return v;
 }
 
 /* ---------------- 时区口径 ----------------
@@ -26,20 +32,40 @@ const TZ = (() => {
   if (!tz) return '';
   try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return tz; } catch { return ''; }
 })();
-const ZONED_FMT = TZ
-  ? new Intl.DateTimeFormat('en-US', {
-      timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', hourCycle: 'h23', weekday: 'short',
-    })
-  : null;
-const WD_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 const pad2 = (n) => String(n).padStart(2, '0');
+const OFFSET_FMT = TZ
+  ? new Intl.DateTimeFormat('en-US', { timeZone: TZ, timeZoneName: 'longOffset' })
+  : null;
+
+/** 指定时刻在业务时区相对 UTC 的偏移（毫秒） */
+function zoneOffsetMs(date) {
+  if (!OFFSET_FMT) return -date.getTimezoneOffset() * 60000;
+  const name = OFFSET_FMT.formatToParts(date).find((p) => p.type === 'timeZoneName')?.value || '';
+  const m = /GMT([+-])(\d{1,2})(?::(\d{2}))?/.exec(name);
+  if (!m) return 0;
+  const sign = m[1] === '-' ? -1 : 1;
+  return sign * (Number(m[2]) * 60 + Number(m[3] || 0)) * 60000;
+}
+
+// Intl.formatToParts 单次约 10µs；10 万笔交易逐笔调用会占掉 analyze 大半时间。
+// 时区偏移按 UTC 小时缓存（一年约 8760 个桶），常规情况下偏移在整点内不变。
+const OFFSET_CACHE = new Map();
+function zoneOffsetCached(date) {
+  const bucket = Math.floor(date.getTime() / 3600_000);
+  let offset = OFFSET_CACHE.get(bucket);
+  if (offset === undefined) {
+    offset = zoneOffsetMs(date);
+    if (OFFSET_CACHE.size > 20_000) OFFSET_CACHE.clear();
+    OFFSET_CACHE.set(bucket, offset);
+  }
+  return offset;
+}
 
 /** 返回 {dayKey, monthKey, hour, weekday}；无效日期返回 null */
 function zonedOf(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;
-  if (!ZONED_FMT) {
+  if (!TZ) {
     return {
       dayKey: `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`,
       monthKey: `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`,
@@ -47,13 +73,12 @@ function zonedOf(iso) {
       weekday: d.getDay(),
     };
   }
-  const parts = {};
-  for (const p of ZONED_FMT.formatToParts(d)) parts[p.type] = p.value;
+  const local = new Date(d.getTime() + zoneOffsetCached(d));
   return {
-    dayKey: `${parts.year}-${parts.month}-${parts.day}`,
-    monthKey: `${parts.year}-${parts.month}`,
-    hour: Number(parts.hour) % 24,
-    weekday: WD_INDEX[parts.weekday] ?? 0,
+    dayKey: `${local.getUTCFullYear()}-${pad2(local.getUTCMonth() + 1)}-${pad2(local.getUTCDate())}`,
+    monthKey: `${local.getUTCFullYear()}-${pad2(local.getUTCMonth() + 1)}`,
+    hour: local.getUTCHours(),
+    weekday: local.getUTCDay(),
   };
 }
 
@@ -61,6 +86,45 @@ function zonedOf(iso) {
 export function localDayKey(iso) {
   const z = zonedOf(iso);
   return z ? z.dayKey : String(iso).slice(0, 10);
+}
+
+/** 日期入参归一化：允许 YYYY-MM-DD 或带时间的 ISO，统一返回本地日键。 */
+export function dayKeyOf(value) {
+  const s = String(value || '').trim();
+  if (!s) return '';
+  return s.length > 10 ? localDayKey(s) : s.slice(0, 10);
+}
+
+/** 本地日 00:00 对应的 UTC 时刻（无 TRADELEDGER_TZ 时按服务器本地时区）。 */
+export function localDayStartUtc(dayKey) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dayKey || ''));
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  // 拒绝 2026-02-31 这类会被 Date 自动进位的日期。
+  const probe = new Date(Date.UTC(y, mo - 1, d));
+  if (probe.getUTCFullYear() !== y || probe.getUTCMonth() !== mo - 1 || probe.getUTCDate() !== d) return null;
+  if (!TZ) return new Date(y, mo - 1, d);
+  const base = Date.UTC(y, mo - 1, d);
+  let ts = base;
+  // 用两次迭代收敛 DST 边界：偏移量本身取决于估算出的 UTC 时刻。
+  for (let i = 0; i < 3; i++) {
+    const next = base - zoneOffsetMs(new Date(ts));
+    if (next === ts) break;
+    ts = next;
+  }
+  return new Date(ts);
+}
+
+/** 本地日次日 00:00 对应的 UTC 时刻（SQL 用半开区间）。 */
+export function localDayEndExclusiveUtc(dayKey) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dayKey || ''));
+  if (!m) return null;
+  const next = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + 1));
+  return localDayStartUtc(
+    `${next.getUTCFullYear()}-${pad2(next.getUTCMonth() + 1)}-${pad2(next.getUTCDate())}`,
+  );
 }
 
 /** 本地月份键：YYYY-MM */
@@ -76,14 +140,17 @@ function winRateOf(list) {
 
 function streaks(sortedAsc) {
   let maxWin = 0, maxLoss = 0, curWin = 0, curLoss = 0;
+  let curLossList = [], maxLossList = [];
   for (const t of sortedAsc) {
     if (t.pnl > 0) {
-      curWin += 1; curLoss = 0; maxWin = Math.max(maxWin, curWin);
+      curWin += 1; curLoss = 0; curLossList = []; maxWin = Math.max(maxWin, curWin);
     } else {
-      curLoss += 1; curWin = 0; maxLoss = Math.max(maxLoss, curLoss);
+      curLoss += 1; curWin = 0; curLossList.push(t);
+      if (curLoss > maxLoss) { maxLoss = curLoss; maxLossList = curLossList; }
     }
   }
-  return { maxConsecutiveWin: maxWin, maxConsecutiveLoss: maxLoss };
+  // 并列的最长连亏取先出现的那段
+  return { maxConsecutiveWin: maxWin, maxConsecutiveLoss: maxLoss, maxLossStreakTrades: maxLossList };
 }
 
 function sideBlock(list, total) {
@@ -133,9 +200,21 @@ export const SIZE_BUCKETS = [
   { label: '> $100k', min: 100000, max: Infinity },
 ];
 
+/** 平仓时间/持仓时长的毫秒缓存：排序与分桶逐笔 new Date 很贵。
+ *  用 WeakMap 而不是给行对象加下划线字段，避免缓存字段泄漏到导出/响应里。 */
+const CLOSE_TS = new WeakMap();
+function closeTs(t) {
+  let v = CLOSE_TS.get(t);
+  if (v === undefined) {
+    v = new Date(t.close_time).getTime();
+    CLOSE_TS.set(t, v);
+  }
+  return v;
+}
+
 export function analyze(trades) {
   const all = trades || [];
-  const sorted = [...all].sort((a, b) => new Date(a.close_time) - new Date(b.close_time));
+  const sorted = [...all].sort((a, b) => closeTs(a) - closeTs(b));
   const total = sorted.length;
 
   const wins = sorted.filter((t) => t.pnl > 0);
@@ -158,12 +237,14 @@ export function analyze(trades) {
     bigLossCount: losses.length ? Math.max(1, Math.ceil(losses.length * 0.05)) : 0,
     bigLossSum: 0,
     bigLossVsProfit: grossWin > 0 ? 0 : null,
+    bigLossTrades: [],
     lossDurationMs: losses.length ? mean(losses, durationOf) : 0,
     winDurationMs: wins.length ? mean(wins, durationOf) : 0,
   };
   {
     const worst = [...losses].sort((a, b) => a.pnl - b.pnl).slice(0, behavior.bigLossCount);
     behavior.bigLossSum = Math.abs(sum(worst, (t) => t.pnl));
+    behavior.bigLossTrades = worst;
     if (grossWin > 0) behavior.bigLossVsProfit = behavior.bigLossSum / grossWin;
   }
 
@@ -195,20 +276,43 @@ export function analyze(trades) {
   const daily = [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date));
   for (const d of daily) d.winRate = d.trades ? d.wins / d.trades : 0;
 
+  // 盈利集中度：最大的盈利日占总盈利日的比例（1 = 全部利润来自一天，
+  // 是「优势靠运气」的信号；供 Edge Score 的一致性分量使用）
+  const winningDays = daily.filter((d) => d.pnl > 0);
+  const winningDaysPnl = winningDays.reduce((a, d) => a + d.pnl, 0);
+  const profitConcentration = winningDays.length
+    ? Math.max(...winningDays.map((d) => d.pnl)) / winningDaysPnl
+    : 0;
+
   /* ---------- 累计盈亏与回撤 ---------- */
   let cum = 0, peak = 0, maxDd = 0, maxDdPct = 0;
+  let peakDay = null, troughDay = null, ddPeakDay = null;
   const cumulative = [];
   const drawdown = [];
   for (const d of daily) {
     cum += d.pnl;
-    peak = Math.max(peak, cum);
+    // >=：peak 停留在最后一次触及峰值的交易日
+    if (cum >= peak) { peak = cum; peakDay = d.date; }
     const dd = peak - cum;
     const ddPct = peak !== 0 ? dd / Math.abs(peak) : 0;
-    if (dd > maxDd) maxDd = dd;
+    // 快照当时（谷底之前）的峰值日：之后创新高会覆盖 peakDay，不能直接用
+    if (dd > maxDd) { maxDd = dd; troughDay = d.date; ddPeakDay = peakDay; }
     if (ddPct > maxDdPct) maxDdPct = ddPct;
     cumulative.push({ date: d.date, value: cum });
     drawdown.push({ date: d.date, value: dd, peak });
   }
+  // 最大回撤窗口：峰值日 → 谷底日（按本地日），以及窗口内平仓的全部交易
+  const ddFrom = ddPeakDay || days[0] || null;
+  const ddWindow = maxDd > 0 && ddFrom && troughDay
+    ? {
+        from: ddFrom,
+        to: troughDay,
+        trades: sorted.filter((t, i) => {
+          const k = zone[i].dayKey;
+          return k >= ddFrom && k <= troughDay;
+        }),
+      }
+    : null;
 
   /* ---------- 按小时 / 星期 ---------- */
   const hourBuckets = Array.from({ length: 24 }, (_, hour) => ({
@@ -369,6 +473,21 @@ export function analyze(trades) {
   const longs = sided.filter((t) => t.side === 'long');
   const shorts = sided.filter((t) => t.side === 'short');
 
+  /* ---------- 纪律对比（按计划执行标记） ---------- */
+  // 注意 Number(null) === 0：必须先把 null 归一成 null，否则未标记会被算进违反计划
+  const planOf = (t) => (t.followed_plan == null ? null : Number(t.followed_plan));
+  const planBlock = (list) => ({
+    count: list.length,
+    winRate: winRateOf(list),
+    pnl: sum(list, (t) => t.pnl),
+    avgPnl: list.length ? sum(list, (t) => t.pnl) / list.length : 0,
+  });
+  const adherence = {
+    marked: sorted.filter((t) => planOf(t) === 1 || planOf(t) === 0).length,
+    planned: planBlock(sorted.filter((t) => planOf(t) === 1)),
+    violated: planBlock(sorted.filter((t) => planOf(t) === 0)),
+  };
+
   return {
     total,
     wins: wins.length,
@@ -393,7 +512,7 @@ export function analyze(trades) {
     shorts: sideBlock(shorts, total),
     daily,
     cumulative,
-    drawdown: { maxDrawdown: maxDd, maxDrawdownPct: maxDdPct, series: drawdown },
+    drawdown: { maxDrawdown: maxDd, maxDrawdownPct: maxDdPct, series: drawdown, window: ddWindow },
     hourBuckets,
     weekdayBuckets,
     hourWeekday,
@@ -408,7 +527,30 @@ export function analyze(trades) {
     symbols,
     tagStats,
     noteCoverage,
+    profitConcentration,
+    adherence,
   };
+}
+
+/* ---------------- 结果缓存 ----------------
+ * analyze 是一次排序 + 多趟 O(n)，但仪表盘 / 标签 / 汇总每个请求各算一遍
+ * 纯属浪费。单槽缓存 + 调用方提供的失效键：键 = 数据版本（store.tradesVersion()，
+ * 行数/盈亏和/更新时间的聚合指纹）+ 过滤口径（账户/市场等），数据未变且口径
+ * 相同就直接复用上一次结果。个人日志场景页面访问是串行的，单槽足够；
+ * 返回对象按只读约定使用（视图/报告不改动 stats 字段）。
+ */
+/**
+ * 把「取全量交易」推迟到缓存未命中时：仪表盘/标签/汇总页命中缓存后
+ * 只做一次版本指纹查询 + 少量最近交易查询，不再加载整张 trades 表。
+ */
+let lazyAnalyzeMemo = { key: null, value: null };
+
+export function analyzeCachedLazy(versionKey, scopeKey, loader) {
+  const key = `${versionKey}#${scopeKey}`;
+  if (lazyAnalyzeMemo.key === key) return lazyAnalyzeMemo.value;
+  const value = analyze(loader());
+  lazyAnalyzeMemo = { key, value };
+  return value;
 }
 
 /** 列表页的筛选与排序（纯函数） */
@@ -425,9 +567,11 @@ export function filterTrades(trades, q = {}) {
   if (q.tag) list = list.filter((t) => (t.tags || []).includes(q.tag));
   if (q.note === 'yes') list = list.filter((t) => t.note && String(t.note).trim());
   else if (q.note === 'no') list = list.filter((t) => !t.note || !String(t.note).trim());
-  // 日期筛选按「本地日」粒度，且包含结束日整天（此前 to 会丢掉结束日的全部交易）
-  if (q.from) { const from = String(q.from).slice(0, 10); list = list.filter((t) => localDayKey(t.close_time) >= from); }
-  if (q.to) { const to = String(q.to).slice(0, 10); list = list.filter((t) => localDayKey(t.close_time) <= to); }
+  // 日期筛选按「本地日」粒度，且包含结束日整天。
+  // 入参既可能是 YYYY-MM-DD，也可能是带时间的 ISO；后者必须先换算回本地日，
+  // 否则在 Asia/Shanghai 等时区会整体偏移一天。
+  if (q.from) { const from = dayKeyOf(q.from); list = list.filter((t) => localDayKey(t.close_time) >= from); }
+  if (q.to) { const to = dayKeyOf(q.to); list = list.filter((t) => localDayKey(t.close_time) <= to); }
   if (q.q) {
     const kw = String(q.q).toLowerCase();
     list = list.filter((t) =>

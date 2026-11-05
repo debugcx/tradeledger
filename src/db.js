@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   exchange TEXT NOT NULL DEFAULT 'manual',
   name TEXT NOT NULL,
   is_demo INTEGER NOT NULL DEFAULT 0,
+  assets_only INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
 
@@ -51,6 +52,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_trades_external
   ON trades(account_id, external_id) WHERE external_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_trades_close ON trades(close_time DESC);
 CREATE INDEX IF NOT EXISTS ix_trades_account ON trades(account_id);
+-- 列表页最常见的「账户 + 日期区间 + 时间倒序」组合索引
+CREATE INDEX IF NOT EXISTS ix_trades_account_close ON trades(account_id, close_time DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS tags (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,6 +144,18 @@ CREATE TABLE IF NOT EXISTS positions (
   unrealized REAL NOT NULL DEFAULT 0,
   funding_rate REAL,
   next_funding_time TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (account_id, symbol, side)
+);
+
+-- 持仓中写下的挂起笔记：持仓平掉后由 archivePositionNotes 归档进 trades.note 并删除。
+-- 不放进 positions 表：那是每次刷新整表重写的交易所快照，存不住用户内容。
+CREATE TABLE IF NOT EXISTS position_notes (
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  symbol TEXT NOT NULL,
+  side TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (account_id, symbol, side)
 );
@@ -254,6 +269,7 @@ CREATE TABLE IF NOT EXISTS meta (
 
 CREATE TABLE IF NOT EXISTS report_generations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
   period_kind TEXT NOT NULL,
   period_label TEXT NOT NULL,
   prompt TEXT NOT NULL,
@@ -379,6 +395,7 @@ function migrate(db) {
   add('last_transfer_sync_at', 'TEXT');
   add('spot_symbols', 'TEXT');
   add('last_spot_sync_at', 'TEXT');
+  add('assets_only', 'INTEGER NOT NULL DEFAULT 0');
   const tradeCols = new Set(db.prepare('PRAGMA table_info(trades)').all().map((c) => c.name));
   if (!tradeCols.has('market')) {
     db.exec("ALTER TABLE trades ADD COLUMN market TEXT NOT NULL DEFAULT 'futures'");
@@ -392,6 +409,25 @@ function migrate(db) {
     db.exec('ALTER TABLE trades ADD COLUMN trashed_at TEXT');
     db.exec('CREATE INDEX IF NOT EXISTS ix_trades_trashed ON trades(trashed_at)');
   }
+  if (!tradeCols.has('followed_plan')) {
+    // 纪律标记：1 = 按计划执行，0 = 违反计划，NULL = 未标记（纪律对比报告用）
+    db.exec('ALTER TABLE trades ADD COLUMN followed_plan INTEGER');
+  }
+
+  // 错过交易记录：观察过但没开仓的机会（含自我判定：方向对 / 方向错 / 过期）
+  db.exec(`CREATE TABLE IF NOT EXISTS missed_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    direction TEXT NOT NULL DEFAULT 'long',
+    entry_price REAL,
+    stop_price REAL,
+    target_price REAL,
+    status TEXT NOT NULL DEFAULT 'open',
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`);
+  db.exec('CREATE INDEX IF NOT EXISTS ix_missed_status ON missed_trades(status, id DESC)');
 
   // 笔记分类：周期复盘 / 交易对档案 / 策略手册 / 现货备注 / 自由笔记
   const noteCols = new Set(db.prepare('PRAGMA table_info(notes)').all().map((c) => c.name));
@@ -402,6 +438,14 @@ function migrate(db) {
   addNote('subject', 'TEXT');
   addNote('market', 'TEXT');
   addNote('account_id', 'INTEGER');
+
+  // AI 报告按账户隔离：老库补列，避免同周期多账户互相串读。
+  const reportCols = new Set(db.prepare('PRAGMA table_info(report_generations)').all().map((c) => c.name));
+  if (!reportCols.has('account_id')) {
+    db.exec('ALTER TABLE report_generations ADD COLUMN account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL');
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS ix_report_generations_account ON report_generations(account_id, period_kind, period_label)');
+
   db.exec("CREATE INDEX IF NOT EXISTS ix_notes_category ON notes(category, updated_at DESC)");
   db.exec("CREATE INDEX IF NOT EXISTS ix_notes_spot_lookup ON notes(category, account_id, subject)");
   db.exec("CREATE INDEX IF NOT EXISTS ix_trades_symbol ON trades(symbol)");

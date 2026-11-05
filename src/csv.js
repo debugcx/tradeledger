@@ -313,11 +313,14 @@ export function validateMapping(mapping, headers, mode = 'roundtrip') {
 /**
  * 逐笔成交模式：符号/买卖方向/成交价/数量/时间 → FIFO 配对成 round trip。
  * 适用于现货成交、合约 fills、以及只导出了成交明细的 CSV。
+ *
+ * 解析（parseFillsFromCsv）与配对（buildTradesFromFills）分离：
+ * 提交导入时路由会先落库 fills，再对账户全部历史 fills 全量重算（见 rebuild.js），
+ * 预览阶段仍只按本文件内容配对，给用户一个即时参考。
  */
-export function buildTradesFromFills(headers, rows, mapping, opts = {}) {
+export function parseFillsFromCsv(headers, rows, mapping, opts = {}) {
   const tzOffset = Number(opts.tzOffset || 0);
   const costPositive = opts.costPositive !== false;
-  const market = opts.market === 'spot' ? 'spot' : 'futures';
   const fills = [];
   const errors = [];
 
@@ -341,7 +344,10 @@ export function buildTradesFromFills(headers, rows, mapping, opts = {}) {
       let fee = parseNumber(pick('fee'));
       if (costPositive && fee !== 0) fee = -Math.abs(fee);
       fills.push({
-        id: String(pick('external_id') || `${line}`),
+        // 逐笔 ID 只在 CSV 真的提供了「成交 ID」列时才使用（落库去重更准）；
+        // 没有则留空，由 store.insertCsvFills 用内容指纹生成，不能用行号
+        //（不同文件的行号会互相撞车）。
+        id: pick('external_id') === '' ? '' : String(pick('external_id')),
         symbol,
         side,
         price,
@@ -355,12 +361,18 @@ export function buildTradesFromFills(headers, rows, mapping, opts = {}) {
     }
   });
 
+  return { fills, errors };
+}
+
+export function buildTradesFromFills(headers, rows, mapping, opts = {}) {
+  const market = opts.market === 'spot' ? 'spot' : 'futures';
+  const { fills, errors } = parseFillsFromCsv(headers, rows, mapping, opts);
   // 现货与 API 同步同口径：T 回合优先 + FIFO 兜底；合约沿用 FIFO
   const paired = market === 'spot'
     ? matchSpotRounds(fills, 'csv')
     : matchFills(fills, 'csv');
   const trades = paired.map((t) => ({ ...t, source: 'csv', market }));
-  return { trades, errors };
+  return { trades, errors, fills };
 }
 
 /** 把「字段 → 列下标」映射转换成「字段 → 表头名」，用于保存模板 */

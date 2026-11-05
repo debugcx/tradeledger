@@ -158,6 +158,7 @@ function filterBar(filters, symbols, tags, accounts = []) {
 export function journalPage({ user, trades, filters, tags, symbols, pagination, noteCoverage, accounts = [], trashedCount = 0, back = '', notice, error }) {
   const backQ = back ? `?back=${encodeURIComponent(back)}` : '';
   const rows = trades.map((t) => `<tr>
+    <td class="bulk-cell"><input type="checkbox" form="journal-bulk" class="bulk-check" name="ids" value="${t.id}" aria-label="选择 ${e(t.symbol)} ${e(fmtDateTime(t.close_time))}"></td>
     <td>${fmtDateTime(t.close_time)}</td>
     <td><a href="/dashboard/journal/${t.id}"><b>${e(t.symbol)}</b></a>
       <div class="muted small">${t.market === 'spot' ? '现货' : '合约'} · ${e(t.account_name || '—')} · <a href="/dashboard/notes/symbol/${encodeURIComponent(t.symbol)}">档案</a></div></td>
@@ -202,13 +203,19 @@ export function journalPage({ user, trades, filters, tags, symbols, pagination, 
           <a class="btn btn-primary small" href="/dashboard/journal/new">+ 手动记录</a>
         </div>
       </div>
+      <form id="journal-bulk" method="post" action="/dashboard/journal/trash-batch" class="bulk-bar">
+        <input type="hidden" name="back" value="${e(back || '/dashboard/journal')}">
+        <button class="btn btn-ghost small danger" type="submit" data-bulk-submit disabled>删除选中</button>
+        <span class="muted small" data-bulk-count>勾选左侧复选框可批量移入垃圾箱（只作用于本页）</span>
+      </form>
       <div class="table-wrap">
       <table class="table">
         <thead><tr>
+          <th class="bulk-cell"><input type="checkbox" form="journal-bulk" data-bulk-all aria-label="全选本页"></th>
           <th>平仓时间</th><th>币种</th><th>方向</th><th>类型</th><th class="num">开仓 → 平仓</th>
           <th class="num">名义价值</th><th class="num">净盈亏</th><th class="num">持仓</th><th>标签</th><th>复盘</th><th></th>
         </tr></thead>
-        <tbody>${rows || '<tr><td colspan="11" class="muted center">没有符合条件的交易</td></tr>'}</tbody>
+        <tbody>${rows || '<tr><td colspan="12" class="muted center">没有符合条件的交易</td></tr>'}</tbody>
       </table>
       </div>
       ${pager(filters, pagination)}
@@ -266,6 +273,13 @@ function tradeForm({ action, trade = {}, accounts, tags, back = '', error, submi
       <label class="field"><span>净盈亏（留空自动算）</span><input name="pnl" type="number" step="any" value="${trade.pnl ?? ''}"></label>
       <label class="field"><span>手续费（正=返佣，负=支出）</span><input name="fee" type="number" step="any" value="${trade.fee ?? 0}"></label>
       <label class="field"><span>资金费（正=收取，负=支付）</span><input name="funding" type="number" step="any" value="${trade.funding ?? 0}"></label>
+      <label class="field"><span>纪律</span>
+        <select name="followed_plan">
+          <option value="" ${trade.followed_plan == null ? 'selected' : ''}>未标记</option>
+          <option value="1" ${Number(trade.followed_plan) === 1 ? 'selected' : ''}>按计划执行</option>
+          <option value="0" ${Number(trade.followed_plan) === 0 ? 'selected' : ''}>违反计划</option>
+        </select>
+      </label>
       <div class="field wide"><span>标签</span>${tagPicker(tags, trade.tags || [], trade.new_tags || '')}</div>
       <label class="field wide"><span>备注</span><textarea name="note" rows="3">${e(trade.note || '')}</textarea></label>
       <div class="form-actions wide">
@@ -499,6 +513,12 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTa
       </div>
       ${trade.note ? `<div class="markdown" style="margin-bottom:16px">${renderMarkdown(trade.note)}</div>` : ''}
       <form method="post" action="/dashboard/journal/${trade.id}/note" class="form">
+        <div class="md-toolbar">
+          <label class="btn btn-ghost small"><span data-note-image-label>插入图片</span>
+            <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" data-note-image hidden>
+          </label>
+          <span class="muted small">图片上传后以 Markdown 插入光标处（PNG/JPEG/GIF/WebP，≤5MB）</span>
+        </div>
         <label class="field wide"><span>这笔交易为什么开？执行了计划吗？错在哪 / 对在哪？（支持 Markdown）</span>
           <textarea name="note" rows="10" data-trade-note>${e(trade.note || '')}</textarea>
         </label>
@@ -517,7 +537,11 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTa
 }
 
 /** 垃圾箱：软删除的交易在这里集中管理；同步不会再导回，恢复或彻底删除二选一 */
-export function journalTrashPage({ user, trades = [], notice, error }) {
+export function journalTrashPage({ user, trades = [], total = 0, q = '', notice, error }) {
+  const kw = String(q || '').trim();
+  const count = kw
+    ? `匹配 ${fmtNum(trades.length)} 条 / 共 ${fmtNum(total)} 条`
+    : (total ? `${fmtNum(total)} 条` : '');
   const rows = trades.map((t) => `<tr>
     <td class="small">${e(fmtDateTime(t.trashed_at))}</td>
     <td class="small">${e(fmtDateTime(t.close_time))}</td>
@@ -547,7 +571,12 @@ export function journalTrashPage({ user, trades = [], notice, error }) {
     </div>
     <section class="panel">
       <div class="panel-head"><h2>垃圾箱</h2>
-        <span class="muted small">${trades.length ? `${fmtNum(trades.length)} 条` : ''}</span></div>
+        <span class="muted small">${count}</span></div>
+      ${(total || kw) ? `<form method="get" action="/dashboard/journal/trash" class="filter-bar">
+        <input name="q" value="${e(kw)}" placeholder="搜索币种 / 备注 / 账户">
+        <button class="btn btn-primary small" type="submit">搜索</button>
+        ${kw ? '<a class="btn btn-ghost small" href="/dashboard/journal/trash">清除</a>' : ''}
+      </form>` : ''}
       ${trades.length ? `<div class="table-wrap">
       <table class="table">
         <thead><tr><th>扔入时间</th><th>平仓时间</th><th>交易对</th><th>方向</th><th class="num">净盈亏</th><th>备注</th><th></th></tr></thead>
@@ -558,7 +587,7 @@ export function journalTrashPage({ user, trades = [], notice, error }) {
       若交易所侧仍有这条数据，下次同步会重新导入，届时可再扔进垃圾箱。
       另注意：现货和客户端配对的合约记录由成交重算得出，若之后的同步改变了配对结构
       （例如先前的卖出被买回、闭环成一个做T回合），可能生成一条新记录——再扔一次即可，之后不会再出现。</p>`
-        : '<div class="muted center" style="padding:20px 0">垃圾箱是空的。</div>'}
+        : `<div class="muted center" style="padding:20px 0">${kw ? `没有匹配「${e(kw)}」的记录。` : '垃圾箱是空的。'}</div>`}
     </section>`,
   });
 }

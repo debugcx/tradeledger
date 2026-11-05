@@ -103,7 +103,14 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
     && fillsFrom <= Date.now() - lookbackDays * DAY + DAY;
   const needFillsBackfill = Boolean(adapter.returnsFills) && !fillsComplete;
 
-  if (needFillsBackfill) {
+  if (account.assets_only) {
+    // 仅资产模式（网格机器人子账户等）：不拉交易/现货/资金费，
+    // 资金流水照常（6 小时节流），资产总览由 asset-worker 独立负责
+    mode = 'assets_only';
+    toMs = now;
+    fromMs = now;
+    cursor = null;
+  } else if (needFillsBackfill) {
     mode = 'fills_backfill';
     toMs = now;
     fromMs = now - lookbackDays * DAY;
@@ -134,14 +141,16 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
 
   const runId = store.startSyncRun(accountId);
   try {
-    const result = await adapter.fetchTrades({
-      creds,
-      fromMs,
-      toMs,
-      cursor,
-      limit: Math.max(100, Number(limit) || config.syncBatchLimit),
-      windowBudget: config.syncWindowBudget,
-    });
+    const result = account.assets_only
+      ? { trades: [], nextCursor: null }
+      : await adapter.fetchTrades({
+        creds,
+        fromMs,
+        toMs,
+        cursor,
+        limit: Math.max(100, Number(limit) || config.syncBatchLimit),
+        windowBudget: config.syncWindowBudget,
+      });
     const trades = Array.isArray(result?.trades) ? result.trades : [];
     const nextCursor = result?.nextCursor || null;
     const done = !nextCursor;
@@ -162,8 +171,10 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
         const earliestOpen = new Map(
           store.listSymbolEarliestOpen(accountId).map((r) => [r.symbol, Date.parse(r.min_open)]),
         );
-        for (const sym of store.listTradeFillSymbols(accountId)) {
-          const raw = store.listTradeFills(accountId, sym);
+        // 只重算本交易所通道的成交池；exchange='csv' 的池归 CSV 导入的
+        // 重建管道（rebuild.js）所有，掺进来会把同一笔成交算两遍
+        for (const sym of store.listTradeFillSymbols(accountId, { exchange: account.exchange })) {
+          const raw = store.listTradeFills(accountId, sym, { exchange: account.exchange });
           const fillObjs = raw.map((r) => ({
             id: r.external_id, symbol: sym, side: r.side, price: r.price, qty: r.qty,
             fee: r.fee, time: r.time, orderType: r.order_type || 'other',
@@ -207,8 +218,7 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
     }
     const fundingApplied = store.applyFundingEvents(accountId);
     let transfersInserted = 0;
-    let botsInserted = 0;
-    let ledgerInserted = 0;
+      let ledgerInserted = 0;
     let spotInserted = 0;
     let spotFillsInserted = 0;
     let spotPruned = 0;
@@ -234,17 +244,6 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
           }
           transfersInserted = store.insertTransfers(transferRows, accountId);
           store.updateAccountTransferSync(accountId);
-          // 策略机器人（网格）：已结束回合并入交易日志，随流水节流（6 小时）一起拉
-          if (typeof adapter.fetchBots === 'function') {
-            try {
-              const bots = await adapter.fetchBots({ creds, fromMs: tFrom, toMs: now, limit: 200 });
-              const res = store.importTrades(bots?.trades || [], accountId, { upsert: true });
-              botsInserted = res.inserted + (res.updated || 0);
-            } catch (err) {
-              warnings.push(`策略机器人拉取失败：${err?.message || err}`);
-            }
-          }
-          // 账本回填：成交明细超出交易所保留期时，从账本重建降级回合（目前 Gate）
           if (typeof adapter.fetchLedgerTrades === 'function') {
             try {
               const led = await adapter.fetchLedgerTrades({ creds, fromMs: tFrom, toMs: now, limit: 500 });
@@ -271,7 +270,7 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
         }
       }
     }
-    if (typeof adapter.fetchSpotTrades === 'function') {
+    if (!account.assets_only && typeof adapter.fetchSpotTrades === 'function') {
       const lastSpot = Date.parse(account.last_spot_sync_at || '') || 0;
       const due = !lastSpot || (now - lastSpot > config.spotRefreshHours * 3600_000);
       if (due) {
@@ -314,8 +313,7 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
         + (adapter.returnsFills ? `, fills ${fillsInserted}, pruned ${prunedPhantoms}` : '')
         + (fundingApplied ? `, funding ${fundingApplied}` : '')
         + (transfersInserted ? `, transfers ${transfersInserted}` : '')
-        + (botsInserted ? `, bots ${botsInserted}` : '')
-        + (ledgerInserted ? `, ledger ${ledgerInserted}` : '')
+          + (ledgerInserted ? `, ledger ${ledgerInserted}` : '')
       + (spotInserted ? `, spot ${spotInserted}` : '')
       + (spotFillsInserted ? `, spot fills ${spotFillsInserted}` : '')
       + (spotPruned ? `, spot pruned ${spotPruned}` : '')
@@ -344,7 +342,6 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
       fundingInserted,
       fundingApplied,
       transfersInserted,
-      botsInserted,
       ledgerInserted,
       spotInserted,
       spotFillsInserted,

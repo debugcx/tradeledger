@@ -622,6 +622,35 @@ console.log('\n▶ 筛选与导出');
   record(csv.startsWith('symbol,side,order_type'), 'CSV 表头与导入器兼容');
 }
 
+/* ---------------- 实时持仓笔记 ---------------- */
+
+console.log('\n▶ 实时持仓笔记');
+{
+  const saved = cookie;
+  cookie = '';
+  const anon = await req('/api/positions/note', {
+    method: 'POST', form: { account_id: '1', symbol: 'SMOKE-USDT-SWAP', side: 'long', note: '未登录' },
+  });
+  record(anon.status === 401, '未登录写入 → 401', `→ ${anon.status}`);
+  cookie = saved;
+
+  const res = await req('/api/positions/note', {
+    method: 'POST', form: { account_id: '1', symbol: 'SMOKE-USDT-SWAP', side: 'long', note: '持仓中的想法，平仓归档' },
+  });
+  const resBody = await jsonOf(res);
+  record(res.status === 200 && resBody.ok === true, '持仓笔记写入 → 200', `→ ${res.status}`);
+
+  const snap = await jsonOf(await req('/api/positions/live'));
+  const pn = (snap.positionNotes || []).find((n) => n.symbol === 'SMOKE-USDT-SWAP');
+  record(!!pn && pn.content === '持仓中的想法，平仓归档', '快照返回 positionNotes');
+
+  await req('/api/positions/note', {
+    method: 'POST', form: { account_id: '1', symbol: 'SMOKE-USDT-SWAP', side: 'long', note: '' },
+  });
+  const after = await jsonOf(await req('/api/positions/live'));
+  record(!(after.positionNotes || []).some((n) => n.symbol === 'SMOKE-USDT-SWAP'), '空内容清除持仓笔记');
+}
+
 /* ---------------- 清理 ---------------- */
 
 console.log('\n▶ 清理测试数据');

@@ -135,3 +135,38 @@ test('垃圾箱：现货重算不清理垃圾箱行，同步跳过被扔掉的 T
   store.clearAllData();
   closeDb();
 });
+
+test('垃圾箱：关键词搜索覆盖币种/备注/账户名，通配符按字面匹配', async () => {
+  const { openDb, setDb, closeDb } = await import('../src/db.js');
+  setDb(openDb(':memory:'));
+  const store = await import('../src/store.js');
+
+  const account = store.createAccount({ exchange: 'fake', name: '搜索专用账户', apiKey: 'k', apiSecret: 's' });
+  store.importTrades([
+    trade({ external_id: 's:1', symbol: 'BTC/USDT' }),
+    trade({ external_id: 's:2', symbol: 'ETH/USDT' }),
+    trade({ external_id: 's:3', symbol: 'SOL/USDT' }),
+  ], account.id, { upsert: true });
+  const eth = store.listTrades().find((t) => t.external_id === 's:2');
+  store.setTradeNote(eth.id, '手滑多开的');
+  for (const t of store.listTrades()) store.trashTrade(t.id);
+  assert.equal(store.countTrashedTrades(), 3);
+
+  // 无关键词：行为不变（受展示上限约束）
+  assert.equal(store.listTrashedTrades().length, 3);
+  // 按币种，大小写不敏感
+  const bySymbol = store.listTrashedTrades({ q: 'eth' });
+  assert.equal(bySymbol.length, 1);
+  assert.equal(bySymbol[0].external_id, 's:2');
+  // 按备注
+  assert.equal(store.listTrashedTrades({ q: '手滑' }).length, 1);
+  // 按账户名
+  assert.equal(store.listTrashedTrades({ q: '搜索专用账户' }).length, 3);
+  // 无匹配
+  assert.equal(store.listTrashedTrades({ q: '不存在' }).length, 0);
+  // LIKE 通配符按字面处理：% 不应变成「匹配一切」
+  assert.equal(store.listTrashedTrades({ q: '%' }).length, 0);
+
+  store.clearAllData();
+  closeDb();
+});

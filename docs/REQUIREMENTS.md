@@ -140,6 +140,9 @@ Wayback 存档重建，但存在三个结构性问题：
 - 标签：新建（名称 + 颜色）、删除、按标签统计；删除标签不删交易。
 - 独立笔记：新建、编辑、删除、列表；支持纯文本/Markdown 源文（按纯文本渲染）。
 - 交易笔记：每笔交易一段复盘文本 + 更新时间。
+- 持仓笔记：实时持仓表格行内直接记录想法（`position_notes`，按账户+币种+方向挂起）；
+  交易所快照整表重写不影响；平仓交易落库后自动归档进本回合交易记录的笔记字段并消费挂起条目，
+  `close_time` 早于笔记写入（宽限 10 分钟）的旧回合不受污染。
 
 ### 3.8 设置与数据（P0）
 
@@ -392,7 +395,12 @@ meta(key, value)
 
 ### 14.3 兼容性边界
 
-- 逐笔配对只在单次导入的文件内进行；开仓与平仓拆到两个文件时无法跨文件配对。
+- 合约 fills 走 fill-first 管道（`src/rebuild.js`）：成交先落库（`trade_fills`，exchange='csv' 通道），
+  再按账户全部历史成交按 symbol 全量重算——开仓与平仓拆到多个文件/跨年也能配对；重复导入幂等
+  （成交内容指纹 + 回合指纹双重去重）；重算改变配对时，旧行笔记/标签按开平时间就近迁移到新回合后再清理。
+  与 API 同步通道双层隔离：成交池按 exchange 字段分流，回合清理按 source 分流；同一物理成交
+  两通道都导入时回合指纹一致只落一行。OKX 等仓位历史口径的交易所除外（粒度不同，同时段并用会近似重复）。
+- 现货 fills 仍按单次导入内配对（T 回合优先 + long-only FIFO 兜底）。
 - 现货、合约都能走 fills 模式，但输出仍是“已实现 round trip”，未卖出的现货持仓不会出现在交易表。
 - 优先建议使用交易所的「已平仓/已实现盈亏」报表；fills 模式用于只有成交明细的历史导出。
 - 单次导入上限：8MB、50,000 行。
@@ -481,3 +489,65 @@ DeFi 存款 / DeFi LP / DeFi 质押 / DeFi 奖励 / DeFi 借款（负债，负�
 - Gate `earn/staking/assets`、Hyperliquid `delegatorSummary` 等接口已按官方路径接入，
   但仅有空余额账号可验证；字段异常会在同步记录中显示。
 - 同一币种在多条链 / 多个合约上的仓位按 (桶, 币种, 链, 协议, 产品) 合并。
+
+---
+
+## 17. 统计与导入增强（v0.8 借鉴 LuxAlgo/trade-journal 增补）
+
+### 17.1 fill-first 回合重建管道（`src/rebuild.js`）
+
+- 合约「逐笔成交」CSV 不再单文件内配对完就扔：原始成交先落库（`trade_fills`，exchange='csv'
+  标记来源通道），再按账户 + symbol 的全部历史成交全量重算回合。
+  开平仓拆在多个文件 / 跨年也能配上；重复导入幂等（成交内容指纹 + 回合指纹双重去重）。
+- 重算改变配对时（如后补更早的开仓改变 FIFO 归属），指纹失效的旧行先由
+  `mergeTradeAnnotations` 把笔记/标签就近迁移（同方向优先，开/平时间至少一端 <3 分钟）
+  到新回合，再由 `pruneTradesNotIn(source='csv')` 清理。
+- 与 API 同步通道双层隔离：成交池按 `trade_fills.exchange` 分流（sync 只配对
+  exchange=<交易所> 的池）；回合清理按 `trades.source` 分流。同一物理成交两条通道
+  都导入时，回合 external_id 前缀一致（账户的交易所名）+ 指纹一致 → 只落一行。
+- 已知边界：OKX 等仓位历史口径的交易所，CSV fills 配对与 episodes 聚合粒度不同，
+  同时段并用会产生近似重复行（与旧版行为一致，导入前请避开已同步时段）。
+  现货 fills 仍按单次导入内配对（T 回合优先 + long-only FIFO 兜底）。
+
+### 17.2 统计结果缓存（`stats.analyzeCached` + `store.tradesVersion`）
+
+- `analyze()` 的结果按「数据版本指纹 + 过滤口径」做单槽缓存：仪表盘 / 标签页 /
+  `/api/summary` 复用同一次计算；周期报告（`buildPeriodReview`）按周期 + 子集指纹缓存。
+- 版本指纹 = 单次聚合查询（行数、最大 ID、盈亏和、最近更新时间、垃圾箱数、标签挂载数），
+  任何交易/标签写入都会改变它。盲区：标签改名不产生新行（仅影响分组显示名）。
+- 缓存对象按只读约定使用；时区格式化沿用 stats.js 的单例 `Intl.DateTimeFormat`。
+
+### 17.3 优势分（`src/edge-score.js`）
+
+- 六分量线性归一到 0–1 后加权求和（权重合计 100，得分 0–100）：
+  胜率 ≥60% 满分 ×15；盈亏比 PF ≥3.0 ×25；均盈/均亏 ≥2.5 ×20；
+  最大回撤 0% 满分、≥25% 0 分 ×15；恢复因子（净盈亏/最大回撤）≥3× ×10；
+  盈利一致性（最大盈利日占盈利日总利润 ≤15%）×15。
+- 已平仓 <5 笔不给分；从未有正峰值日时回撤分量记 0（比例度量无意义）。
+- 口径变更必须递增 `EDGE_SCORE_VERSION`（当前 1）。展示在仪表盘「优势分」面板。
+
+### 17.4 统一过滤谓词与导出
+
+- `stats.filterTrades` 是列表筛选的唯一真相源：交易记录页、仪表盘、日历、标签页、
+  周报、`/api/summary`、`/api/trades` 全部走它，页面与导出口径不再各自漂移。
+- `/api/export?format=csv` 遵循 URL 过滤参数（account_id/market/side/result/symbol/
+  order_type/tag/note/from/to/q，与列表页同口径）；`format=json` 是全量备份，永不过滤。
+  两种导出均不含任何加密凭据（只有 hint 字段）。
+
+### 17.5 小功能套件（v0.8 增补）
+
+- **隐私模式**：顶部栏 👁 开关，开启后整个内容区打码（blur + 禁交互），头部始终可点；
+  localStorage（`tl-privacy`）持久化，layout head 预渲染脚本保证刷新不闪现内容，
+  `storage` 事件跨标签页同步。截图分享前开启即可。
+- **语音输入**：复盘备注 / 笔记 textarea 自动附加「🎙 语音」按钮（Chrome/Edge 的
+  webkitSpeechRecognition，zh-CN 连续识别，结果插入光标处）；不支持的浏览器按钮不出现。
+- **纪律标记与对比**：交易编辑表单新增「按计划执行 / 违反计划」三态（`trades.followed_plan`），
+  统计引擎产出 `adherence`（两类交易的笔数/胜率/总盈亏/均笔盈亏），仪表盘渲染「纪律对比」面板
+  （未标记任何交易时隐藏）。核心问题：「方向对但没做」是执行问题，「做了却亏」是计划问题。
+- **错过交易记录**：新表 `missed_trades`（symbol/假设方向/计划入场/止损/目标/判定/依据），
+  独立页面 `/dashboard/missed`；假想盈亏比 = 目标距离 ÷ 止损距离（价格缺失或止损方向
+  不成立时显示 —）；判定四态：观察中 / 方向对 / 方向错 / 过期。
+- **仪表盘面板排序**：面板根标签带 `data-panel`（edge/diagnosis/adherence/review/stats/
+  live/longs/shorts/analysis/weekhour/fees/order/size/tags/coverage/daily/recent），
+  拖拽手柄在面板标题左侧，落点上下边线指示；顺序存 `meta.dash_panel_order`，
+  `POST /api/dashboard/order` 校验 ID 白名单后持久化，KPI 栏与公告不参与排序。

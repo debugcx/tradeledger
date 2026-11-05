@@ -1,9 +1,33 @@
 import { escapeHtml as e, fmtMoney, fmtNum, fmtPct, fmtDuration, fmtDateTime, fmtPrice } from '../http.js';
 import { config } from '../config.js';
 import { donut, lineChart, barChart, weekHourHeatmap, PALETTE } from '../charts.js';
-import { shell, quickNoteBtn } from './layout.js';
+import { shell, quickNoteBtn, tradeSideLabel, tradesDrillTable } from './layout.js';
+import { edgeScore } from '../edge-score.js';
 
 const sign = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : 'flat');
+
+/** 优势分：六个分量加权合成的 0–100 综合评分（口径见 src/edge-score.js） */
+function edgeScorePanel(s) {
+  const es = edgeScore(s);
+  const scoreText = es.score === null ? '—' : es.score.toFixed(1);
+  const scoreCls = es.score === null ? 'flat' : es.score >= 60 ? 'pos' : es.score >= 40 ? 'flat' : 'neg';
+  const componentCells = es.components.map((c) => {
+    const pct = Math.round(c.score * 100);
+    const cls = pct >= 60 ? 'pos' : pct >= 30 ? 'flat' : 'neg';
+    return `<div class="mini-stat"><span>${e(c.label)} <span class="muted small">×${c.weight}</span></span>
+      <b class="${cls}">${e(c.text)}</b>
+      <div class="muted small">满分线 ${e(c.fullMarks)} · 得分 ${pct}</div></div>`;
+  }).join('');
+  return `<section class="panel">
+    <div class="panel-head"><h2>优势分</h2>
+      <span class="muted small">六分量加权合成（v${es.version}），改口径会换版本号</span></div>
+    <div class="grid-4">
+      <div class="mini-stat"><span>综合评分</span><b class="${scoreCls}" style="font-size:26px">${scoreText}</b>
+        <div class="muted small">${es.score === null ? e(es.reason) : '低于 40 优先修行为，高于 60 保持并控制回撤'}</div></div>
+      ${componentCells}
+    </div>
+  </section>`;
+}
 
 function kpiBar(s) {
   return `<section class="kpi-bar">
@@ -51,12 +75,16 @@ function diagnosisPanel(s) {
         <div class="muted small">保本线 ${b.breakevenRatio.toFixed(3)}（由 ${fmtPct(s.winRate, 1)} 胜率决定）</div></div>
       <div class="mini-stat"><span>利润因子</span><b class="${b.profitFactor >= 1 ? 'pos' : 'neg'}">${pf}</b>
         <div class="muted small">总盈利 ÷ 总亏损，大于 1 才赚钱</div></div>
-      <div class="mini-stat"><span>最差 5% 的亏损</span><b class="neg">${fmtMoney(-b.bigLossSum, { sign: false })}</b>
-        <div class="muted small">${fmtNum(b.bigLossCount)} 笔，抵消总盈利的 ${b.bigLossVsProfit !== null ? fmtPct(b.bigLossVsProfit, 1) : '—'}</div></div>
+      <div class="mini-stat"${b.bigLossCount ? ' data-details-open="worst5-detail" title="点击查看这几笔交易"' : ''}><span>最差 5% 的亏损</span><b class="neg">${fmtMoney(-b.bigLossSum, { sign: false })}</b>
+        <div class="muted small">${fmtNum(b.bigLossCount)} 笔，抵消总盈利的 ${b.bigLossVsProfit !== null ? fmtPct(b.bigLossVsProfit, 1) : '—'}${b.bigLossCount ? ' · 点击看明细' : ''}</div></div>
       <div class="mini-stat"><span>亏损单持仓 vs 盈利单</span>
         <b class="${holdRatio > 1.5 ? 'neg' : 'flat'}" style="font-size:14px">${e(fmtDuration(b.lossDurationMs))} / ${e(fmtDuration(b.winDurationMs))}</b>
         <div class="muted small">${holdRatio > 1.5 ? '亏损单拿得明显更久：止损偏晚' : '两侧持仓时长基本对称'}</div></div>
     </div>
+    ${b.bigLossTrades?.length ? `<details id="worst5-detail" class="stat-drill">
+      <summary class="muted small">最差 ${fmtNum(b.bigLossCount)} 笔的明细（按亏损从大到小）</summary>
+      ${tradesDrillTable(b.bigLossTrades)}
+    </details>` : ''}
     <p class="chart-note">${e(verdict)} ${e(advice)}</p>
   </section>`;
 }
@@ -211,9 +239,13 @@ function analysisPanel(s) {
         ${lineChart({ points: cumPnl, color: PALETTE.blue, xFormat: (v) => String(v) })}</div>
       <div class="chart-box"><h3>回撤（滚动峰值）</h3>
         ${lineChart({ points: ddSeries, color: PALETTE.red, xFormat: (v) => String(v) })}
-        <div class="chart-note">最大回撤 <b class="neg">${fmtMoney(s.drawdown.maxDrawdown, { sign: false })}</b>
+        <div class="chart-note">最大回撤 <b class="neg"${s.drawdown.window ? ' data-details-open="dd-detail" title="点击查看回撤区间内的交易"' : ''}>${fmtMoney(s.drawdown.maxDrawdown, { sign: false })}</b>
           ${s.drawdown.maxDrawdownPct ? `（${fmtPct(s.drawdown.maxDrawdownPct)}）` : ''}
-          <span class="muted">· 曲线从 0 起算，百分比为回撤 ÷ 盈利峰值；亏损超过峰值利润时可能大于 100%</span></div></div>
+          <span class="muted">· 曲线从 0 起算，百分比为回撤 ÷ 盈利峰值；亏损超过峰值利润时可能大于 100%${s.drawdown.window ? ' · 点击数值看是哪几笔' : ''}</span></div>
+        ${s.drawdown.window ? `<details id="dd-detail" class="stat-drill">
+          <summary class="muted small">回撤区间 ${e(s.drawdown.window.from)} → ${e(s.drawdown.window.to)} · 窗口内平仓 ${fmtNum(s.drawdown.window.trades.length)} 笔</summary>
+          ${tradesDrillTable(s.drawdown.window.trades)}
+        </details>` : ''}</div>
       <div class="chart-box"><h3>按小时交易盈亏</h3>${barChart({ items: hourItems, color: PALETTE.blue })}</div>
       <div class="chart-box"><h3>按星期交易盈亏</h3>${barChart({ items: weekdayItems, color: PALETTE.yellow })}</div>
       <div class="chart-box"><h3>持仓时长分布（笔数）</h3>${barChart({ items: durationCount, color: PALETTE.purple })}</div>
@@ -356,7 +388,7 @@ const STABLE_ASSETS = new Set([
   'BUSD', 'PYUSD', 'GUSD', 'FRAX', 'LUSD', 'CRVUSD', 'GHO', 'USD1', 'USDT.E', 'USDC.E',
 ]);
 
-function livePositionsPanel({ accounts, balances, positions, spotBalances = [], spotHoldings = [], accountId = null, assetSummary = null }) {
+function livePositionsPanel({ accounts, balances, positions, positionNotes = [], spotBalances = [], spotHoldings = [], accountId = null, assetSummary = null }) {
   const real = accounts.filter((a) => !a.is_demo && a.exchange !== 'manual');
   const hasAssets = Boolean(assetSummary?.rows?.length);
   if (!real.length && !hasAssets) {
@@ -374,10 +406,22 @@ function livePositionsPanel({ accounts, balances, positions, spotBalances = [], 
   const unrealized = positions.reduce((a, p) => a + (Number(p.unrealized) || 0), 0);
   const updatedAt = [...balances, ...positions].map((x) => x.updated_at).sort().at(-1) || null;
 
+  // 行内笔记按钮：与 public/app.js 的客户端渲染保持同一结构（刷新会整表重绘）
+  const noteMap = new Map((positionNotes || []).map((n) => [`${n.account_id}|${n.symbol}|${n.side}`, n]));
+  const noteCell = (p) => {
+    const note = noteMap.get(`${p.account_id}|${p.symbol}|${p.side}`);
+    const attrs = `data-account="${p.account_id}" data-symbol="${e(p.symbol)}" data-side="${p.side === 'short' ? 'short' : 'long'}" data-content="${e(note ? note.content : '')}"`;
+    const firstLine = note ? note.content.split('\n')[0] : '';
+    const label = note ? `📝 ${e(firstLine.slice(0, 20))}${firstLine.length > 20 || note.content.includes('\n') ? '…' : ''}` : '＋ 笔记';
+    const title = note ? e(note.content) : '记录这笔持仓的想法，平仓后自动归入交易记录';
+    return `<td class="pos-note-cell"><button type="button" class="pos-note${note ? ' has' : ''}" data-pos-note ${attrs} title="${title}">${label}</button></td>`;
+  };
+
   const rows = positions.map((p) => `<tr>
     <td class="small">${e(p.account_name || '')}</td>
     <td><b>${e(p.symbol)}</b></td>
     <td><span class="side-tag ${p.side}">${p.side === 'long' ? '多' : '空'}</span></td>
+    ${noteCell(p)}
     <td>${fmtNum(p.size, 4)}</td>
     <td>${fmtPrice(p.entry_price)}</td>
     <td>${fmtPrice(p.mark_price)}</td>
@@ -405,8 +449,8 @@ function livePositionsPanel({ accounts, balances, positions, spotBalances = [], 
       <div class="mini-stat"><span>未实现盈亏</span><b data-live-unrealized class="${sign(unrealized)}">${fmtMoney(unrealized)}</b></div>
     </div>
     <table class="table">
-      <thead><tr><th>账户</th><th>币种</th><th>方向</th><th>数量</th><th>开仓价</th><th>标记价</th><th>未实现盈亏</th><th>资金费率</th><th>下次结算</th></tr></thead>
-      <tbody data-live-rows>${rows || '<tr><td colspan="9" class="muted center">当前没有合约持仓</td></tr>'}</tbody>
+      <thead><tr><th>账户</th><th>币种</th><th>方向</th><th>笔记</th><th>数量</th><th>开仓价</th><th>标记价</th><th>未实现盈亏</th><th>资金费率</th><th>下次结算</th></tr></thead>
+      <tbody data-live-rows>${rows || '<tr><td colspan="10" class="muted center">当前没有合约持仓</td></tr>'}</tbody>
     </table>
 
     <div class="live-subhead">
@@ -435,7 +479,40 @@ function livePositionsPanel({ accounts, balances, positions, spotBalances = [], 
   </section>`;
 }
 
-export function dashboardPage({ user, stats, trades, market = 'all', accounts = [], accountId = null, balances = [], positions = [], spotBalances = [], spotHoldings = [], funding = null, rebates = null, reviewQueue = [], quickTags = [], demo, assetSummary = null, notice, error }) {
+/** 面板排序：给各面板根标签注入 data-panel，按保存的顺序渲染（未保存的按默认序） */
+const withPanel = (id, html) => String(html).replace(/^<(section|div)\b/, `<$1 data-panel="${id}"`);
+
+function orderedPanels(pairs, savedOrder = []) {
+  const byId = new Map(pairs.filter(([, html]) => String(html).trim()));
+  const saved = (savedOrder || []).filter((id) => byId.has(id));
+  const rest = [...byId.keys()].filter((id) => !saved.includes(id));
+  return [...saved, ...rest].map((id) => withPanel(id, byId.get(id))).join('\n');
+}
+
+/** 纪律对比：标记过「按计划执行 / 违反计划」的交易盈亏对照 */
+function adherencePanel(s) {
+  const ad = s.adherence;
+  if (!ad || !ad.marked) return '';
+  const block = (label, b, cls) => `<div class="mini-stat"><span>${label}</span>
+    <b class="${cls}">${fmtMoney(b.pnl)}</b>
+    <div class="muted small">${fmtNum(b.count)} 笔 · 胜率 ${fmtPct(b.winRate, 1)} · 均笔 ${fmtMoney(b.avgPnl)}</div></div>`;
+  const note = ad.planned.count && ad.violated.count
+    ? (ad.planned.avgPnl >= ad.violated.avgPnl
+      ? '按计划执行的交易表现更好——说明计划本身有效，问题出在执行。'
+      : '违反计划的交易反而更赚：要么计划该改，要么这几笔是运气，别急着推翻纪律。')
+    : '在交易编辑页给交易标记「按计划执行 / 违反计划」，这里会对比两类交易的盈亏。';
+  return `<section class="panel">
+    <div class="panel-head"><h2>纪律对比</h2>
+      <span class="muted small">已标记 ${fmtNum(ad.marked)} / ${fmtNum(s.total)} 笔</span></div>
+    <div class="grid-4">
+      ${block('按计划执行', ad.planned, sign(ad.planned.pnl))}
+      ${block('违反计划', ad.violated, sign(ad.violated.pnl))}
+    </div>
+    <p class="chart-note">${e(note)}</p>
+  </section>`;
+}
+
+export function dashboardPage({ user, stats, trades, market = 'all', accounts = [], accountId = null, balances = [], positions = [], positionNotes = [], spotBalances = [], spotHoldings = [], funding = null, rebates = null, reviewQueue = [], quickTags = [], demo, assetSummary = null, panelOrder = [], notice, error }) {
   const tabHref = (m) => `/dashboard?market=${m}${accountId ? `&account_id=${accountId}` : ''}`;
   const accountOptions = ['<option value="all">全部账户（聚合）</option>']
     .concat(accounts.map((a) => `<option value="${a.id}" ${accountId && String(accountId) === String(a.id) ? 'selected' : ''}>${e(a.name)}（${e(a.exchange)}${a.is_demo ? ' · 演示' : ''}）</option>`))
@@ -457,7 +534,7 @@ export function dashboardPage({ user, stats, trades, market = 'all', accounts = 
     <div class="mini-strip">
       <div class="mini-stat"><span>总盈亏</span><b class="${sign(stats.totalPnl)}">${fmtMoney(stats.totalPnl)}</b></div>
       <div class="mini-stat"><span>交易预期</span><b class="${sign(stats.expectancy)}">${fmtMoney(stats.expectancy)}</b></div>
-      <div class="mini-stat"><span>最大回撤</span><b class="neg">${fmtMoney(stats.drawdown.maxDrawdown, { sign: false })}</b></div>
+      <div class="mini-stat"${stats.drawdown.window ? ' data-details-open="dd-detail" title="点击查看回撤区间内的交易"' : ''}><span>最大回撤</span><b class="neg">${fmtMoney(stats.drawdown.maxDrawdown, { sign: false })}</b></div>
       <div class="mini-stat"><span>复盘覆盖率</span><b>${fmtPct(stats.noteCoverage.ratio, 1)}</b></div>
     </div>
     ${demo?.active ? `<div class="alert alert-info demo-banner">
@@ -468,21 +545,25 @@ export function dashboardPage({ user, stats, trades, market = 'all', accounts = 
       </form>
     </div>` : ''}
     ${kpiBar(stats)}
-    ${diagnosisPanel(stats)}
-    ${reviewQueuePanel(reviewQueue, quickTags, `?market=${market}${accountId ? `&account_id=${accountId}` : ''}`, stats.total > 0)}
-    ${statPanel(stats)}
-    ${livePositionsPanel({ accounts, balances, positions, spotBalances, spotHoldings, accountId, assetSummary })}
-    ${sideRow('多单', stats.longs, 'green')}
-    ${sideRow('空单', stats.shorts, 'red')}
-    ${analysisPanel(stats)}
-    ${weekHourPanel(stats)}
-    ${feesPanel(stats, funding, rebates)}
-    ${orderPanel(stats)}
-    ${sizePanel(stats)}
-    ${tagPanel(stats)}
-    ${noteCoverageBar(stats.noteCoverage)}
-    ${dailyPanel(stats)}
-    ${recentTrades(trades)}`;
+    ${orderedPanels([
+      ['edge', edgeScorePanel(stats)],
+      ['diagnosis', diagnosisPanel(stats)],
+      ['adherence', adherencePanel(stats)],
+      ['review', reviewQueuePanel(reviewQueue, quickTags, `?market=${market}${accountId ? `&account_id=${accountId}` : ''}`, stats.total > 0)],
+      ['stats', statPanel(stats)],
+      ['live', livePositionsPanel({ accounts, balances, positions, positionNotes, spotBalances, spotHoldings, accountId, assetSummary })],
+      ['longs', sideRow('多单', stats.longs, 'green')],
+      ['shorts', sideRow('空单', stats.shorts, 'red')],
+      ['analysis', analysisPanel(stats)],
+      ['weekhour', weekHourPanel(stats)],
+      ['fees', feesPanel(stats, funding, rebates)],
+      ['order', orderPanel(stats)],
+      ['size', sizePanel(stats)],
+      ['tags', tagPanel(stats)],
+      ['coverage', noteCoverageBar(stats.noteCoverage)],
+      ['daily', dailyPanel(stats)],
+      ['recent', recentTrades(trades)],
+    ], panelOrder)}`;
 
   return shell({
     active: 'dashboard',

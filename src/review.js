@@ -147,13 +147,36 @@ export function buildWeeklyReview(allTrades, { year, week } = isoWeekOf()) {
   return buildPeriodReview(allTrades, { kind: 'week', year, week });
 }
 
-/** 统一入口：周 / 月 / 年报告。返回结构与旧周报兼容（period.kind 新增）。 */
+/**
+ * 统一入口：周 / 月 / 年报告。返回结构与旧周报兼容（period.kind 新增）。
+ * 报告对象按只读约定使用；同周期 + 同数据子集（首尾 ID 指纹）直接复用
+ * 上一次结果，避免报告 / AI 上下文每个请求重复跑 analyze + 全套派生。
+ */
+let periodMemo = { key: null, value: null };
+
 export function buildPeriodReview(allTrades, period = { kind: 'week', ...isoWeekOf() }) {
   const kind = ['week', 'month', 'year'].includes(period?.kind) ? period.kind : 'week';
   const range = periodRange(period);
   const fromIso = range.from.toISOString();
   const toIso = range.to.toISOString();
   const trades = (allTrades || []).filter((t) => t.close_time >= fromIso && t.close_time <= toIso);
+  // 指纹必须覆盖“中间某笔被修改”的情况：只看条数和首尾 id 会命中旧缓存。
+  // pnl 和与最近 updated_at 都是 O(n) 聚合，远低于完整 analyze 的成本。
+  const fingerprint = trades.reduce((acc, t) => {
+    acc.pnl += Math.round(Number(t.pnl || 0) * 100);
+    const updated = String(t.updated_at || '');
+    if (updated > acc.updated) acc.updated = updated;
+    return acc;
+  }, { pnl: 0, updated: '' });
+  const memoKey = `${kind}|${fromIso}|${toIso}|${trades.length}`
+    + `|${trades[0]?.id}|${trades[trades.length - 1]?.id}|${fingerprint.pnl}|${fingerprint.updated}`;
+  if (periodMemo.key === memoKey) return periodMemo.value;
+  const value = computePeriodReview({ period, kind, range, fromIso, toIso, trades });
+  periodMemo = { key: memoKey, value };
+  return value;
+}
+
+function computePeriodReview({ period, kind, range, fromIso, toIso, trades }) {
   const s = analyze(trades);
   const kindLabel = periodKindLabel(kind);
 
@@ -238,6 +261,10 @@ export function buildPeriodReview(allTrades, period = { kind: 'week', ...isoWeek
       noteCoverage: s.noteCoverage,
       reconciliations: { checked: checked.length, mismatches: mismatchCount },
     },
+    // 最大回撤下钻：峰值日 → 谷底日窗口及窗口内平仓的交易（视图用，Markdown/Prompt 不含）
+    drawdownWindow: s.drawdown.window || null,
+    // 最大连亏下钻：最长连亏段的交易（视图用，Markdown/Prompt 不含）
+    lossStreakTrades: s.maxLossStreakTrades || [],
     worstSlots,
     bestSlots,
     worstTags,

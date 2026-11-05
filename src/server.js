@@ -9,6 +9,11 @@ import { Readable } from 'node:stream';
 
 import { config } from './config.js';
 import { applyPendingRestore } from './restore.js';
+import { installFileLogging, startLogCleanup } from './logger.js';
+
+// 日志：同时落盘 data/logs（按天分文件，默认保留 10 天，启动时与每 6 小时清理）
+installFileLogging();
+startLogCleanup();
 
 // 必须在 db.js 打开数据库之前替换 pending 恢复文件
 const restoreResult = applyPendingRestore();
