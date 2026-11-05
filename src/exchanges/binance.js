@@ -402,10 +402,26 @@ export const binance = {
     }
 
     try {
-      const data = await call('/sapi/v1/staking/position?current=1&size=100', creds, { baseUrl: BASE_SAPI });
-      mark('staking');
-      for (const r of rowsOf(data)) {
+      // /sapi/v1/staking/position 的 product 必填：STAKING / ON_CHAIN_DEFI / DEFI_STAKING。
+      // 逐个产品拉取，单个产品失败不阻塞其余。
+      const STAKING_PRODUCTS = ['STAKING', 'ON_CHAIN_DEFI', 'DEFI_STAKING'];
+      const stakingRows = [];
+      const stakingErrors = [];
+      for (const product of STAKING_PRODUCTS) {
+        try {
+          const data = await call(`/sapi/v1/staking/position?product=${product}&current=1&size=100`, creds, { baseUrl: BASE_SAPI });
+          for (const r of rowsOf(data)) stakingRows.push(r);
+        } catch (err) {
+          stakingErrors.push(`${product}：${err?.message || err}`);
+        }
+      }
+      if (stakingRows.length) mark('staking');
+      for (const r of stakingRows) {
         push('staking', r.asset, num(r.amount ?? r.totalAmount), 'binance:/sapi/v1/staking/position', '链上质押', { product: r.productName || 'Staking' });
+      }
+      // 全部产品都失败才上报，避免单个空产品刷屏
+      if (stakingRows.length === 0 && stakingErrors.length) {
+        throw new Error(stakingErrors.join(' | '));
       }
     } catch (err) {
       errors.push(`链上质押：${err?.message || err}`);
