@@ -3,8 +3,9 @@ import { requestJson } from '../http-client.js';
 import { num, matchFills, matchEpisodes, toSymbol, splitPair, quoteFee, isSupportedSpotSymbol, SPOT_QUOTES, windowsDescending, marketCache, cacheGet, cachePut } from './common.js';
 
 const ledgerCache = marketCache('gate:monthly-ledger');
-// Gate account_book 的限流较紧；账本分页任务用 4 路并发，避免把 10 秒额度打满。
-const LEDGER_CONCURRENCY = 4;
+// Gate account_book 的限流较紧；账本分页任务用 12 路并发：单请求经代理约 1.5s，
+// 约 8 req/s，留在限流额度内（16 路实测 4.9s 但接近上限），冷启动约 5-6s。
+const LEDGER_CONCURRENCY = 12;
 
 /** 有并发上限的 map：按固定 worker 数消费任务，保持结果顺序。 */
 async function mapLimit(items, limit, fn) {
@@ -532,18 +533,20 @@ export const gate = {
 
     await mapLimit(jobs, LEDGER_CONCURRENCY, async ({ row, type, w }) => {
       let offset = 0;
-      for (let page = 0; page < 5; page++) {
+      // account_book 的 limit 上限是 1000（官方 SDK 参数校验）；用 100 会让
+      // 请求数放大 10 倍，是对账冷启动慢的主要来源。
+      for (let page = 0; page < 10; page++) {
         const list = await call('/api/v4/futures/usdt/account_book', {
           type,
           from: String(Math.floor(w.from / 1000)),
           to: String(Math.ceil(w.to / 1000)),
-          limit: '100',
+          limit: '1000',
           offset: String(offset),
         }, creds);
         if (!Array.isArray(list) || !list.length) break;
         row[type] += list.reduce((acc, r) => acc + num(r.change), 0);
         offset += list.length;
-        if (list.length < 100) break;
+        if (list.length < 1000) break;
       }
     });
     return cachePut(ledgerCache, `ml|${months}`, { months: rows });
