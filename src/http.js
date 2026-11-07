@@ -128,3 +128,55 @@ export function safeEqual(a, b) {
   for (let i = 0; i < len; i++) diff |= (x[i] ?? 0) ^ (y[i] ?? 0);
   return diff === 0;
 }
+
+/* ---------------- 请求体限长 ----------------
+ * Request.formData()/json() 会先把整个请求缓冲进内存；这里先按流式读取并
+ * 在超过上限时立即取消，避免无 Content-Length 的 chunked 请求绕过检查。
+ */
+
+export async function readBodyLimited(req, maxBytes, label = '请求体') {
+  const declared = Number(req.headers.get('content-length') || 0);
+  if (declared > maxBytes) throw new Error(`${label}超过大小限制`);
+  if (!req.body) return new Uint8Array(0);
+  const reader = req.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        try { await reader.cancel(); } catch { /* 已取消 */ }
+        throw new Error(`${label}超过大小限制`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* 已释放 */ }
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+export async function readFormDataLimited(req, maxBytes, label = '表单') {
+  const body = await readBodyLimited(req, maxBytes, label);
+  if (!body.byteLength) return new FormData();
+  const capped = new Request(req.url, { method: req.method, headers: req.headers, body });
+  return capped.formData();
+}
+
+export async function readJsonLimited(req, maxBytes, label = 'JSON 请求体') {
+  const body = await readBodyLimited(req, maxBytes, label);
+  const text = new TextDecoder().decode(body);
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error('JSON 格式不正确');
+  }
+}

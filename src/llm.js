@@ -9,6 +9,7 @@
 import { requestJson } from './http-client.js';
 import * as store from './store.js';
 import { encryptSecret, decryptSecret, hintKey } from './crypto.js';
+import { assertSafeOutboundUrl } from './url-guard.js';
 
 export const LLM_PRESETS = [
   { id: 'openai', label: 'OpenAI / 兼容接口', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', provider: 'openai' },
@@ -44,7 +45,11 @@ export function getLlmConfig({ withSecret = false } = {}) {
 
 export function saveLlmConfig(input = {}) {
   if (input.provider) store.setMeta('llm_provider', String(input.provider).slice(0, 20));
-  if (input.baseUrl !== undefined) store.setMeta('llm_base_url', String(input.baseUrl).trim().slice(0, 300));
+  if (input.baseUrl !== undefined) {
+    const baseUrl = String(input.baseUrl).trim().slice(0, 300);
+    if (baseUrl) assertSafeOutboundUrl(baseUrl, { label: 'LLM 接口地址' });
+    store.setMeta('llm_base_url', baseUrl);
+  }
   if (input.model !== undefined) store.setMeta('llm_model', String(input.model).trim().slice(0, 120));
   if (input.temperature !== undefined) store.setMeta('llm_temperature', String(Number(input.temperature) || 0));
   if (input.maxTokens !== undefined) store.setMeta('llm_max_tokens', String(Math.max(200, Number(input.maxTokens) || 2000)));
@@ -63,6 +68,7 @@ export function saveLlmConfig(input = {}) {
 function endpoint(baseUrl, suffix) {
   const base = String(baseUrl || '').trim().replace(/\/+$/, '');
   if (!base) throw new Error('请先填写 API Base URL');
+  assertSafeOutboundUrl(base, { label: 'LLM 接口地址' });
   return `${base}${suffix}`;
 }
 

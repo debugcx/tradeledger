@@ -20,6 +20,7 @@ import * as store from './store.js';
 import { vacuumInto } from './db.js';
 import { fmtBytes } from './http.js';
 import { encryptSecret, decryptSecret } from './crypto.js';
+import { assertSafeOutboundUrl } from './url-guard.js';
 import { pendingRestoreFile } from './restore.js';
 import { chunkBuffer } from './chunker.js';
 
@@ -224,6 +225,7 @@ export function saveBackupConfig(input = {}) {
     let parsed;
     try { parsed = new URL(url); } catch { throw new Error('WebDAV 地址格式不正确'); }
     if (!/^https?:$/.test(parsed.protocol)) throw new Error('WebDAV 地址只支持 http / https');
+    assertSafeOutboundUrl(url, { label: 'WebDAV 地址' });
     if (parsed.search || parsed.hash) throw new Error('WebDAV 地址不要带查询参数或 # 片段');
   }
   if (enabled && !url) throw new Error('启用 WebDAV 备份前请填写地址');
@@ -277,6 +279,8 @@ function webdavCredentials() {
   if (phraseEnc) {
     try { passphrase = decryptSecret(phraseEnc); } catch { throw new Error('备份密码无法解密，请在设置页重新填写'); }
   }
+  // 老配置可能在加校验之前保存过，使用时再拦一次。
+  if (cfg.webdavUrl) assertSafeOutboundUrl(cfg.webdavUrl, { label: 'WebDAV 地址' });
   return { ...cfg, username: cfg.webdavUsername, password, passphrase };
 }
 

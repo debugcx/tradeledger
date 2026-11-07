@@ -10,6 +10,7 @@ import { config } from './config.js';
 import * as store from './store.js';
 import { getExchange } from './exchanges/index.js';
 import { getWalletProvider } from './wallets/index.js';
+import { assertSafeOutboundUrl } from './url-guard.js';
 import { valuePositions, resolvePrice } from './prices.js';
 
 export const BUCKET_LABELS = {
@@ -307,6 +308,7 @@ export async function refreshWalletAssets(wallet) {
   const runId = store.startAssetSyncRun('wallet', wallet.id, provider.id);
   try {
     const creds = store.getWalletProviderCredentials(provider.id);
+    if (creds.baseUrl) assertSafeOutboundUrl(creds.baseUrl, { label: '钱包索引服务地址' });
     const result = await provider.fetchPositions({
       address: wallet.address,
       apiKey: creds.apiKey,

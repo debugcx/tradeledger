@@ -8,6 +8,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 
 import { config } from './config.js';
+import { passwordStartupError } from './startup.js';
 import { applyPendingRestore } from './restore.js';
 import { installFileLogging, startLogCleanup } from './logger.js';
 
@@ -114,9 +115,9 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-const WEAK_PASSWORDS = new Set(['demo1234', 'change-me', 'change-me-to-a-long-random-password']);
-if (config.passwordFromEnv && (WEAK_PASSWORDS.has(config.password) || config.password.length < 8)) {
-  console.error('[config] TRADELEDGER_PASSWORD 仍是示例值或少于 8 位，请改成强密码后再启动');
+const passwordError = passwordStartupError(config);
+if (passwordError) {
+  console.error(`[config] ${passwordError}`);
   process.exit(1);
 }
 

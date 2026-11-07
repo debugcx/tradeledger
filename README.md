@@ -47,6 +47,7 @@ TRADELEDGER_PASSWORD=your-password npm start
 | `PORT` / `HOST` / `DB_FILE` / `TRADELEDGER_TZ` | 端口、监听地址、数据库路径、统计时区 |
 | `BACKUP_DIR` | 本地快照目录，默认 `data/backups` |
 | `TRADELEDGER_BACKUP_ALLOW_UNENCRYPTED` | 设为 1 才允许未加密的 WebDAV 上传；默认阻止 |
+| `TRADELEDGER_ALLOW_INSECURE_EGRESS` | 设为 1 才允许访问公网 http 地址；默认只允许 https 与回环/私网 http |
 
 未配置 `TRADELEDGER_MASTER_KEY` 时，首次运行会在数据库同目录生成 `data/master.key`
 （也可用 `TRADELEDGER_MASTER_KEY_FILE` 指定其他位置）。该文件权限会被收紧到 600；
@@ -272,7 +273,7 @@ cloudflared:
 ### 7. 安全清单
 
 - 应用容器不发布 `8790`，只通过 Caddy/Tunnel 暴露；
-- 使用强密码，建议再加 Cloudflare Access 或 Tailscale；密码仍是示例值或少于 8 位时服务会拒绝启动；
+- 使用强密码，建议再加 Cloudflare Access 或 Tailscale；监听非回环地址时必须设置 `TRADELEDGER_PASSWORD` 且至少 8 位，否则服务拒绝启动；
 - 交易所 API 只给只读权限；
 - `master.key` 离线保存一份；示例值 `replace-with-64-hex-chars` 会导致启动失败；
 - SQLite 必须放本地磁盘，不要放 NFS/SMB。

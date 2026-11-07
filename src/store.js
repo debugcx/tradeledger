@@ -8,6 +8,7 @@ import { encryptSecret, decryptSecret, hintKey } from './crypto.js';
 import { remainingLots, matchSpotRounds, hash64 } from './fills.js';
 import { filterTrades, dayKeyOf, localDayStartUtc, localDayEndExclusiveUtc } from './stats.js';
 import { setExchangeProxyProvider } from './http-client.js';
+import { assertSafeOutboundUrl } from './url-guard.js';
 
 /* ---------------- 账户 ---------------- */
 
@@ -2272,6 +2273,7 @@ export function saveWalletProvider(id, { apiKey, baseUrl, clearKey = false } = {
     ? null
     : (apiKey !== undefined && apiKey !== '' ? hintKey(String(apiKey).trim()) : current?.api_key_hint || null);
   const nextBase = baseUrl === undefined ? (current?.base_url || null) : (String(baseUrl).trim() || null);
+  if (nextBase) assertSafeOutboundUrl(nextBase, { label: '钱包索引服务地址' });
   run(
     `INSERT INTO wallet_providers (id, api_key_enc, api_key_hint, base_url, updated_at)
      VALUES (?, ?, ?, ?, ?)

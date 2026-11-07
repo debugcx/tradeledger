@@ -9,6 +9,7 @@
 
 import * as store from './store.js';
 import { encryptSecret, decryptSecret, hintKey } from './crypto.js';
+import { assertSafeOutboundUrl } from './url-guard.js';
 
 const LLM_ASR_FALLBACK = { provider: 'minimax', baseUrl: 'https://api.minimax.cn/v1', model: 'asr-1.0' };
 
@@ -55,7 +56,11 @@ export function getAsrConfig({ withSecret = false } = {}) {
 
 export function saveAsrConfig(input = {}) {
   if (input.provider) store.setMeta('asr_provider', String(input.provider).slice(0, 20));
-  if (input.baseUrl !== undefined) store.setMeta('asr_base_url', String(input.baseUrl).trim().slice(0, 300));
+  if (input.baseUrl !== undefined) {
+    const baseUrl = String(input.baseUrl).trim().slice(0, 300);
+    if (baseUrl) assertSafeOutboundUrl(baseUrl, { label: '语音识别接口地址' });
+    store.setMeta('asr_base_url', baseUrl);
+  }
   if (input.model !== undefined) store.setMeta('asr_model', String(input.model).trim().slice(0, 120));
   if (input.fallbackLlm !== undefined) store.setMeta('asr_fallback_llm', input.fallbackLlm ? '1' : '0');
   if (input.apiKey) {
@@ -152,6 +157,7 @@ export async function transcribeAudio({ data, filename = 'audio.wav', contentTyp
       : '请先配置语音识别 API Key');
   }
   const base = String(cfg.baseUrl).replace(/\/+$/, '');
+  assertSafeOutboundUrl(base, { label: '语音识别接口地址' });
   const url = base + (isMinimax(cfg) ? '/speech_to_text' : '/audio/transcriptions');
   const fd = new FormData();
   fd.append('file', new Blob([data], { type: contentType }), filename);

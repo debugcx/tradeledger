@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import { Readable } from 'node:stream';
 import { config } from './config.js';
 import { dbSizeBytes, pingDb } from './db.js';
-import { escapeHtml, localInputToIso, uid, fmtNum } from './http.js';
+import { escapeHtml, localInputToIso, uid, fmtNum, readFormDataLimited, readJsonLimited } from './http.js';
 import * as auth from './auth.js';
 import * as store from './store.js';
 import * as backup from './backup.js';
@@ -82,12 +82,10 @@ const redirect = (location, status = 302, headers = {}) => new Response(null, {
 /* ---------------- 表单 ---------------- */
 
 async function readForm(req) {
-  // formData() 会把整个请求缓冲进内存，先按声明长度拒绝超大请求
-  const declared = Number(req.headers.get('content-length') || 0);
-  if (declared > config.maxCsvBytes + 4 * 1024 * 1024) throw new Error('请求体超过大小限制');
+  // formData() 会把整个请求缓冲进内存；readFormDataLimited 按流式上限读取。
   const out = {};
   try {
-    const fd = await req.formData();
+    const fd = await readFormDataLimited(req, config.maxCsvBytes + 4 * 1024 * 1024, '请求体');
     for (const [key, value] of fd.entries()) {
       let v;
       if (typeof value === 'string') {
@@ -141,7 +139,8 @@ function backupRedirect(notice, error) {
 
 /** 图片上传：单独读二进制，不能走 readForm 的文本路径 */
 async function readUpload(req) {
-  const fd = await req.formData();
+  // 5MB 文件 + multipart 头开销，给 1MB 余量；流式读取超限即取消。
+  const fd = await readFormDataLimited(req, 6 * 1024 * 1024, '图片上传');
   const file = fd.get('image');
   if (!file || typeof file.arrayBuffer !== 'function') throw new Error('没有选择图片');
   if (!file.size) throw new Error('图片为空');
@@ -1077,7 +1076,7 @@ route('POST', '/dashboard/import/templates/delete', (ctx) => requireUser(ctx, as
 route('POST', '/api/dashboard/order', async (ctx) => {
   if (!ctx.user) return json({ error: 'unauthorized' }, 401);
   try {
-    const body = await ctx.req.json();
+    const body = await readJsonLimited(ctx.req, 64 * 1024, '面板顺序请求');
     const ids = Array.isArray(body?.order) ? body.order : [];
     const clean = [...new Set(ids.map((s) => String(s).trim()).filter((s) => /^[a-z][a-z_-]{1,19}$/.test(s)))];
     store.setMeta('dash_panel_order', clean.join(','));
@@ -2132,14 +2131,13 @@ route('GET', '/dashboard/settings/ai', (ctx) => requireUser(ctx, (c) => html(pag
 }))));
 
 route('POST', '/api/asr', (ctx) => requireUser(ctx, async (c) => {
-  const declared = Number(c.req.headers.get('content-length') || 0);
-  if (declared > 12 * 1024 * 1024) return json({ ok: false, error: '录音超过 12MB 限制' }, 413);
   let file;
   try {
-    const fd = await c.req.formData();
+    const fd = await readFormDataLimited(c.req, 12 * 1024 * 1024, '录音');
     file = fd.get('audio');
-  } catch {
-    return json({ ok: false, error: '请求不是有效的 multipart 表单' }, 400);
+  } catch (err) {
+    const tooLarge = /超过大小限制/.test(String(err?.message || ''));
+    return json({ ok: false, error: tooLarge ? '录音超过 12MB 限制' : '请求不是有效的 multipart 表单' }, tooLarge ? 413 : 400);
   }
   if (!file || typeof file.arrayBuffer !== 'function') return json({ ok: false, error: '缺少音频文件' }, 400);
   if (!file.size) return json({ ok: false, error: '录音为空' }, 400);
@@ -2812,14 +2810,15 @@ export async function handle(request) {
     }
     return json({ error: 'not_found' }, 404);
   } catch (err) {
+    // 详细错误只写服务端日志；响应体不回传内部消息（可能含路径/SQL/凭据线索）。
     console.error('[error]', request.method, pathname, err);
     if (pathname.startsWith('/api/')) {
-      return json({ error: 'internal_error', message: err?.message || String(err) }, 500);
+      return json({ error: 'internal_error' }, 500);
     }
     return html(page({
       title: '500 | TradeLedger',
       user: null,
-      body: `<div class="container narrow prose center"><h1>500</h1><p>${escapeHtml(err?.message || '服务器内部错误')}</p></div>`,
+      body: '<div class="container narrow prose center"><h1>500</h1><p>服务器内部错误，请查看服务端日志。</p></div>',
     }), 500);
   }
 }
