@@ -14,7 +14,7 @@ export function createLedgerCache({ ttlMs = 10 * 60_000, now = () => Date.now() 
     const key = keyOf(account);
     const hit = entries.get(key);
     if (!force && hit && now() - hit.at < ttlMs) return hit.value;
-    const value = await adapter.fetchMonthlyLedger({ creds, months: 6 });
+    const value = await adapter.fetchMonthlyLedger({ creds, months: 6, force });
     entries.set(key, { at: now(), value });
     return value;
   }

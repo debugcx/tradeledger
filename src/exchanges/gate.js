@@ -489,8 +489,8 @@ export const gate = {
 
   // 月度账本汇总（对账用）：近 N 个月的已实现盈亏 / 手续费 / 资金费合计，30 分钟缓存。
   // 按月并发（每月内部串行），避免整页串行等待几十个请求。
-  async fetchMonthlyLedger({ creds, months = 6 }) {
-    const hit = cacheGet(ledgerCache, `ml|${months}`, 30 * 60_000);
+  async fetchMonthlyLedger({ creds, months = 6, force = false }) {
+    const hit = force ? null : cacheGet(ledgerCache, `ml|${months}`, 30 * 60_000);
     if (hit) return hit;
     const now = new Date();
     const count = Math.min(6, Math.max(1, Number(months) || 6)); // 账本最早只能查 180 天前

@@ -6,10 +6,12 @@ const { createLedgerCache } = await import('../src/ledger-cache.js');
 test('月度账本缓存：TTL 内复用、过期重拉、force 刷新、账户隔离', async () => {
   let now = 0;
   const calls = [];
+  const forces = [];
   const cache = createLedgerCache({ ttlMs: 1000, now: () => now });
   const adapter = {
-    async fetchMonthlyLedger({ creds }) {
+    async fetchMonthlyLedger({ creds, force }) {
       calls.push(creds.id);
+      forces.push(Boolean(force));
       return { months: [{ month: '2026-10', pnl: 1, fee: 0, fund: 0 }] };
     },
   };
@@ -34,6 +36,8 @@ test('月度账本缓存：TTL 内复用、过期重拉、force 刷新、账户�
   cache.invalidate(1);
   await cache.get(accountA, adapter, { id: 'a' });
   assert.equal(calls.length, 5, 'invalidate 后应重新拉取');
+  // force 必须透传给适配器，否则适配器内部缓存会让“强制刷新”变成空操作。
+  assert.deepEqual(forces, [false, false, true, false, false]);
 });
 
 test('月度账本缓存：失败不写入缓存', async () => {
