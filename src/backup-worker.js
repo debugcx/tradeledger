@@ -62,3 +62,7 @@ export function stopBackupWorker() {
   if (timer) clearInterval(timer);
   timer = null;
 }
+
+export function isBackupBusy() {
+  return busy;
+}

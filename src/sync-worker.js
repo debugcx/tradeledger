@@ -123,3 +123,7 @@ export function stopSyncWorker() {
   if (timer) clearInterval(timer);
   timer = null;
 }
+
+export function isSyncBusy() {
+  return busy;
+}

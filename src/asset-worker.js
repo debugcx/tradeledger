@@ -46,3 +46,7 @@ export function stopAssetWorker() {
   if (timer) clearInterval(timer);
   timer = null;
 }
+
+export function isAssetBusy() {
+  return busy;
+}

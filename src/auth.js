@@ -30,6 +30,8 @@ export function rateLimit(ip) {
   if (entry.until && entry.until > Date.now()) {
     return { blocked: true, retryAfterSec: Math.ceil((entry.until - Date.now()) / 1000) };
   }
+  // 锁定已过期：直接回收，避免长期运行后 Map 只增不减。
+  if (entry.until) failures.delete(key);
   return { blocked: false };
 }
 
@@ -42,6 +44,14 @@ export function recordFailure(ip) {
     entry.count = 0;
   }
   failures.set(key, entry);
+  // 防止被大量伪造 IP 撑爆内存：超过上限时丢掉最早的一半。
+  if (failures.size > 10_000) {
+    let drop = failures.size - 5_000;
+    for (const oldKey of failures.keys()) {
+      failures.delete(oldKey);
+      if (--drop <= 0) break;
+    }
+  }
 }
 
 export function clearFailures(ip) {

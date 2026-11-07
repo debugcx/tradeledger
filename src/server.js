@@ -9,6 +9,7 @@ import { Readable } from 'node:stream';
 
 import { config } from './config.js';
 import { passwordStartupError } from './startup.js';
+import { isLoopbackPeer } from './client-ip.js';
 import { applyPendingRestore } from './restore.js';
 import { installFileLogging, startLogCleanup } from './logger.js';
 
@@ -22,10 +23,10 @@ const restoreResult = applyPendingRestore();
 const { handle } = await import('./routes.js');
 const { seed } = await import('./seed.js');
 const { closeDb } = await import('./db.js');
-const { startSyncWorker, stopSyncWorker } = await import('./sync-worker.js');
+const { startSyncWorker, stopSyncWorker, isSyncBusy } = await import('./sync-worker.js');
 const { refreshLive } = await import('./live.js');
-const { startAssetWorker, stopAssetWorker } = await import('./asset-worker.js');
-const { startBackupWorker, stopBackupWorker } = await import('./backup-worker.js');
+const { startAssetWorker, stopAssetWorker, isAssetBusy } = await import('./asset-worker.js');
+const { startBackupWorker, stopBackupWorker, isBackupBusy } = await import('./backup-worker.js');
 const { finishPendingRestore } = await import('./backup.js');
 
 if (restoreResult?.ok) {
@@ -53,7 +54,39 @@ const MIME = {
   '.ttf': 'font/ttf',
 };
 
-function serveStatic(res, pathname) {
+// 页面没有外部脚本/样式/字体；内联 script/style 仍需 unsafe-inline（对账面板等）。
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self' data:",
+  "connect-src 'self'",
+  "frame-ancestors 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "object-src 'none'",
+].join('; ');
+
+function isHttpsRequest(req) {
+  if (req.socket?.encrypted) return true;
+  const trusted = process.env.TRUST_PROXY === '1' || isLoopbackPeer(req.socket?.remoteAddress);
+  if (!trusted) return false;
+  return String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+}
+
+function applySecurityHeaders(req, res) {
+  res.setHeader('content-security-policy', CSP);
+  res.setHeader('x-content-type-options', 'nosniff');
+  res.setHeader('x-frame-options', 'DENY');
+  res.setHeader('referrer-policy', 'no-referrer');
+  res.setHeader('permissions-policy', 'geolocation=(), camera=(), microphone=()');
+  if (isHttpsRequest(req)) {
+    res.setHeader('strict-transport-security', 'max-age=31536000; includeSubDomains');
+  }
+}
+
+function serveStatic(req, res, pathname) {
   const rel = pathname.replace(/^\/+/, '');
   if (!rel || rel.includes('..')) return false;
   const file = path.join(config.publicDir, rel);
@@ -61,6 +94,7 @@ function serveStatic(res, pathname) {
   let stat;
   try { stat = fs.statSync(file); } catch { return false; }
   if (!stat.isFile()) return false;
+  applySecurityHeaders(req, res);
   res.writeHead(200, {
     'content-type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
     'content-length': stat.size,
@@ -82,15 +116,18 @@ function toWebRequest(req) {
     if (Array.isArray(value)) value.forEach((v) => headers.append(key, v));
     else headers.set(key, value);
   }
+  // 覆盖同名入站头，路由层用真实 TCP 对端判断是否采信代理头。
+  headers.set('x-tl-remote-ip', req.socket?.remoteAddress || '');
   const method = req.method || 'GET';
   const hasBody = method !== 'GET' && method !== 'HEAD';
   const body = hasBody ? Readable.toWeb(req) : undefined;
   return new Request(url, { method, headers, body, duplex: 'half' });
 }
 
-async function writeWebResponse(res, response) {
+async function writeWebResponse(req, res, response) {
   const headers = {};
   response.headers.forEach((value, key) => { headers[key] = value; });
+  applySecurityHeaders(req, res);
   res.writeHead(response.status, headers);
   if (!response.body) { res.end(); return; }
   const reader = response.body.getReader();
@@ -105,9 +142,9 @@ async function writeWebResponse(res, response) {
 const server = http.createServer(async (req, res) => {
   const pathname = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`).pathname;
   try {
-    if ((req.method === 'GET' || req.method === 'HEAD') && serveStatic(res, pathname)) return;
+    if ((req.method === 'GET' || req.method === 'HEAD') && serveStatic(req, res, pathname)) return;
     const response = await handle(toWebRequest(req));
-    await writeWebResponse(res, response);
+    await writeWebResponse(req, res, response);
   } catch (err) {
     console.error('[server]', req.method, pathname, err);
     if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
@@ -146,6 +183,9 @@ try {
   console.error('[migrate] 现货 T 回合重算失败：', err?.message || err);
 }
 
+let liveTimer = null;
+let liveKick = null;
+
 server.listen(config.port, config.host, () => {
   console.log('\n  TradeLedger 已启动');
   console.log(`  ➜ http://${config.host}:${config.port}`);
@@ -160,27 +200,47 @@ server.listen(config.port, config.host, () => {
   startAssetWorker();
   // 定时刷新余额 / 持仓 / 资金费率
   if (config.liveRefreshSeconds > 0) {
-    const timer = setInterval(() => {
+    liveTimer = setInterval(() => {
       refreshLive({ force: true }).catch((err) => console.error('[live]', err?.message || err));
     }, config.liveRefreshSeconds * 1000);
-    timer.unref();
-    const kick = setTimeout(() => {
+    liveTimer.unref();
+    liveKick = setTimeout(() => {
       refreshLive({ force: true }).catch((err) => console.error('[live]', err?.message || err));
     }, 2500);
-    kick.unref();
+    liveKick.unref();
   }
   console.log(`  ➜ 后台同步：每 ${config.syncWorkerSeconds}s · 实时持仓：每 ${config.liveRefreshSeconds}s · 资产：交易所 ${config.assetRefreshMinutes}min / 钱包 ${config.walletRefreshMinutes}min\n`);
 });
 
-function shutdown(signal) {
+let shuttingDown = false;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log(`\n收到 ${signal}，正在关闭…`);
+
+  // 先停定时器，避免关闭过程中再发起新的同步/刷新。
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  if (liveKick) { clearTimeout(liveKick); liveKick = null; }
   try { stopSyncWorker(); stopBackupWorker(); stopAssetWorker(); } catch { /* 尚未启动时忽略 */ }
-  server.close(() => {
-    closeDb();
-    process.exit(0);
+
+  const closed = new Promise((resolve) => {
+    server.close(resolve);
+    // 不无限等待 keep-alive 空闲连接。
+    setTimeout(() => { try { server.closeAllConnections?.(); } catch { /* 忽略 */ } }, 1500).unref();
   });
-  setTimeout(() => process.exit(0), 3000).unref();
+  await Promise.race([closed, sleep(4000)]);
+
+  // 给在途同步/资产/备份任务最多 3 秒收尾，避免在事务中途关闭 SQLite。
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline && (isSyncBusy() || isAssetBusy() || isBackupBusy())) {
+    await sleep(100);
+  }
+
+  try { closeDb(); } catch { /* 已关闭 */ }
+  process.exit(0);
 }
 
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => { void shutdown('SIGINT'); });
+process.on('SIGTERM', () => { void shutdown('SIGTERM'); });

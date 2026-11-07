@@ -55,6 +55,7 @@ import { rebuildFromFills } from './rebuild.js';
 import { refreshLive, liveSnapshot } from './live.js';
 import { createReconcileAccumulator } from './reconcile.js';
 import { monthlyLedgerCache } from './ledger-cache.js';
+import { resolveClientIp, isLoopbackPeer } from './client-ip.js';
 import {
   buildPeriodReview, reviewMarkdown, reportPrompt, formatWeek, isoWeekOf, shiftWeek,
   parsePeriod, periodRange, shiftMonth, monthOf, yearOf,
@@ -204,18 +205,18 @@ function matchRoute(method, pathname) {
 }
 
 function clientIp(req) {
-  // XFF/CF 头可伪造：仅回环监听（本机自用、smoke 模拟多 IP）或显式 TRUST_PROXY=1（部署在可信反代后）才采信
-  const trust = process.env.TRUST_PROXY === '1'
-    || config.host === '127.0.0.1' || config.host === 'localhost' || config.host === '::1';
-  if (trust) {
-    return req.headers.get('cf-connecting-ip')
-      || (req.headers.get('x-forwarded-for') || '').split(',')[0].trim()
-      || 'local';
-  }
-  return 'local';
+  // server.js 会把真实 TCP 对端写进 x-tl-remote-ip（覆盖同名请求头）。
+  return resolveClientIp({
+    headers: req.headers,
+    peer: req.headers.get('x-tl-remote-ip') || '',
+    trustProxy: process.env.TRUST_PROXY === '1',
+  });
 }
 
 function isSecure(req) {
+  const peer = req.headers.get('x-tl-remote-ip') || '';
+  const trusted = process.env.TRUST_PROXY === '1' || isLoopbackPeer(peer);
+  if (!trusted) return false;
   const proto = req.headers.get('x-forwarded-proto');
   if (proto) return proto.split(',')[0].trim() === 'https';
   try { return new URL(req.url).protocol === 'https:'; } catch { return false; }
