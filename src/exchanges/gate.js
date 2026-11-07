@@ -506,8 +506,8 @@ export const gate = {
   },
 
   // 月度账本汇总（对账用）：近 N 个月的已实现盈亏 / 手续费 / 资金费合计，30 分钟缓存。
-  // 把「月份 × 类型 × 窗口」拆成任务，4 路并发（单窗口内分页保持串行），冷启动从
-  // 逐月逐类型的串行等待降到约 1/4。
+  // account_book 的 type 参数可选：一次拉整个窗口，再按行内 type 汇总，
+  // 把请求数从「月份 × 3 类 × 窗口」降为「月份 × 窗口」（约 3 倍）。
   async fetchMonthlyLedger({ creds, months = 6, force = false }) {
     const hit = force ? null : cacheGet(ledgerCache, `ml|${months}`, 30 * 60_000);
     if (hit) return hit;
@@ -524,27 +524,27 @@ export const gate = {
         pnl: 0, fee: 0, fund: 0,
       };
       rows.push(row);
-      for (const type of ['pnl', 'fee', 'fund']) {
-        for (const w of windowsDescending(start.getTime(), Math.min(end.getTime(), Date.now()), 29 * 86400_000).slice(0, 4)) {
-          jobs.push({ row, type, w });
-        }
+      for (const w of windowsDescending(start.getTime(), Math.min(end.getTime(), Date.now()), 29 * 86400_000).slice(0, 4)) {
+        jobs.push({ row, w });
       }
     }
 
-    await mapLimit(jobs, LEDGER_CONCURRENCY, async ({ row, type, w }) => {
+    await mapLimit(jobs, LEDGER_CONCURRENCY, async ({ row, w }) => {
       let offset = 0;
-      // account_book 的 limit 上限是 1000（官方 SDK 参数校验）；用 100 会让
-      // 请求数放大 10 倍，是对账冷启动慢的主要来源。
+      // account_book 的 limit 上限是 1000（官方 SDK 参数校验）。
       for (let page = 0; page < 10; page++) {
         const list = await call('/api/v4/futures/usdt/account_book', {
-          type,
           from: String(Math.floor(w.from / 1000)),
           to: String(Math.ceil(w.to / 1000)),
           limit: '1000',
           offset: String(offset),
         }, creds);
         if (!Array.isArray(list) || !list.length) break;
-        row[type] += list.reduce((acc, r) => acc + num(r.change), 0);
+        for (const r of list) {
+          const type = String(r.type || '');
+          // 只统计对账口径需要的三类；dnw/refr/bonus 等不计入。
+          if (type === 'pnl' || type === 'fee' || type === 'fund') row[type] += num(r.change);
+        }
         offset += list.length;
         if (list.length < 1000) break;
       }
