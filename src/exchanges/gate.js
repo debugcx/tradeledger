@@ -3,6 +3,23 @@ import { requestJson } from '../http-client.js';
 import { num, matchFills, matchEpisodes, toSymbol, splitPair, quoteFee, isSupportedSpotSymbol, SPOT_QUOTES, windowsDescending, marketCache, cacheGet, cachePut } from './common.js';
 
 const ledgerCache = marketCache('gate:monthly-ledger');
+// Gate account_book 的限流较紧；账本分页任务用 4 路并发，避免把 10 秒额度打满。
+const LEDGER_CONCURRENCY = 4;
+
+/** 有并发上限的 map：按固定 worker 数消费任务，保持结果顺序。 */
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 /**
  * Gate.io API v4 永续合约只读接入。
@@ -488,45 +505,48 @@ export const gate = {
   },
 
   // 月度账本汇总（对账用）：近 N 个月的已实现盈亏 / 手续费 / 资金费合计，30 分钟缓存。
-  // 按月并发（每月内部串行），避免整页串行等待几十个请求。
+  // 把「月份 × 类型 × 窗口」拆成任务，4 路并发（单窗口内分页保持串行），冷启动从
+  // 逐月逐类型的串行等待降到约 1/4。
   async fetchMonthlyLedger({ creds, months = 6, force = false }) {
     const hit = force ? null : cacheGet(ledgerCache, `ml|${months}`, 30 * 60_000);
     if (hit) return hit;
     const now = new Date();
     const count = Math.min(6, Math.max(1, Number(months) || 6)); // 账本最早只能查 180 天前
-    const tasks = [];
+    const rows = [];
+    const jobs = [];
     for (let i = 0; i < count; i++) {
       const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
       const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
       if (Date.now() - start.getTime() > 175 * 86400_000) break;
-      tasks.push((async () => {
-        const row = {
-          month: `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}`,
-          pnl: 0, fee: 0, fund: 0,
-        };
-        for (const type of ['pnl', 'fee', 'fund']) {
-          for (const w of windowsDescending(start.getTime(), Math.min(end.getTime(), Date.now()), 29 * 86400_000).slice(0, 4)) {
-            let offset = 0;
-            for (let page = 0; page < 5; page++) {
-              const rows = await call('/api/v4/futures/usdt/account_book', {
-                type,
-                from: String(Math.floor(w.from / 1000)),
-                to: String(Math.ceil(w.to / 1000)),
-                limit: '100',
-                offset: String(offset),
-              }, creds);
-              if (!Array.isArray(rows) || !rows.length) break;
-              row[type] += rows.reduce((acc, r) => acc + num(r.change), 0);
-              offset += rows.length;
-              if (rows.length < 100) break;
-            }
-          }
+      const row = {
+        month: `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}`,
+        pnl: 0, fee: 0, fund: 0,
+      };
+      rows.push(row);
+      for (const type of ['pnl', 'fee', 'fund']) {
+        for (const w of windowsDescending(start.getTime(), Math.min(end.getTime(), Date.now()), 29 * 86400_000).slice(0, 4)) {
+          jobs.push({ row, type, w });
         }
-        return row;
-      })());
+      }
     }
-    const out = (await Promise.all(tasks));
-    return cachePut(ledgerCache, `ml|${months}`, { months: out });
+
+    await mapLimit(jobs, LEDGER_CONCURRENCY, async ({ row, type, w }) => {
+      let offset = 0;
+      for (let page = 0; page < 5; page++) {
+        const list = await call('/api/v4/futures/usdt/account_book', {
+          type,
+          from: String(Math.floor(w.from / 1000)),
+          to: String(Math.ceil(w.to / 1000)),
+          limit: '100',
+          offset: String(offset),
+        }, creds);
+        if (!Array.isArray(list) || !list.length) break;
+        row[type] += list.reduce((acc, r) => acc + num(r.change), 0);
+        offset += list.length;
+        if (list.length < 100) break;
+      }
+    });
+    return cachePut(ledgerCache, `ml|${months}`, { months: rows });
   },
 
   // 行情 K 线。Gate 的 K 线接口也挂在鉴权网关后（需 Timestamp/KEY/SIGN 头）。
