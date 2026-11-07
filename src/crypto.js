@@ -35,14 +35,25 @@ export function getMasterKey() {
     return cachedKey;
   }
 
-  const keyFile = path.join(path.dirname(config.dbFile), 'master.key');
+  const keyFile = config.masterKeyFile;
+  let exists = false;
   try {
     const hex = fs.readFileSync(keyFile, 'utf8').trim();
+    exists = true;
     if (/^[0-9a-f]{64}$/i.test(hex)) {
+      // POSIX 下顺手收紧权限；Windows 忽略 mode。
+      if (process.platform !== 'win32') {
+        try { fs.chmodSync(keyFile, 0o600); } catch { /* 只读文件系统等场景忽略 */ }
+      }
       cachedKey = Buffer.from(hex, 'hex');
       return cachedKey;
     }
   } catch { /* 首次运行，下面生成 */ }
+
+  // 文件存在但内容不是合法密钥时不能覆盖：那会让已加密凭据永久无法解密。
+  if (exists) {
+    throw new Error(`主密钥文件格式不正确：${keyFile}（应为 64 位十六进制）。为避免覆盖导致已有凭据无法解密，已停止启动；请恢复正确密钥或设置 TRADELEDGER_MASTER_KEY`);
+  }
 
   const key = crypto.randomBytes(32);
   fs.mkdirSync(path.dirname(keyFile), { recursive: true });

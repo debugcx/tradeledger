@@ -18,8 +18,33 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Unit tests
-        run: npm test
+      - name: Unit tests + coverage
+        run: npm run test:coverage
+
+      - name: Smoke test (temp DB)
+        env:
+          DB_FILE: ${{ runner.temp }}/tl-ci.db
+          BACKUP_DIR: ${{ runner.temp }}/tl-ci-backups
+          PORT: '8790'
+          HOST: 127.0.0.1
+          SEED_DEMO: '1'
+          TRADELEDGER_PASSWORD: ci-smoke-pass
+          TRADELEDGER_MASTER_KEY: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+          SYNC_WORKER_SECONDS: '0'
+          LIVE_REFRESH_SECONDS: '0'
+          ASSET_REFRESH_MINUTES: '1440'
+          WALLET_REFRESH_MINUTES: '1440'
+          TRADELEDGER_AUTO_PROXY: '0'
+        run: |
+          set -e
+          node src/server.js > /tmp/tl-ci.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:8790/api/health > /dev/null; then break; fi
+            sleep 0.5
+          done
+          SMOKE_PASSWORD=ci-smoke-pass node scripts/smoke.mjs http://127.0.0.1:8790
 
   docker:
     needs: test

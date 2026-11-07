@@ -282,6 +282,34 @@ test('恢复：暂存后重启替换数据库，并保留 pre-restore 副本', (
   }
 });
 
+test('WebDAV：未设置备份密码时阻止明文上传', async () => {
+  const prev = process.env.TRADELEDGER_BACKUP_ALLOW_UNENCRYPTED;
+  delete process.env.TRADELEDGER_BACKUP_ALLOW_UNENCRYPTED;
+  try {
+    backup.saveBackupConfig({
+      webdavEnabled: true,
+      webdavUrl: 'http://127.0.0.1:1/dav',
+      webdavUsername: 'u',
+      webdavPassword: 'p',
+      webdavDir: 'TradeLedger',
+      intervalHours: 6,
+      keep: 5,
+      backupMode: 'incremental',
+      clearPassphrase: true,
+      localEnabled: true,
+      localIntervalHours: 24,
+      localKeep: 10,
+    });
+    await assert.rejects(
+      () => backup.runRemoteBackup({ reason: 'plain-text-test' }),
+      /未设置备份密码/,
+    );
+  } finally {
+    if (prev === undefined) delete process.env.TRADELEDGER_BACKUP_ALLOW_UNENCRYPTED;
+    else process.env.TRADELEDGER_BACKUP_ALLOW_UNENCRYPTED = prev;
+  }
+});
+
 test.after(() => {
   try { closeDb(); } catch { /* 忽略 */ }
   fs.rmSync(root, { recursive: true, force: true });

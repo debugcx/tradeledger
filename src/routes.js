@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import { Readable } from 'node:stream';
 import { config } from './config.js';
-import { dbSizeBytes } from './db.js';
+import { dbSizeBytes, pingDb } from './db.js';
 import { escapeHtml, localInputToIso, uid, fmtNum } from './http.js';
 import * as auth from './auth.js';
 import * as store from './store.js';
@@ -54,6 +54,7 @@ import { classifyOrderType } from './fills.js';
 import { rebuildFromFills } from './rebuild.js';
 import { refreshLive, liveSnapshot } from './live.js';
 import { createReconcileAccumulator } from './reconcile.js';
+import { monthlyLedgerCache } from './ledger-cache.js';
 import {
   buildPeriodReview, reviewMarkdown, reportPrompt, formatWeek, isoWeekOf, shiftWeek,
   parsePeriod, periodRange, shiftMonth, monthOf, yearOf,
@@ -174,13 +175,17 @@ function dateBound(value) {
 /* ---------------- 迷你路由 ---------------- */
 
 const routes = [];
-const route = (method, pattern, handler) => {
+/**
+ * 路由注册。默认要求登录（默认拒绝）；只有显式 { public: true } 的路由
+ * 才允许匿名访问。这样新增路由漏写鉴权检查也只会 302/401，而不是直接暴露数据。
+ */
+const route = (method, pattern, handler, options = {}) => {
   const keys = [];
   const regex = new RegExp('^' + pattern.replace(/:([A-Za-z_]+)/g, (_, key) => {
     keys.push(key);
     return '([^/]+)';
   }) + '$');
-  routes.push({ method, regex, keys, handler });
+  routes.push({ method, regex, keys, handler, public: Boolean(options.public) });
 };
 
 function matchRoute(method, pathname) {
@@ -194,7 +199,7 @@ function matchRoute(method, pathname) {
     } catch {
       return null; // 非法百分号编码按 404 处理，而不是 500
     }
-    return { handler: r.handler, params };
+    return { handler: r.handler, params, public: r.public };
   }
   return null;
 }
@@ -246,7 +251,7 @@ function safeNext(raw) {
  *  认证
  * ========================================================= */
 
-route('GET', '/', () => redirect('/dashboard'));
+route('GET', '/', () => redirect('/dashboard'), { public: true });
 
 route('GET', '/login', (ctx) => {
   if (ctx.user) return redirect('/dashboard');
@@ -256,7 +261,7 @@ route('GET', '/login', (ctx) => {
     error: limit.blocked ? `尝试次数过多，请 ${limit.retryAfterSec} 秒后再试` : (ctx.query.error || ''),
     dev: auth.isDevPassword(),
   }), limit.blocked ? 429 : 200);
-});
+}, { public: true });
 
 route('POST', '/login', async (ctx) => {
   const limit = auth.rateLimit(ctx.ip);
@@ -277,12 +282,12 @@ route('POST', '/login', async (ctx) => {
   return redirect(next || '/dashboard', 302, {
     'Set-Cookie': auth.cookieFor(session.token, session.maxAge, isSecure(ctx.req)),
   });
-});
+}, { public: true });
 
 route('POST', '/logout', (ctx) => {
   auth.logout(ctx.req);
   return redirect('/', 302, { 'Set-Cookie': auth.clearCookie() });
-});
+}, { public: true });
 
 /* =========================================================
  *  仪表盘
@@ -1721,6 +1726,8 @@ route('POST', '/dashboard/accounts/:id/edit', (ctx) => requireUser(ctx, async (c
   } catch (err) {
     return redirect('/dashboard/accounts?error=' + encodeURIComponent(err.message || '保存失败'));
   }
+  // 凭据/账户信息变了，对账页的月度账本缓存必须失效。
+  monthlyLedgerCache.invalidate(id);
   const updated = store.getAccount(id);
   const norm = (v) => (v === null || v === undefined || v === '' ? 180 : Number(v));
   if (norm(previousLookback) !== norm(updated.lookback_days)) {
@@ -1762,6 +1769,7 @@ route('POST', '/dashboard/accounts/:id/resync', (ctx) => requireUser(ctx, (c) =>
 }));
 
 route('POST', '/dashboard/accounts/:id/delete', (ctx) => requireUser(ctx, (c) => {
+  monthlyLedgerCache.invalidate(Number(c.params.id));
   store.deleteAccount(Number(c.params.id));
   return redirect('/dashboard/accounts?notice=' + encodeURIComponent('账户已删除，已同步的交易保留'));
 }));
@@ -1804,13 +1812,14 @@ route('GET', '/dashboard/reconcile', (ctx) => requireUser(ctx, async (c) => {
   });
   const report = acc.result();
 
-  const monthly = [];
-  for (const { account, adapter } of monthlyTargets) {
+  // 各账户并行拉取（缓存 10 分钟）；?refresh=1 强制刷新。
+  const forceLedger = c.query.refresh === '1';
+  const monthly = await Promise.all(monthlyTargets.map(async ({ account, adapter }) => {
     const entry = { account: { id: account.id, name: account.name, exchange: account.exchange }, rows: [] };
     try {
       const byMonth = monthlyPnl.get(account.id) || new Map();
       const creds = store.getAccountCredentials(account.id);
-      const res = await adapter.fetchMonthlyLedger({ creds, months: 6 });
+      const res = await monthlyLedgerCache.get(account, adapter, creds, { force: forceLedger });
       entry.rows = (res?.months || []).map((r) => {
         const app = byMonth.get(r.month) || 0;
         const exchangeNet = r.pnl + r.fee + r.fund;
@@ -1819,8 +1828,8 @@ route('GET', '/dashboard/reconcile', (ctx) => requireUser(ctx, async (c) => {
     } catch (err) {
       entry.error = String(err?.message || err).slice(0, 90);
     }
-    monthly.push(entry);
-  }
+    return entry;
+  }));
   return html(page({
     title: '对账 | TradeLedger',
     user: c.user,
@@ -2449,6 +2458,7 @@ route('POST', '/dashboard/settings/clear-demo', (ctx) => requireUser(ctx, (c) =>
 }));
 
 route('POST', '/dashboard/settings/reset', (ctx) => requireUser(ctx, (c) => {
+  monthlyLedgerCache.clear();
   store.clearAllData();
   auth.logout(c.req);
   return redirect('/login?error=' + encodeURIComponent('全部数据已清空'), 302, { 'Set-Cookie': auth.clearCookie() });
@@ -2563,7 +2573,15 @@ route('POST', '/dashboard/settings/backup/cancel-restore', (ctx) => requireUser(
  *  REST API
  * ========================================================= */
 
-route('GET', '/api/health', () => json({ ok: true, version: '0.1.0', time: new Date().toISOString() }));
+route('GET', '/api/health', () => {
+  const db = pingDb();
+  return json({
+    ok: db,
+    db,
+    version: '0.1.0',
+    time: new Date().toISOString(),
+  }, db ? 200 : 503);
+}, { public: true });
 
 route('GET', '/api/me', (ctx) => {
   if (!ctx.user) return json({ error: 'unauthorized' }, 401);
@@ -2729,7 +2747,7 @@ route('GET', '/api/docs', (ctx) => html(page({
       <tr><td>GET</td><td>/api/export?format=json|csv</td><td>全量导出</td></tr>
     </tbody></table>
   </div>`,
-})));
+})), { public: true });
 
 /* =========================================================
  *  分发与错误处理
@@ -2754,6 +2772,13 @@ export async function handle(request) {
     const match = matchRoute(method, pathname);
     if (match) {
       const ctx = ctxOf(request, match.params);
+      // 默认拒绝：未显式标记 public 的路由一律要求登录。
+      // 历史上靠每个 handler 自己检查，漏写一处就会暴露；这里兜底。
+      if (!match.public && !ctx.user) {
+        if (pathname.startsWith('/api/')) return json({ error: 'unauthorized' }, 401);
+        if (pathname.startsWith('/media/')) return new Response('unauthorized', { status: 401 });
+        return redirect(`/login?next=${encodeURIComponent(url.pathname + url.search)}`);
+      }
       const response = await match.handler(ctx);
       if (request.method === 'HEAD' && response.body) {
         return new Response(null, { status: response.status, headers: response.headers });

@@ -33,6 +33,7 @@ TRADELEDGER_PASSWORD=your-password npm start
 |---|---|
 | `TRADELEDGER_PASSWORD` | 访问密码（必填） |
 | `TRADELEDGER_MASTER_KEY` | 凭据加密主密钥；64 位十六进制，或任意口令经 SHA-256 派生 |
+| `TRADELEDGER_MASTER_KEY_FILE` | 主密钥文件路径；默认与数据库同目录的 `master.key`，建议独立部署时放到数据目录外 |
 | `SYNC_LOOKBACK_DAYS` | 首次同步回溯天数，默认 180 |
 | `SYNC_BATCH_LIMIT` | 单批最多拉取条数，默认 1000 |
 | `SYNC_WORKER_SECONDS` | 后台自动回溯间隔，默认 5 秒；0 = 关闭 |
@@ -43,10 +44,13 @@ TRADELEDGER_PASSWORD=your-password npm start
 | `ASSET_REFRESH_MINUTES` | 交易所账内资产（合约/现货/资金/理财/质押）刷新间隔，默认 10 分钟 |
 | `WALLET_REFRESH_MINUTES` | 链上钱包索引服务刷新间隔，默认 240 分钟（4 小时）；页面「资产总览 → 钱包」可改 |
 | `HTTPS_PROXY` / `HTTP_PROXY` | 访问交易所 API 的代理（自动走 CONNECT 隧道） |
-| `PORT` / `HOST` / `DB_FILE` / `TZ` | 端口、监听地址、数据库路径、统计时区 |
+| `PORT` / `HOST` / `DB_FILE` / `TRADELEDGER_TZ` | 端口、监听地址、数据库路径、统计时区 |
 | `BACKUP_DIR` | 本地快照目录，默认 `data/backups` |
+| `TRADELEDGER_BACKUP_ALLOW_UNENCRYPTED` | 设为 1 才允许未加密的 WebDAV 上传；默认阻止 |
 
-未配置 `TRADELEDGER_MASTER_KEY` 时，首次运行会在数据库同目录生成 `data/master.key`。
+未配置 `TRADELEDGER_MASTER_KEY` 时，首次运行会在数据库同目录生成 `data/master.key`
+（也可用 `TRADELEDGER_MASTER_KEY_FILE` 指定其他位置）。该文件权限会被收紧到 600；
+如果文件存在但内容格式不正确，程序会拒绝启动而不是覆盖它。
 **迁移时请把数据库和 master.key 一起带走**，否则已保存的 API 凭据无法解密。
 
 如果本机无法直连交易所，程序会自动探测 `127.0.0.1:7890 / 7897 / 10809 / 1080`

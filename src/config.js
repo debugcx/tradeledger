@@ -4,12 +4,15 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const passwordFromEnv = Boolean(process.env.TRADELEDGER_PASSWORD || process.env.ACCESS_PASSWORD);
+const dbFile = process.env.DB_FILE || path.join(ROOT, 'data', 'tradeledger.db');
 
 export const config = {
   root: ROOT,
   publicDir: path.join(ROOT, 'public'),
   dataDir: path.join(ROOT, 'data'),
-  dbFile: process.env.DB_FILE || path.join(ROOT, 'data', 'tradeledger.db'),
+  dbFile,
+  // 主密钥默认与数据库同目录；独立部署可用 TRADELEDGER_MASTER_KEY_FILE 指到别处。
+  masterKeyFile: process.env.TRADELEDGER_MASTER_KEY_FILE || path.join(path.dirname(dbFile), 'master.key'),
   backupDir: process.env.BACKUP_DIR || path.join(ROOT, 'data', 'backups'),
   host: process.env.HOST || '127.0.0.1',
   port: Number(process.env.PORT || 8790),

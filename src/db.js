@@ -576,6 +576,15 @@ export function getDb() {
   return handle;
 }
 
+/** 健康检查用：真正摸一次数据库，避免锁死/文件丢失时仍报 ok。 */
+export function pingDb() {
+  try {
+    return Number(getDb().prepare('SELECT 1 AS ok').get()?.ok) === 1;
+  } catch {
+    return false;
+  }
+}
+
 /** 仅供测试/重置时替换连接 */
 export function setDb(db) {
   if (handle) handle.close();

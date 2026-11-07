@@ -261,7 +261,7 @@ export function saveBackupConfig(input = {}) {
 
   const cfg = getBackupConfig();
   if (cfg.webdavEnabled && !cfg.hasWebdavPassword) warnings.push('未填写 WebDAV 密码（仅适用于匿名或免认证服务）');
-  if (cfg.webdavEnabled && !cfg.hasPassphrase) warnings.push('未设置备份密码：上传到 WebDAV 的压缩包未加密');
+  if (cfg.webdavEnabled && !cfg.hasPassphrase) warnings.push('未设置备份密码：WebDAV 上传会被阻止（如确需明文上传，设置 TRADELEDGER_BACKUP_ALLOW_UNENCRYPTED=1）');
   return { warnings };
 }
 
@@ -537,6 +537,10 @@ export async function runRemoteBackup({ reason = 'manual' } = {}) {
   try {
     const creds = webdavCredentials();
     if (!creds.webdavEnabled || !creds.webdavUrl) throw new Error('尚未启用 WebDAV 备份');
+    // 默认拒绝明文上传：WebDAV 往往是第三方存储，完整交易史不应裸奔。
+    if (!creds.passphrase && process.env.TRADELEDGER_BACKUP_ALLOW_UNENCRYPTED !== '1') {
+      throw new Error('未设置备份密码：为避免把未加密的完整交易历史上传到第三方存储，已阻止 WebDAV 上传。请在设置页设置备份密码（至少 8 位）；如确需明文上传，设置 TRADELEDGER_BACKUP_ALLOW_UNENCRYPTED=1');
+    }
     const mode = creds.backupMode === 'full' ? 'full' : 'incremental';
 
     const snap = (reason === 'auto' ? latestFreshSnapshot() : null) || createLocalSnapshot(reason);
