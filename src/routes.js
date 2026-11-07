@@ -34,7 +34,7 @@ import { calendarPage } from './views/calendar.js';
 import { missedPage } from './views/missed.js';
 import { importPage, importPreviewPage } from './views/import.js';
 import { accountsPage, accountNewPage, accountEditPage } from './views/accounts.js';
-import { reconcilePage } from './views/reconcile.js';
+import { reconcilePage, monthlyPanel } from './views/reconcile.js';
 import { reportPage, savedReportPage, aiReportsPage } from './views/review.js';
 import { transfersPage } from './views/transfers.js';
 import { spotPage } from './views/spot.js';
@@ -1790,36 +1790,34 @@ route('POST', '/dashboard/accounts/:id/sync', async (ctx) => {
  *  对账
  * ========================================================= */
 
-route('GET', '/dashboard/reconcile', (ctx) => requireUser(ctx, async (c) => {
-  const accounts = store.listAccounts();
-  const accountId = accountIdFromQuery(c.query, accounts);
-  // 月度对账：应用内净盈亏 vs 交易所账本实结算（支持 fetchMonthlyLedger 的交易所）
+/**
+ * 月度对账数据：应用内净盈亏 vs 交易所账本实结算。
+ * 页面不再同步等待交易所，改由 /dashboard/reconcile/monthly 异步加载。
+ */
+async function monthlyLedgerReports(accounts, accountId, { force = false } = {}) {
   const monthlyTargets = accounts
     .filter((a) => !a.is_demo && (!accountId || a.id === accountId))
     .map((account) => ({ account, adapter: getExchange(account.exchange) }))
     .filter(({ adapter }) => adapter && typeof adapter.fetchMonthlyLedger === 'function');
+  if (!monthlyTargets.length) return [];
+
   const monthlyIds = new Set(monthlyTargets.map(({ account }) => account.id));
   const monthlyPnl = new Map(); // accountId -> Map(month -> pnl)
-
-  const acc = createReconcileAccumulator();
   eachTradeBatch({ account_id: accountId }, (trade) => {
-    acc.add(trade);
     if (!monthlyIds.has(trade.account_id)) return;
     let byMonth = monthlyPnl.get(trade.account_id);
     if (!byMonth) { byMonth = new Map(); monthlyPnl.set(trade.account_id, byMonth); }
     const key = localMonthKey(trade.close_time);
     byMonth.set(key, (byMonth.get(key) || 0) + Number(trade.pnl || 0));
   });
-  const report = acc.result();
 
-  // 各账户并行拉取（缓存 10 分钟）；?refresh=1 强制刷新。
-  const forceLedger = c.query.refresh === '1';
-  const monthly = await Promise.all(monthlyTargets.map(async ({ account, adapter }) => {
+  // 各账户并行拉取（缓存 10 分钟）；force 由 ?refresh=1 透传到适配器。
+  return Promise.all(monthlyTargets.map(async ({ account, adapter }) => {
     const entry = { account: { id: account.id, name: account.name, exchange: account.exchange }, rows: [] };
     try {
       const byMonth = monthlyPnl.get(account.id) || new Map();
       const creds = store.getAccountCredentials(account.id);
-      const res = await monthlyLedgerCache.get(account, adapter, creds, { force: forceLedger });
+      const res = await monthlyLedgerCache.get(account, adapter, creds, { force });
       entry.rows = (res?.months || []).map((r) => {
         const app = byMonth.get(r.month) || 0;
         const exchangeNet = r.pnl + r.fee + r.fund;
@@ -1830,6 +1828,15 @@ route('GET', '/dashboard/reconcile', (ctx) => requireUser(ctx, async (c) => {
     }
     return entry;
   }));
+}
+
+route('GET', '/dashboard/reconcile', (ctx) => requireUser(ctx, (c) => {
+  const accounts = store.listAccounts();
+  const accountId = accountIdFromQuery(c.query, accounts);
+  // 对账页只做本地复算；交易所月度账本由页面异步拉取，冷启动不等网络。
+  const acc = createReconcileAccumulator();
+  eachTradeBatch({ account_id: accountId }, (trade) => acc.add(trade));
+  const report = acc.result();
   return html(page({
     title: '对账 | TradeLedger',
     user: c.user,
@@ -1838,11 +1845,22 @@ route('GET', '/dashboard/reconcile', (ctx) => requireUser(ctx, async (c) => {
       accounts,
       accountId,
       report,
-      monthly,
       notice: c.query.notice || '',
       error: c.query.error || '',
     }),
   }));
+}));
+
+route('GET', '/dashboard/reconcile/monthly', (ctx) => requireUser(ctx, async (c) => {
+  const accounts = store.listAccounts();
+  const accountId = accountIdFromQuery(c.query, accounts);
+  const monthly = await monthlyLedgerReports(accounts, accountId, { force: c.query.refresh === '1' });
+  return new Response(monthlyPanel(monthly), {
+    headers: {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+    },
+  });
 }));
 
 route('GET', '/api/reconcile', (ctx) => {

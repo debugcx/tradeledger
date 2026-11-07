@@ -5,7 +5,7 @@ const sign = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : 'flat');
 const sourceLabel = (s) => ({ api: '交易所同步', csv: 'CSV 导入', manual: '手动', demo: '演示' }[s] || s);
 
 /** 月度对账：应用内净盈亏 vs 交易所账本实结算（盈亏+手续费+资金费） */
-function monthlyPanel(monthly) {
+export function monthlyPanel(monthly) {
   if (!monthly || !monthly.length) return '';
   const blocks = monthly.map((m) => {
     if (m.error) {
@@ -25,7 +25,7 @@ function monthlyPanel(monthly) {
     }).join('');
     return `<section class="panel">
       <div class="panel-head"><h2>月度对账 · ${e(m.account.name)}（${e(m.account.exchange)}）</h2>
-        <span class="muted small">应用内净盈亏 vs 交易所账本（已实现盈亏+手续费+资金费）· 缓存 30 分钟</span></div>
+        <span class="muted small">应用内净盈亏 vs 交易所账本（已实现盈亏+手续费+资金费）· 短期缓存</span></div>
       <table class="table">
         <thead><tr><th>月份</th><th class="num">应用内</th><th class="num">交易所账本</th><th class="num">差异</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="4" class="muted center">暂无数据</td></tr>'}</tbody>
@@ -35,7 +35,7 @@ function monthlyPanel(monthly) {
   return blocks;
 }
 
-export function reconcilePage({ user, accounts = [], accountId = null, report, monthly = [], notice, error }) {
+export function reconcilePage({ user, accounts = [], accountId = null, report, notice, error }) {
   const accountPicker = accounts.length > 1 ? `
     <form method="get" action="/dashboard/reconcile" class="filter-bar" style="margin:10px 0">
       <select name="account_id" onchange="this.form.submit()">
@@ -114,7 +114,46 @@ export function reconcilePage({ user, accounts = [], accountId = null, report, m
       </table>
     </section>` : ''}
 
-    ${monthlyPanel(monthly)}`;
+    <div id="monthly-panels" data-account-id="${accountId || ''}">
+      <section class="panel">
+        <div class="panel-head"><h2>月度对账</h2></div>
+        <div class="chart-empty">正在拉取交易所账本…</div>
+      </section>
+    </div>
+    <script>
+      (function () {
+        var box = document.getElementById('monthly-panels');
+        if (!box) return;
+        var params = new URLSearchParams();
+        var accountId = box.getAttribute('data-account-id');
+        if (accountId) params.set('account_id', accountId);
+        if (new URLSearchParams(location.search).get('refresh') === '1') params.set('refresh', '1');
+        function fail(message) {
+          var section = document.createElement('section');
+          section.className = 'panel';
+          var head = document.createElement('div');
+          head.className = 'panel-head';
+          var title = document.createElement('h2');
+          title.textContent = '月度对账';
+          head.appendChild(title);
+          var empty = document.createElement('div');
+          empty.className = 'chart-empty';
+          empty.textContent = message;
+          section.appendChild(head);
+          section.appendChild(empty);
+          box.replaceChildren(section);
+        }
+        fetch('/dashboard/reconcile/monthly' + (params.toString() ? '?' + params.toString() : ''), {
+          headers: { accept: 'text/html' },
+        })
+          .then(function (res) { if (!res.ok) throw new Error('HTTP ' + res.status); return res.text(); })
+          .then(function (html) {
+            if (html && html.trim()) box.innerHTML = html;
+            else fail('没有可对账的交易所账户');
+          })
+          .catch(function (err) { fail('账本加载失败：' + (err && err.message ? err.message : String(err))); });
+      })();
+    </script>`;
 
   return shell({
     active: 'reconcile', user, title: '对账',

@@ -48,6 +48,24 @@ test('登录后可访问受保护 API', async () => {
   assert.equal(body.id, 1);
 });
 
+test('对账页与月度片段：页面不等待交易所，片段默认拒绝匿名', async () => {
+  const anon = await handle(req('/dashboard/reconcile/monthly'));
+  assert.equal(anon.status, 302);
+
+  const session = auth.login({ remember: false });
+  const cookie = { cookie: `tl_session=${session.token}` };
+  const page = await handle(req('/dashboard/reconcile', { headers: cookie }));
+  assert.equal(page.status, 200);
+  const pageHtml = await page.text();
+  assert.match(pageHtml, /id="monthly-panels"/);
+  assert.match(pageHtml, /dashboard\/reconcile\/monthly/);
+
+  const fragment = await handle(req('/dashboard/reconcile/monthly', { headers: cookie }));
+  assert.equal(fragment.status, 200);
+  assert.equal(fragment.headers.get('content-type'), 'text/html; charset=utf-8');
+  assert.equal(await fragment.text(), ''); // 空库里没有可对账账户
+});
+
 test('清理内存库', () => {
   closeDb();
 });
