@@ -199,7 +199,7 @@ export function noteViewPage({ user, note, tradeNotes = [], notice, error }) {
           ${note.category === 'spot' ? '<a class="btn btn-ghost small" href="/dashboard/spot">去现货页</a>' : ''}
           <a class="btn btn-ghost small" href="/dashboard/notes/${note.id}/edit">编辑</a>
           <form method="post" action="/dashboard/notes/delete" class="inline"
-            onsubmit="return confirm('确定删除这篇笔记吗？')">
+            data-confirm="确定删除这篇笔记吗？">
             <input type="hidden" name="id" value="${note.id}">
             <button class="btn btn-ghost small danger" type="submit">删除</button>
           </form>
@@ -325,7 +325,7 @@ export function noteEditPage({ user, note, category = 'general', subject = '', s
         </div>
       </form>
       ${!isNew ? `<form method="post" action="/dashboard/notes/delete" class="form-delete"
-        onsubmit="return confirm('确定删除这篇笔记吗？')">
+        data-confirm="确定删除这篇笔记吗？">
         <input type="hidden" name="id" value="${note.id}">
         <button class="btn btn-ghost danger" type="submit">删除这篇笔记</button>
       </form>` : ''}

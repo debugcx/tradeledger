@@ -54,10 +54,10 @@ const MIME = {
   '.ttf': 'font/ttf',
 };
 
-// 页面没有外部脚本/样式/字体；内联 script/style 仍需 unsafe-inline（对账面板等）。
+// 页面没有外部脚本/样式/字体；对账面板脚本已外置为 /reconcile-monthly.js。
 const CSP = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline'",
+  "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "font-src 'self' data:",

@@ -61,7 +61,7 @@ export function spotPage({ user, accounts = [], accountId = null, balances, hold
 
   const body = `
     ${accounts.length > 1 ? `<form method="get" action="/dashboard/spot" class="filter-bar" style="margin:0 0 12px">
-      <select name="account_id" onchange="this.form.submit()">
+      <select name="account_id" data-autosubmit>
         <option value="">全部账户</option>
         ${accounts.map((a) => `<option value="${a.id}" ${String(a.id) === String(accountId) ? 'selected' : ''}>${e(a.name)}（${e(a.exchange)}）</option>`).join('')}
       </select>

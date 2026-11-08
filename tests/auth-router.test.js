@@ -58,7 +58,7 @@ test('对账页与月度片段：页面不等待交易所，片段默认拒绝�
   assert.equal(page.status, 200);
   const pageHtml = await page.text();
   assert.match(pageHtml, /id="monthly-panels"/);
-  assert.match(pageHtml, /dashboard\/reconcile\/monthly/);
+  assert.match(pageHtml, /<script src="\/reconcile-monthly\.js" defer><\/script>/);
 
   const fragment = await handle(req('/dashboard/reconcile/monthly', { headers: cookie }));
   assert.equal(fragment.status, 200);

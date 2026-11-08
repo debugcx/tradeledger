@@ -58,7 +58,7 @@ export function tagsPage({ user, tags, tagsWithCounts = [], quickTags = null, ac
     <section class="panel">
       <div class="panel-head"><h2>标签表现</h2>
         <form method="get" action="/dashboard/tags" class="inline">
-          ${accounts.length > 1 ? `<select name="account_id" onchange="this.form.submit()">
+          ${accounts.length > 1 ? `<select name="account_id" data-autosubmit>
             <option value="">全部账户</option>
             ${accounts.map((a) => `<option value="${a.id}" ${String(a.id) === String(accountId) ? 'selected' : ''}>${e(a.name)}（${e(a.exchange)}）</option>`).join('')}
           </select>` : ''}
@@ -74,7 +74,7 @@ export function tagsPage({ user, tags, tagsWithCounts = [], quickTags = null, ac
       <div class="tag-row">
         ${tags.map((t) => `<span class="tag-pill" style="border-color:${e(t.color)}">${e(t.name)}
           <form method="post" action="/dashboard/tags/delete" class="inline"
-            onsubmit='return confirm(${e(JSON.stringify(`删除标签「${t.name}」？交易记录不会被删除。`))})'>
+            data-confirm=${e(JSON.stringify(`删除标签「${t.name}」？交易记录不会被删除。`))}>
             <input type="hidden" name="id" value="${t.id}">
             <button class="tag-del" type="submit" title="删除">×</button>
           </form></span>`).join('') || '<span class="muted">还没有标签</span>'}

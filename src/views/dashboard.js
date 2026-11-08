@@ -540,7 +540,7 @@ export function dashboardPage({ user, stats, trades, market = 'all', accounts = 
     ${demo?.active ? `<div class="alert alert-info demo-banner">
       <span><b>当前包含演示数据</b>（${fmtNum(demo.trades)} 笔 · ${demo.accounts} 个演示账户）。
       接入真实数据前请先清除，否则统计会真假混在一起。</span>
-      <form method="post" action="/dashboard/settings/clear-demo" onsubmit="return confirm('确定清除全部演示数据吗？真实交易不会被删除。')">
+      <form method="post" action="/dashboard/settings/clear-demo" data-confirm="确定清除全部演示数据吗？真实交易不会被删除。">
         <button class="btn small" type="submit">清除演示数据</button>
       </form>
     </div>` : ''}

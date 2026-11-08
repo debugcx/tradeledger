@@ -39,7 +39,7 @@ export function missedPage({ user, list, notice, error }) {
     <td class="small">${e(r.note || '')}</td>
     <td>
       <form method="post" action="/dashboard/missed/delete" class="inline"
-        onsubmit="return confirm('删除这条错过交易记录？')">
+        data-confirm="删除这条错过交易记录？">
         <input type="hidden" name="id" value="${r.id}">
         <button class="btn btn-ghost small" type="submit">删除</button>
       </form>

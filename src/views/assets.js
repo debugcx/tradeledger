@@ -242,7 +242,7 @@ function manualTab({ manual, editAsset }) {
       <td class="small muted" title="${e(a.note || '')}">${e(String(a.note || '').slice(0, 24))}</td>
       <td class="row-actions">
         <a class="btn btn-ghost small" href="/dashboard/assets?tab=manual&edit=${a.id}">编辑</a>
-        <form method="post" action="/dashboard/assets/manual/${a.id}/delete" class="inline" onsubmit="return confirm('删除这条手动资产？')">
+        <form method="post" action="/dashboard/assets/manual/${a.id}/delete" class="inline" data-confirm="删除这条手动资产？">
           <button class="btn btn-ghost small danger" type="submit">删除</button>
         </form>
       </td>
@@ -307,7 +307,7 @@ function walletsTab({ wallets, providers, walletRuns, walletRefreshMinutes = 240
           <button class="btn btn-ghost small" type="submit">同步</button>
         </form>
         <a class="btn btn-ghost small" href="/dashboard/assets/wallets/${w.id}/edit">编辑</a>
-        <form method="post" action="/dashboard/assets/wallets/${w.id}/delete" class="inline" onsubmit="return confirm('删除钱包及其链上仓位记录？')">
+        <form method="post" action="/dashboard/assets/wallets/${w.id}/delete" class="inline" data-confirm="删除钱包及其链上仓位记录？">
           <button class="btn btn-ghost small danger" type="submit">删除</button>
         </form>
       </td>

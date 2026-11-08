@@ -1374,6 +1374,27 @@ registerProcessor('asr-capture', AsrCapture);
     initQuickNote();
     initDictation();
     initDashboardOrder();
+    initConfirmForms();
+  }
+
+  /* 确认对话框：form[data-confirm] / button[data-confirm] 提交前弹 confirm。
+   * 取代内联 onsubmit/onclick（CSP script-src 'self' 不允许内联处理器）。 */
+  function initConfirmForms() {
+    document.addEventListener('submit', function (ev) {
+      var target = ev.target;
+      var message = target && target.getAttribute ? target.getAttribute('data-confirm') : '';
+      if (!message && ev.submitter) message = ev.submitter.getAttribute('data-confirm') || '';
+      if (!message) return;
+      if (!window.confirm(message)) ev.preventDefault();
+    });
+    document.addEventListener('click', function (ev) {
+      var btn = ev.target && ev.target.closest ? ev.target.closest('button[data-confirm]') : null;
+      if (!btn) return;
+      if (!window.confirm(btn.getAttribute('data-confirm'))) {
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+    }, true);
   }
 
   /* ---------------- 行内快评：表格行下方展开输入框，就地保存 ---------------- */

@@ -177,7 +177,7 @@ export function journalPage({ user, trades, filters, tags, symbols, pagination, 
         <input type="hidden" name="back" value="${e(back || '/dashboard/journal')}">
         <button class="btn btn-ghost small danger" type="submit"
           title="移入垃圾箱：不参与统计，同步也不会再导回"
-          onclick="return confirm('把这条记录移入垃圾箱？\\n统计会立即排除它，交易所同步也不会再把它导回来；可在交易记录 → 垃圾箱里恢复。')">删除</button>
+          data-confirm="把这条记录移入垃圾箱？&#10;统计会立即排除它，交易所同步也不会再把它导回来；可在交易记录 → 垃圾箱里恢复。">删除</button>
       </form>
     </td>
   </tr>`).join('');
@@ -435,7 +435,7 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTa
           <form method="post" action="/dashboard/journal/${trade.id}/trash" class="inline" data-no-guard>
             <input type="hidden" name="back" value="${e(back)}">
             <button class="btn btn-ghost small danger" type="submit"
-              onclick="return confirm('把这条记录移入垃圾箱？\\n统计会立即排除它，交易所同步也不会再把它导回来；可在交易记录 → 垃圾箱里恢复。')">删除</button>
+              data-confirm="把这条记录移入垃圾箱？&#10;统计会立即排除它，交易所同步也不会再把它导回来；可在交易记录 → 垃圾箱里恢复。">删除</button>
           </form>
         </div>
       </div>
@@ -555,7 +555,7 @@ export function journalTrashPage({ user, trades = [], total = 0, q = '', notice,
       </form>
       <form method="post" action="/dashboard/journal/${t.id}/delete" class="inline">
         <button class="btn btn-ghost small danger" type="submit"
-          onclick="return confirm('彻底删除后无法恢复。若交易所侧仍有这条记录，下次同步会重新导入。确定删除？')">彻底删除</button>
+          data-confirm="彻底删除后无法恢复。若交易所侧仍有这条记录，下次同步会重新导入。确定删除？">彻底删除</button>
       </form>
     </td>
   </tr>`).join('');

@@ -80,11 +80,11 @@ export function accountsPage({ user, accounts, meta, runs, accountStats = {}, st
           <button class="btn btn-ghost small" type="button" data-sync-account="${a.id}">同步</button>
           <a class="btn btn-ghost small" href="/dashboard/accounts/${a.id}/edit">编辑</a>
           <form method="post" action="/dashboard/accounts/${a.id}/resync" class="inline"
-            onsubmit="return confirm('按当前回溯范围重新扫一遍历史？已有交易会按去重保留。')">
+            data-confirm="按当前回溯范围重新扫一遍历史？已有交易会按去重保留。">
             <button class="btn btn-ghost small" type="submit">重新回溯</button>
           </form>
           <form method="post" action="/dashboard/accounts/${a.id}/delete" class="inline"
-            onsubmit='return confirm(${e(JSON.stringify(`删除账户「${a.name}」？已同步的交易会保留。`))})'>
+            data-confirm=${e(JSON.stringify(`删除账户「${a.name}」？已同步的交易会保留。`))}>
             <button class="btn btn-ghost small danger" type="submit">删除</button>
           </form>`}
       </td>

@@ -88,7 +88,7 @@ export function reportPage({
           <td class="small muted">${fmtNum(h.content_len)} 字</td>
           <td class="row-actions">
             <a class="btn btn-ghost small" href="/dashboard/review/history/${h.id}">查看</a>
-            <form method="post" action="/dashboard/review/history/delete" class="inline" onsubmit="return confirm('删除这条生成记录？')">
+            <form method="post" action="/dashboard/review/history/delete" class="inline" data-confirm="删除这条生成记录？">
               <input type="hidden" name="id" value="${h.id}">
               <button class="btn btn-ghost small danger" type="submit">删除</button>
             </form>
@@ -217,7 +217,7 @@ export function savedReportPage({ user, report, notice, error }) {
         <input type="hidden" name="report_id" value="${report.id}">
         <button class="btn btn-primary small" type="submit">写入笔记</button>
       </form>
-      <form method="post" action="/dashboard/review/history/delete" class="inline" onsubmit="return confirm('删除这条生成记录？')">
+      <form method="post" action="/dashboard/review/history/delete" class="inline" data-confirm="删除这条生成记录？">
         <input type="hidden" name="id" value="${report.id}">
         <button class="btn btn-ghost small danger" type="submit">删除</button>
       </form>
@@ -241,7 +241,7 @@ export function aiReportsPage({ user, generations, report = null, notice, error 
         <input type="hidden" name="report_id" value="${g.id}">
         <button class="btn btn-ghost small" type="submit" title="保存为笔记">写入笔记</button>
       </form>
-      <form method="post" action="/dashboard/review/history/delete" class="inline" onsubmit="return confirm('删除这条生成记录？')">
+      <form method="post" action="/dashboard/review/history/delete" class="inline" data-confirm="删除这条生成记录？">
         <input type="hidden" name="id" value="${g.id}">
         <button class="btn btn-ghost small danger" type="submit">删除</button>
       </form>

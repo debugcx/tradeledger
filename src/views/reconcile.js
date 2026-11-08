@@ -38,7 +38,7 @@ export function monthlyPanel(monthly) {
 export function reconcilePage({ user, accounts = [], accountId = null, report, notice, error }) {
   const accountPicker = accounts.length > 1 ? `
     <form method="get" action="/dashboard/reconcile" class="filter-bar" style="margin:10px 0">
-      <select name="account_id" onchange="this.form.submit()">
+      <select name="account_id" data-autosubmit>
         <option value="">全部账户</option>
         ${accounts.filter((a) => !a.is_demo).map((a) => `<option value="${a.id}" ${String(a.id) === String(accountId) ? 'selected' : ''}>${e(a.name)}（${e(a.exchange)}）</option>`).join('')}
       </select>
@@ -120,40 +120,7 @@ export function reconcilePage({ user, accounts = [], accountId = null, report, n
         <div class="chart-empty">正在拉取交易所账本…</div>
       </section>
     </div>
-    <script>
-      (function () {
-        var box = document.getElementById('monthly-panels');
-        if (!box) return;
-        var params = new URLSearchParams();
-        var accountId = box.getAttribute('data-account-id');
-        if (accountId) params.set('account_id', accountId);
-        if (new URLSearchParams(location.search).get('refresh') === '1') params.set('refresh', '1');
-        function fail(message) {
-          var section = document.createElement('section');
-          section.className = 'panel';
-          var head = document.createElement('div');
-          head.className = 'panel-head';
-          var title = document.createElement('h2');
-          title.textContent = '月度对账';
-          head.appendChild(title);
-          var empty = document.createElement('div');
-          empty.className = 'chart-empty';
-          empty.textContent = message;
-          section.appendChild(head);
-          section.appendChild(empty);
-          box.replaceChildren(section);
-        }
-        fetch('/dashboard/reconcile/monthly' + (params.toString() ? '?' + params.toString() : ''), {
-          headers: { accept: 'text/html' },
-        })
-          .then(function (res) { if (!res.ok) throw new Error('HTTP ' + res.status); return res.text(); })
-          .then(function (html) {
-            if (html && html.trim()) box.innerHTML = html;
-            else fail('没有可对账的交易所账户');
-          })
-          .catch(function (err) { fail('账本加载失败：' + (err && err.message ? err.message : String(err))); });
-      })();
-    </script>`;
+    <script src="/reconcile-monthly.js" defer></script>`;
 
   return shell({
     active: 'reconcile', user, title: '对账',

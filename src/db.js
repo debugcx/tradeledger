@@ -663,17 +663,37 @@ export const all = (sql, ...params) => getDb().prepare(sql).all(...params);
 export const get = (sql, ...params) => getDb().prepare(sql).get(...params);
 export const run = (sql, ...params) => getDb().prepare(sql).run(...params);
 
-/** 事务包装；回调抛错则回滚 */
+/**
+ * 事务包装；回调抛错则回滚。
+ * 支持重入：嵌套调用不再各自 BEGIN/COMMIT（SQLite 会直接报错），而是并入
+ * 最外层事务——内层抛错只中止内层剩余语句，外层可以选择接住继续或整体回滚。
+ * 与 SAVEPOINT 语义一致：嵌套深度只做计数，不额外消耗数据库能力。
+ */
+let txDepth = 0;
+
 export function tx(fn) {
   const db = getDb();
+  if (txDepth > 0) {
+    // 已在事务内：直接执行。内层异常向上传播，由最外层决定回滚。
+    txDepth += 1;
+    try {
+      return fn(db);
+    } finally {
+      txDepth -= 1;
+    }
+  }
   db.exec('BEGIN IMMEDIATE');
   try {
+    txDepth = 1;
     const result = fn(db);
     db.exec('COMMIT');
     return result;
   } catch (err) {
+    txDepth = 0;
     try { db.exec('ROLLBACK'); } catch { /* 已经回滚 */ }
     throw err;
+  } finally {
+    txDepth = 0;
   }
 }
 

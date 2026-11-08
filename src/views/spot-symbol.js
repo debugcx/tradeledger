@@ -124,7 +124,7 @@ export function spotSymbolPage({
     ${l.trade_id ? `<a class="muted small" href="/dashboard/journal/${l.trade_id}">交易</a>` : ''}
     <span class="status-badge ${l.source === 'auto' ? 'muted' : 'blue'}">${l.source === 'auto' ? '自动' : '手动'}</span>
     <span class="muted small log-account">${e(l.account_name || '')}</span>
-    ${l.source === 'manual' ? `<form method="post" action="/dashboard/spot/log/delete" class="inline" onsubmit="return confirm('删除这条日志？')">
+    ${l.source === 'manual' ? `<form method="post" action="/dashboard/spot/log/delete" class="inline" data-confirm="删除这条日志？">
       <input type="hidden" name="id" value="${l.id}">
       <input type="hidden" name="symbol" value="${e(symbol)}">
       <button class="log-del" type="submit" title="删除" aria-label="删除这条日志">✕</button>

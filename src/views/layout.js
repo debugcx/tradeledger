@@ -46,7 +46,7 @@ export function layout({ title = 'TradeLedger', user = null, body = '', descript
 <meta name="robots" content="noindex, nofollow">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%237DA2FF'/><text x='16' y='22' font-size='18' font-family='monospace' text-anchor='middle' fill='%230B0E14'>TL</text></svg>">
 <link rel="stylesheet" href="/style.css">
-<script>try{var t=localStorage.getItem('tl-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;if(localStorage.getItem('tl-privacy')==='1')document.documentElement.dataset.privacy='1';}catch(e){}</script>
+<script src="/theme-init.js"></script>
 </head>
 <body>
 <header class="site-header">

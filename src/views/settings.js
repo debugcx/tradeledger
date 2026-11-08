@@ -29,11 +29,11 @@ function backupSection({ config = {}, local = [], remote = null, remoteError = '
     <td>${fmtBytes(b.bytes)}</td>
     <td class="row-actions">
       <a class="btn btn-ghost small" href="/dashboard/settings/backup/download?name=${encodeURIComponent(b.name)}" download>下载</a>
-      <form method="post" action="/dashboard/settings/backup/restore-local" class="inline" onsubmit="return confirm('恢复会覆盖当前数据库，并在重启服务后生效。继续吗？')">
+      <form method="post" action="/dashboard/settings/backup/restore-local" class="inline" data-confirm="恢复会覆盖当前数据库，并在重启服务后生效。继续吗？">
         <input type="hidden" name="name" value="${e(b.name)}">
         <button class="btn btn-ghost small" type="submit">恢复</button>
       </form>
-      <form method="post" action="/dashboard/settings/backup/delete" class="inline" onsubmit="return confirm('删除这个本地快照？')">
+      <form method="post" action="/dashboard/settings/backup/delete" class="inline" data-confirm="删除这个本地快照？">
         <input type="hidden" name="name" value="${e(b.name)}">
         <button class="btn btn-ghost small danger" type="submit">删除</button>
       </form>
@@ -47,7 +47,7 @@ function backupSection({ config = {}, local = [], remote = null, remoteError = '
     <td>${fmtBytes(f.bytes)}</td>
     <td>${f.encrypted ? '已加密' : '<span class="muted">未加密</span>'}</td>
     <td class="row-actions">
-      <form method="post" action="/dashboard/settings/backup/restore-remote" class="inline" onsubmit="return confirm('从 WebDAV 下载并恢复这份备份？会先暂存，重启服务后生效。')">
+      <form method="post" action="/dashboard/settings/backup/restore-remote" class="inline" data-confirm="从 WebDAV 下载并恢复这份备份？会先暂存，重启服务后生效。">
         <input type="hidden" name="name" value="${e(f.name)}">
         <button class="btn btn-ghost small" type="submit">下载并恢复</button>
       </form>
@@ -154,7 +154,7 @@ export function settingsPage({ user, overview, dbBytes, seededAt, notice, error,
   const demoBox = overview.demoAccounts
     ? `<div class="danger-row">
         <div><b>清除演示数据</b><p class="muted small">删除 ${overview.demoAccounts} 个演示账户及其全部交易，保留真实交易、笔记和标签。</p></div>
-        <form method="post" action="/dashboard/settings/clear-demo" onsubmit="return confirm('确定清除全部演示数据吗？真实交易不会被删除。')">
+        <form method="post" action="/dashboard/settings/clear-demo" data-confirm="确定清除全部演示数据吗？真实交易不会被删除。">
           <button class="btn btn-ghost" type="submit">清除演示数据</button>
         </form>
       </div>`
@@ -229,7 +229,7 @@ export function settingsPage({ user, overview, dbBytes, seededAt, notice, error,
       <div class="danger-row">
         <div><b class="danger-text">清空全部数据</b>
           <p class="muted small">删除交易、成交缓存、标签、笔记、导入记录、AI 报告、设置、已保存密钥与所有账户。不可恢复，请先导出备份。</p></div>
-        <form method="post" action="/dashboard/settings/reset" onsubmit="return confirm('最后确认：清空全部数据？此操作不可恢复。')">
+        <form method="post" action="/dashboard/settings/reset" data-confirm="最后确认：清空全部数据？此操作不可恢复。">
           <button class="btn btn-ghost danger" type="submit">清空全部数据</button>
         </form>
       </div>
