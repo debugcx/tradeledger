@@ -150,7 +150,7 @@ function backupSection({ config = {}, local = [], remote = null, remoteError = '
   </section>`;
 }
 
-export function settingsPage({ user, overview, dbBytes, seededAt, notice, error, backup = {}, net = {} }) {
+export function settingsPage({ user, overview, dbBytes, seededAt, recentImports = [], notice, error, backup = {}, net = {} }) {
   const demoBox = overview.demoAccounts
     ? `<div class="danger-row">
         <div><b>清除演示数据</b><p class="muted small">删除 ${overview.demoAccounts} 个演示账户及其全部交易，保留真实交易、笔记和标签。</p></div>
@@ -233,6 +233,22 @@ export function settingsPage({ user, overview, dbBytes, seededAt, notice, error,
           <button class="btn btn-ghost danger" type="submit">清空全部数据</button>
         </form>
       </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>最近导入</h2><span class="muted small">最多 10 条 · 完整历史在<a href="/dashboard/import">数据导入</a>页</span></div>
+      ${recentImports.length ? `<table class="table">
+        <thead><tr><th>时间</th><th>账户</th><th>文件</th><th class="num">行数</th><th class="num">入库</th><th class="num">跳过</th><th class="num">失败</th></tr></thead>
+        <tbody>${recentImports.map((i) => `<tr>
+          <td class="small">${e(fmtDateTime(i.created_at))}</td>
+          <td class="small">${e(i.account_name || '—')}</td>
+          <td class="small"><code>${e(i.filename)}</code></td>
+          <td class="num">${fmtNum(i.rows)}</td>
+          <td class="num pos">${fmtNum(i.inserted)}</td>
+          <td class="num muted">${fmtNum(i.skipped)}</td>
+          <td class="num ${i.failed ? 'neg' : 'muted'}">${fmtNum(i.failed)}</td>
+        </tr>`).join('')}</tbody>
+      </table>` : '<p class="muted small">还没有导入记录。CSV 导入在<a href="/dashboard/import">数据导入</a>页完成。</p>'}
     </section>
 
     <section class="panel">

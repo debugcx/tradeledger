@@ -52,7 +52,17 @@ function venueKey(row) {
 
 function positionRows(rows) {
   if (!rows.length) {
-    return '<tr><td colspan="9" class="muted center">还没有资产数据。添加交易所账户或钱包后，后台会自动同步。</td></tr>';
+    return `<tr><td colspan="9">
+      <div class="empty-cta">
+        <p><b>还没有资产数据。</b></p>
+        <p class="muted small">添加交易所账户或链上钱包后，后台会自动同步并汇总到这里。</p>
+        <div class="row-actions">
+          <a class="btn btn-primary small" href="/dashboard/accounts/new">添加交易所账户</a>
+          <a class="btn btn-ghost small" href="/dashboard/assets/wallets/new">添加链上钱包</a>
+          <a class="btn btn-ghost small" href="/dashboard/assets?tab=manual">手动记录资产</a>
+        </div>
+      </div>
+    </td></tr>`;
   }
   return rows.map((r) => {
     const value = r.value_usd === null || r.value_usd === undefined ? null : Number(r.value_usd);

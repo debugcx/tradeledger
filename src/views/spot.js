@@ -81,7 +81,16 @@ export function spotPage({ user, accounts = [], accountId = null, balances, hold
         <span class="muted small">市值按实时价格估算；成本来自已同步的买入成交</span></div>
       <table class="table">
         <thead><tr><th>账户</th><th>交易对</th><th class="num">数量</th><th class="num">平均成本</th><th class="num">当前价</th><th class="num">市值</th><th class="num">未实现盈亏</th><th>备注</th></tr></thead>
-        <tbody>${holdingRows || '<tr><td colspan="8" class="muted center">还没有现货持仓。添加交易所并同步后，这里会显示现货余额。</td></tr>'}</tbody>
+        <tbody>${holdingRows || `<tr><td colspan="8">
+          <div class="empty-cta">
+            <p><b>还没有现货持仓。</b></p>
+            <p class="muted small">添加交易所账户并启用现货同步后，这里会显示现货余额与成本；也可以用 CSV 导入现货成交。</p>
+            <div class="row-actions">
+              <a class="btn btn-primary small" href="/dashboard/accounts/new">添加交易所</a>
+              <a class="btn btn-ghost small" href="/dashboard/import">CSV 导入现货成交</a>
+            </div>
+          </div>
+        </td></tr>`}</tbody>
       </table>
       <p class="chart-note">备注与复盘都在交易对详情页编辑，支持 Markdown 和图片；点交易对名字进入。</p>
     </section>

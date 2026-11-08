@@ -388,13 +388,13 @@ function dashboardPanelOrder() {
 route('GET', '/dashboard', (ctx) => requireUser(ctx, (c) => {  const market = ['all', 'futures', 'spot'].includes(c.query.market) ? c.query.market : 'all';
   const accounts = store.listAccounts();
   const accountId = accountIdFromQuery(c.query, accounts);
-  // 统计缓存命中时不再加载全量交易；最近交易单独取 20 行。
+  // 统计缓存命中时不再加载全量交易；最近交易单独取 50 行。
   const stats = analyzeCachedLazy(
     store.tradesVersion(),
     `dash:${accountId || 'all'}:${market}`,
     () => filterTrades(store.listTrades(), { account_id: accountId, market }),
   );
-  const trades = store.listTradesPage({ account_id: accountId, market }, { limit: 20 });
+  const trades = store.listTradesPage({ account_id: accountId, market }, { limit: 50 });
   return html(page({
     title: '仪表盘 | TradeLedger',
     user: c.user,
@@ -2437,6 +2437,7 @@ route('GET', '/dashboard/settings', (ctx) => requireUser(ctx, async (c) => {
       overview: store.statsOverview(),
       dbBytes: dbSizeBytes(),
       seededAt: store.getMeta('seeded_at', ''),
+      recentImports: store.listImports(10),
       net: {
         proxy: store.getMeta('net_exchange_proxy', ''),
         hosts: store.getMeta('net_exchange_proxy_hosts', ''),

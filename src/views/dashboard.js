@@ -357,7 +357,7 @@ function dailyPanel(s) {
 }
 
 function recentTrades(trades) {
-  const rows = trades.slice(0, 20).map((t) => `<tr>
+  const rows = trades.slice(0, 50).map((t) => `<tr>
     <td>${fmtDateTime(t.close_time)}</td>
     <td><a href="/dashboard/journal/${t.id}"><b>${e(t.symbol)}</b></a>
       <div class="muted small">${t.market === 'spot' ? '现货' : '合约'}</div></td>
@@ -369,8 +369,12 @@ function recentTrades(trades) {
     <td class="num muted">${e(fmtDuration(new Date(t.close_time) - new Date(t.open_time)))}</td>
     <td>${(t.tags || []).map((x) => `<span class="tag-pill">${e(x)}</span>`).join(' ')}</td>
   </tr>`).join('');
+  const totalPnl = trades.reduce((a, t) => a + (Number(t.pnl) || 0), 0);
+  const summary = trades.length
+    ? `<span class="muted small">最近 ${fmtNum(trades.length)} 笔 · 合计 <b class="${sign(totalPnl)}">${fmtMoney(totalPnl)}</b></span>`
+    : '';
   return `<section class="panel">
-    <div class="panel-head"><h2>最近交易</h2><a class="btn btn-ghost small" href="/dashboard/journal">查看全部</a></div>
+    <div class="panel-head"><h2>最近交易</h2>${summary}<a class="btn btn-ghost small" href="/dashboard/journal">查看全部</a></div>
     <table class="table">
       <thead><tr><th>平仓时间</th><th>币种</th><th>方向</th><th>类型</th><th class="num">开仓 → 平仓</th><th class="num">名义价值</th><th class="num">净盈亏</th><th class="num">持仓</th><th>标签</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="9" class="muted center">暂无交易记录</td></tr>'}</tbody>

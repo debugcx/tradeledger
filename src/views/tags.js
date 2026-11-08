@@ -27,10 +27,12 @@ export function tagsPage({ user, tags, tagsWithCounts = [], quickTags = null, ac
   const maxAbs = Math.max(1, ...stats.tagStats.map((t) => Math.abs(t.expectancy)));
   const rows = stats.tagStats.length ? stats.tagStats.map((t) => {
     const width = (Math.abs(t.expectancy) / maxAbs) * 100;
+    const avgPnl = t.count ? t.pnl / t.count : 0;
     return `<tr>
       <td><a class="tag-pill" href="/dashboard/journal?tag=${encodeURIComponent(t.tag)}">${e(t.tag)}</a></td>
       <td class="num">${fmtNum(t.count)}</td>
       <td class="num ${sign(t.pnl)}">${fmtMoney(t.pnl)}</td>
+      <td class="num ${sign(avgPnl)}">${fmtMoney(avgPnl)}</td>
       <td class="num">${fmtPct(t.winRate)}</td>
       <td class="num">${fmtMoney(t.avgWin)}</td>
       <td class="num">${fmtMoney(-t.avgLoss, { sign: false })}</td>
@@ -39,7 +41,7 @@ export function tagsPage({ user, tags, tagsWithCounts = [], quickTags = null, ac
         <div class="mini-bar"><span style="width:${width.toFixed(1)}%;background:${t.expectancy >= 0 ? '#4ade80' : '#ff6b57'}"></span></div>
       </td>
     </tr>`;
-  }).join('') : '<tr><td colspan="8" class="muted center">还没有标签数据。给交易打上标签后，这里会按标签统计表现。</td></tr>';
+  }).join('') : '<tr><td colspan="9" class="muted center">还没有标签数据。给交易打上标签后，这里会按标签统计表现。</td></tr>';
 
   const body = `
     ${settingsNav('tags')}
@@ -63,9 +65,9 @@ export function tagsPage({ user, tags, tagsWithCounts = [], quickTags = null, ac
             ${accounts.map((a) => `<option value="${a.id}" ${String(a.id) === String(accountId) ? 'selected' : ''}>${e(a.name)}（${e(a.exchange)}）</option>`).join('')}
           </select>` : ''}
         </form>
-        <span class="muted small">按交易预期排序；条形长度 = 预期绝对值</span></div>
+        <span class="muted small">按交易预期排序；平均盈亏 = 总盈亏 ÷ 笔数，单笔均值视角</span></div>
       <table class="table">
-        <thead><tr><th>标签</th><th class="num">笔数</th><th class="num">总盈亏</th><th class="num">胜率</th><th class="num">平均盈利</th><th class="num">平均亏损</th><th class="num">平均持仓</th><th class="num">交易预期</th></tr></thead>
+        <thead><tr><th>标签</th><th class="num">笔数</th><th class="num">总盈亏</th><th class="num">平均盈亏</th><th class="num">胜率</th><th class="num">平均盈利</th><th class="num">平均亏损</th><th class="num">平均持仓</th><th class="num">交易预期</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </section>

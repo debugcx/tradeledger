@@ -21,6 +21,35 @@ function buildDaily(trades) {
   return map;
 }
 
+/**
+ * 周汇总：把当月日历按周切片（与日历网格同一行），每行给出盈亏/笔数/胜率。
+ * 半月（月初/月末不满一周）也能给出部分数据，不做 ISO 周对齐——这里
+ * 的语义是「日历上的第几行」，与用户看到的格子一一对应。
+ */
+function buildWeekRows(weeks, daily, month) {
+  return weeks.map((week, index) => {
+    const agg = { pnl: 0, trades: 0, wins: 0, days: 0, label: '' };
+    for (const cell of week) {
+      if (!cell) continue;
+      const d = daily.get(cell.key);
+      if (!d || !d.trades) continue;
+      agg.pnl += d.pnl;
+      agg.trades += d.trades;
+      agg.wins += d.wins;
+      agg.days += 1;
+      agg.label = cell.key; // 保持最后一天，显示为日期区间
+    }
+    const first = week.find((c) => c)?.day;
+    const last = [...week].reverse().find((c) => c)?.day;
+    agg.range = first && last
+      ? (first === last ? `${month}月${first}日` : `${month}/${String(first).padStart(2, '0')} – ${month}/${String(last).padStart(2, '0')}`)
+      : '';
+    agg.winRate = agg.trades ? agg.wins / agg.trades : 0;
+    agg.index = index + 1;
+    return agg;
+  }).filter((w) => w.trades > 0);
+}
+
 export function calendarPage({ user, trades, year, month, accounts = [], accountId = null, notice, error }) {
   const daily = buildDaily(trades);
   const first = new Date(year, month - 1, 1);
@@ -49,6 +78,7 @@ export function calendarPage({ user, trades, year, month, accounts = [], account
 
   const weeks = [];
   for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
+  const weekRows = buildWeekRows(weeks, daily, month);
 
   const prev = month === 1 ? { y: year - 1, m: 12 } : { y: year, m: month - 1 };
   const next = month === 12 ? { y: year + 1, m: 1 } : { y: year, m: month + 1 };
@@ -108,7 +138,20 @@ export function calendarPage({ user, trades, year, month, accounts = [], account
         <span><i class="dot flat"></i>持平</span>
         <span class="muted">点击某一天可跳到当天交易</span>
       </div>
-    </section>`;
+    </section>
+    ${weekRows.length ? `<section class="panel">
+      <div class="panel-head"><h2>周汇总</h2><span class="muted small">按日历行切分 · 只有交易日的周会列出</span></div>
+      <table class="table">
+        <thead><tr><th>周</th><th class="num">盈亏</th><th class="num">交易</th><th class="num">盈利天数</th><th class="num">胜率</th></tr></thead>
+        <tbody>${weekRows.map((w) => `<tr>
+          <td>第 ${w.index} 行 <span class="muted small">${w.range}</span></td>
+          <td class="num ${sign(w.pnl)} strong">${fmtMoney(w.pnl)}</td>
+          <td class="num">${fmtNum(w.trades)}</td>
+          <td class="num muted">${w.days}</td>
+          <td class="num">${fmtPct(w.winRate, 0)}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </section>` : ''}`;
 
   return shell({
     active: 'calendar', user, title: '盈亏日历',

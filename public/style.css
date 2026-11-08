@@ -1046,3 +1046,8 @@ section[data-panel].drop-after { box-shadow: 0 2px 0 0 #7DA2FF; }
 /* ---------------- 语音输入 ---------------- */
 .dictation-btn.active { color: #fff; background: #c0504d; border-color: #c0504d; }
 .dictation-status { margin-left: 8px; }
+
+/* 空态引导：说明文案 + 行动按钮 */
+.empty-cta { padding: 18px 8px; text-align: center; }
+.empty-cta p { margin: 0 0 6px; }
+.empty-cta .row-actions { margin-top: 10px; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
