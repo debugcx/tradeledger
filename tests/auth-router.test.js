@@ -66,6 +66,17 @@ test('对账页与月度片段：页面不等待交易所，片段默认拒绝�
   assert.equal(await fragment.text(), ''); // 空库里没有可对账账户
 });
 
+test('登录 next 参数阻止开放重定向', async () => {
+  const body = new URLSearchParams({ password: 'test-pass-123', next: '//evil.example' }).toString();
+  const res = await handle(req('/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body,
+  }));
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/dashboard');
+});
+
 test('清理内存库', () => {
   closeDb();
 });

@@ -55,21 +55,29 @@ export function applyPendingRestore() {
     for (const suffix of suffixes.slice(1)) {
       const from = config.dbFile + suffix;
       if (fs.existsSync(from)) {
+        // WAL 一并移走：checkpoint 已把数据合并进主库，留着会被回滚时误当新数据。
         fs.renameSync(from, preRestore + suffix);
         moved.push(suffix);
       }
     }
     fs.renameSync(pending, config.dbFile);
+    // 替换后必须立刻验证新库可打开：坏文件（截断/损坏/非 SQLite）在此暴露，
+    // 而不是等服务启动、openDb 失败时才发现，且此时旧库已不在原位。
+    const probe = new DatabaseSync(config.dbFile);
+    probe.exec('SELECT 1');
+    probe.close();
     return { ok: true, preRestore: fs.existsSync(preRestore) ? preRestore : null };
   } catch (err) {
-    // 回滚：把旧库和它的 WAL/SHM 一起放回去，避免丢最近写入
-    for (const suffix of moved) {
-      const from = preRestore + suffix;
-      const to = config.dbFile + suffix;
-      try {
-        if (fs.existsSync(from) && !fs.existsSync(to)) fs.renameSync(from, to);
-      } catch { /* 尽力恢复 */ }
-    }
+    // 回滚：把旧库放回去，避免丢最近写入。
+    // 用 copyFileSync 覆盖：Windows 上 rename 会被打开失败时残留的句柄锁住
+    // （EBUSY/EPERM），copy 则不受影响；库文件是本地盘，同步拷贝可接受。
+    try {
+      if (fs.existsSync(preRestore)) fs.copyFileSync(preRestore, config.dbFile);
+      for (const suffix of suffixes.slice(1)) {
+        const from = preRestore + suffix;
+        if (fs.existsSync(from)) fs.copyFileSync(from, config.dbFile + suffix);
+      }
+    } catch { /* 尽力恢复 */ }
     return { ok: false, error: err?.message || String(err) };
   }
 }

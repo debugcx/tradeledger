@@ -54,6 +54,9 @@ CREATE INDEX IF NOT EXISTS ix_trades_close ON trades(close_time DESC);
 CREATE INDEX IF NOT EXISTS ix_trades_account ON trades(account_id);
 -- 列表页最常见的「账户 + 日期区间 + 时间倒序」组合索引
 CREATE INDEX IF NOT EXISTS ix_trades_account_close ON trades(account_id, close_time DESC, id DESC);
+-- 资金费分配：按账户+币种找覆盖事件时间的回合（排除垃圾箱）
+CREATE INDEX IF NOT EXISTS ix_trades_funding_match
+  ON trades(account_id, symbol, open_time, close_time) WHERE trashed_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS tags (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
