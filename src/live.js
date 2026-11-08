@@ -23,18 +23,20 @@ export async function refreshLive({ force = false } = {}) {
   inFlight = (async () => {
     const accounts = store.listAccounts().filter((a) => !a.is_demo && a.exchange !== 'manual');
     const errors = [];
-    for (const account of accounts) {
+    // 各账户并行刷新：一个交易所慢不再拖住整轮（node:sqlite 写入是同步的，
+    // 但交易所请求占大头；写库在回调里串行执行，天然安全）。
+    await Promise.all(accounts.map(async (account) => {
       const adapter = getExchange(account.exchange);
       if (!adapter) {
         errors.push(`${account.name}: 不支持的交易所`);
-        continue;
+        return;
       }
       let creds;
       try {
         creds = store.getAccountCredentials(account.id);
       } catch (err) {
         errors.push(`${account.name}: ${err?.message || err}`);
-        continue;
+        return;
       }
 
       if (adapter.fetchLive) {
@@ -56,7 +58,7 @@ export async function refreshLive({ force = false } = {}) {
           errors.push(`${account.name} 现货：${err?.message || err}`);
         }
       }
-    }
+    }));
     const updatedAt = new Date().toISOString();
     // 刚写完的快照即最新持仓状态：持仓消失的挂起笔记在这里被识别为已平仓
     store.archivePositionNotes();

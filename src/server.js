@@ -95,10 +95,13 @@ function serveStatic(req, res, pathname) {
   try { stat = fs.statSync(file); } catch { return false; }
   if (!stat.isFile()) return false;
   applySecurityHeaders(req, res);
+  // 带版本号的静态资源可以长缓存；不带 ?v= 的旧 URL 也按同一文件响应，
+  // 但保持 no-cache 以便文件更新后尽快失效。
+  const versioned = (req.url || '').includes('v=');
   res.writeHead(200, {
     'content-type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
     'content-length': stat.size,
-    'cache-control': 'no-cache',
+    'cache-control': versioned ? 'public, max-age=604800, immutable' : 'no-cache',
   });
   // stat 与 open 之间文件可能被删/改权限（如备份恢复操作 data 目录），不能让流错误炸掉进程
   const stream = fs.createReadStream(file);

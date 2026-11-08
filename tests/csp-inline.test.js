@@ -30,5 +30,5 @@ test('对账面板与主题脚本外置，页面以 src 引用', () => {
   const reconcile = fs.readFileSync(new URL('../src/views/reconcile.js', import.meta.url), 'utf8');
   assert.match(reconcile, /<script src="\/reconcile-monthly\.js" defer><\/script>/);
   const layout = fs.readFileSync(new URL('../src/views/layout.js', import.meta.url), 'utf8');
-  assert.match(layout, /<script src="\/theme-init\.js"><\/script>/);
+  assert.match(layout, /<script src="\$\{asset\('\/theme-init\.js'\)\}"><\/script>/);
 });

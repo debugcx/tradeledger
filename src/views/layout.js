@@ -1,4 +1,17 @@
+import fs from 'node:fs';
 import { escapeHtml as e, fmtMoney, fmtDuration, fmtDateTime } from '../http.js';
+
+/** 静态资源版本号 = 文件 mtime；文件变了 URL 就变，客户端可以放心长缓存。 */
+const ASSET_V = (() => {
+  let max = 0;
+  try {
+    for (const name of ['app.js', 'style.css', 'theme-init.js', 'reconcile-monthly.js']) {
+      try { max = Math.max(max, fs.statSync(new URL(`../../public/${name}`, import.meta.url)).mtimeMs); } catch { /* 缺文件忽略 */ }
+    }
+  } catch { /* 忽略 */ }
+  return String(Math.round(max / 1000));
+})();
+const asset = (path) => `${path}?v=${ASSET_V}`;
 
 const NAV = [
   { href: '/dashboard', label: '仪表盘', key: 'dashboard' },
@@ -45,8 +58,8 @@ export function layout({ title = 'TradeLedger', user = null, body = '', descript
 <meta name="description" content="${e(description)}">
 <meta name="robots" content="noindex, nofollow">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%237DA2FF'/><text x='16' y='22' font-size='18' font-family='monospace' text-anchor='middle' fill='%230B0E14'>TL</text></svg>">
-<link rel="stylesheet" href="/style.css">
-<script src="/theme-init.js"></script>
+<link rel="stylesheet" href="${asset('/style.css')}">
+<script src="${asset('/theme-init.js')}"></script>
 </head>
 <body>
 <header class="site-header">
@@ -61,7 +74,7 @@ export function layout({ title = 'TradeLedger', user = null, body = '', descript
   </div>
 </header>
 <main class="site-main">${body}</main>
-<script src="/app.js"></script>
+<script src="${asset('/app.js')}"></script>
 </body>
 </html>`;
 }

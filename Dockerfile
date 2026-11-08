@@ -1,4 +1,5 @@
-FROM node:24-bookworm-slim
+# 锁 digest 防上游漂移；升级镜像时查新 digest 更新这一行（多架构 manifest digest）。
+FROM node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \

@@ -155,6 +155,17 @@ function filterBar(filters, symbols, tags, accounts = []) {
   </form>`;
 }
 
+/** 当前筛选 → /api/export 的查询串（与列表页同口径；sort/pagination 不参与导出） */
+function exportQuery(filters) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (key === 'sort') continue;
+    if (!value || value === 'all') continue;
+    params.set(key, value);
+  }
+  return params.toString();
+}
+
 export function journalPage({ user, trades, filters, tags, symbols, pagination, noteCoverage, accounts = [], trashedCount = 0, back = '', notice, error }) {
   const backQ = back ? `?back=${encodeURIComponent(back)}` : '';
   const rows = trades.map((t) => `<tr>
@@ -198,6 +209,7 @@ export function journalPage({ user, trades, filters, tags, symbols, pagination, 
       <div class="panel-head">
         <h2>交易记录</h2>
         <div class="head-actions">
+          <a class="btn btn-ghost small" href="/api/export?format=csv&${exportQuery(filters)}" title="按当前筛选导出全部符合条件的数据（不限本页）">导出 CSV</a>
           <a class="btn btn-ghost small" href="/dashboard/import">导入 CSV</a>
           <a class="btn btn-ghost small" href="/dashboard/journal/trash">垃圾箱${trashedCount ? ` (${fmtNum(trashedCount)})` : ''}</a>
           <a class="btn btn-primary small" href="/dashboard/journal/new">+ 手动记录</a>

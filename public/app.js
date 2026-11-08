@@ -1375,6 +1375,22 @@ registerProcessor('asr-capture', AsrCapture);
     initDictation();
     initDashboardOrder();
     initConfirmForms();
+    initKeyboardShortcuts();
+  }
+
+  /* 键盘快捷键：`/` 聚焦页面第一个筛选/搜索输入框，Esc 失焦。
+   * 输入框内不生效，避免打断打字。 */
+  function initKeyboardShortcuts() {
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key !== '/' || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+      var tag = document.activeElement && document.activeElement.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || document.activeElement.isContentEditable) return;
+      var field = document.querySelector('.filter-bar input[name="q"], .filter-bar input[type="search"], .filter-bar input:not([type])');
+      if (!field) return;
+      ev.preventDefault();
+      field.focus();
+      if (typeof field.select === 'function') field.select();
+    });
   }
 
   /* 确认对话框：form[data-confirm] / button[data-confirm] 提交前弹 confirm。

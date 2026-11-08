@@ -25,6 +25,17 @@ const STABLES = new Set([
 
 const mem = new Map(); // asset -> { price, source, at }
 const misses = new Map(); // asset -> at：行情源都没有该币种时，15 分钟内不再重试
+// 上限淘汰：链上代币种类多且不可枚举，Map 只增不减会慢性吃内存。
+const PRICE_CACHE_MAX = 5000;
+
+function evictOldest(map) {
+  if (map.size <= PRICE_CACHE_MAX) return;
+  let drop = map.size - PRICE_CACHE_MAX;
+  for (const key of map.keys()) {
+    map.delete(key);
+    if (--drop <= 0) break;
+  }
+}
 
 export function isStable(asset) {
   const a = String(asset || '').trim().toUpperCase();
@@ -35,6 +46,8 @@ function remember(asset, price, source) {
   const entry = { price: Number(price), source, at: Date.now() };
   if (!Number.isFinite(entry.price) || entry.price <= 0) return null;
   mem.set(asset, entry);
+  evictOldest(mem);
+  evictOldest(misses);
   store.savePrices([{ asset, price_usd: entry.price, source, fetched_at: new Date(entry.at).toISOString() }]);
   return entry;
 }
@@ -104,6 +117,7 @@ export async function resolvePrice(asset) {
   }
 
   misses.set(symbol, Date.now());
+  evictOldest(misses);
   if (cached) {
     const entry = { price: Number(cached.price_usd), source: `${cached.source || 'cache'} (stale)`, at: Date.parse(cached.fetched_at || '') || 0, stale: true };
     mem.set(symbol, entry);
