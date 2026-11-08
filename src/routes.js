@@ -2596,7 +2596,7 @@ route('GET', '/api/health', () => {
     ok: db,
     db,
     schema: db ? schemaVersion() : 0,
-    version: '0.1.0',
+    version: process.env.npm_package_version || '0.9.0',
     time: new Date().toISOString(),
   }, db ? 200 : 503);
 }, { public: true });

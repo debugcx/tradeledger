@@ -439,7 +439,7 @@ function migrate(db) {
   )`);
   db.exec('CREATE INDEX IF NOT EXISTS ix_missed_status ON missed_trades(status, id DESC)');
 
-  // 笔记分类：周期复盘 / 交易对档案 / 策略手册 / 现货备注 / 自由笔记
+  // 笔记分类：周期复盘 / 交易对档案 / 策略手册 / 现货备注 / AI 解读 / 自由笔记
   const noteCols = new Set(db.prepare('PRAGMA table_info(notes)').all().map((c) => c.name));
   const addNote = (name, ddl) => {
     if (!noteCols.has(name)) db.exec(`ALTER TABLE notes ADD COLUMN ${name} ${ddl}`);

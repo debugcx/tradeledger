@@ -2,6 +2,15 @@ import { escapeHtml as e, fmtBytes, fmtNum, fmtDateTime } from '../http.js';
 import fs from 'node:fs';
 import { shell, settingsNav } from './layout.js';
 
+/** 应用版本：package.json 的 version，模块加载时取一次。 */
+const APP_VERSION = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version || '0.9.0';
+  } catch {
+    return '0.9.0';
+  }
+})();
+
 /** 前端资源构建时间（app.js 的修改时间，模块加载时取一次；重启服务即刷新）。
  *  排查「页面还是旧版」用：浏览器里跑的是旧 JS 时这个时间对不上。 */
 const BUILD_TIME = (() => {
@@ -229,7 +238,7 @@ export function settingsPage({ user, overview, dbBytes, seededAt, notice, error,
     <section class="panel">
       <div class="panel-head"><h2>关于</h2></div>
       <p class="muted small">
-        TradeLedger v0.1 · 本地优先 · 单密码登录 · 零第三方依赖。<br>
+        TradeLedger v${e(APP_VERSION)} · 本地优先 · 单密码登录 · 零第三方依赖。<br>
         前端资源构建于 ${e(BUILD_TIME)}——页面显示的界面与这里对不上时，强刷一次浏览器（Ctrl+F5）即可对齐。<br>
         访问密码来自环境变量 <code>TRADELEDGER_PASSWORD</code>，修改后需要重启服务；
         已登录的会话最长 30 天有效。<br>

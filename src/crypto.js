@@ -58,6 +58,9 @@ export function getMasterKey() {
   const key = crypto.randomBytes(32);
   fs.mkdirSync(path.dirname(keyFile), { recursive: true });
   fs.writeFileSync(keyFile, key.toString('hex'), { mode: 0o600 });
+  if (path.resolve(path.dirname(keyFile)) === path.resolve(path.dirname(config.dbFile))) {
+    console.warn('[crypto] 主密钥与数据库同目录（' + keyFile + '）。拿到备份目录即可解密全部凭据；建议设置 TRADELEDGER_MASTER_KEY 或 TRADELEDGER_MASTER_KEY_FILE 把密钥放到数据目录之外');
+  }
   cachedKey = key;
   return key;
 }
