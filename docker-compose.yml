@@ -12,6 +12,7 @@ services:
       HOST: 0.0.0.0
       PORT: "8790"
       TZ: ${TZ:-Asia/Shanghai}
+      TRADELEDGER_TZ: ${TRADELEDGER_TZ:-Asia/Shanghai}
       SEED_DEMO: ${SEED_DEMO:-0}
       TRADELEDGER_PASSWORD: ${TRADELEDGER_PASSWORD:?请在 .env 中设置 TRADELEDGER_PASSWORD}
       TRADELEDGER_MASTER_KEY: ${TRADELEDGER_MASTER_KEY:?请在 .env 中设置 TRADELEDGER_MASTER_KEY}
@@ -23,6 +24,11 @@ services:
     # ports:
     #   - "127.0.0.1:8790:8790"
     mem_limit: 768m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8790/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s

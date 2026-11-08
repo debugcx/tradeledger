@@ -20,6 +20,11 @@ const DAY_MS = 86400_000;
 let installed = false;
 const sizeCache = { file: '', size: 0 };
 
+// 异步写队列：console 调用只入队，避免每条日志都 appendFileSync 阻塞事件循环。
+const queue = [];
+const MAX_QUEUE = 5000;
+let flushingPromise = null;
+
 function logDir() {
   // LOG_DIR 仅用于测试/特殊部署时重定向日志目录
   return process.env.LOG_DIR ? path.resolve(process.env.LOG_DIR) : path.join(config.dataDir, 'logs');
@@ -30,20 +35,67 @@ function safeStr(v) {
   try { return JSON.stringify(v); } catch { return String(v); }
 }
 
+function rotateIfNeeded(file, bytes) {
+  if (sizeCache.file !== file) {
+    sizeCache.file = file;
+    try { sizeCache.size = fs.statSync(file).size; } catch { sizeCache.size = 0; }
+  }
+  if (sizeCache.size > 0 && sizeCache.size + bytes > MAX_FILE_BYTES) {
+    try { fs.renameSync(file, file + '.1'); } catch { /* 目标被占用时继续追加 */ }
+    sizeCache.size = 0;
+  }
+}
+
+function flushQueue() {
+  if (flushingPromise) return flushingPromise;
+  flushingPromise = (async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      try {
+        if (sizeCache.file !== item.file) {
+          sizeCache.file = item.file;
+          try { sizeCache.size = (await fs.promises.stat(item.file)).size; } catch { sizeCache.size = 0; }
+        }
+        if (sizeCache.size > 0 && sizeCache.size + item.bytes > MAX_FILE_BYTES) {
+          try { await fs.promises.rename(item.file, item.file + '.1'); } catch { /* 继续追加 */ }
+          sizeCache.size = 0;
+        }
+        await fs.promises.appendFile(item.file, item.line);
+        sizeCache.size += item.bytes;
+      } catch { /* 写日志失败不影响业务 */ }
+    }
+  })().finally(() => {
+    flushingPromise = null;
+    if (queue.length) void flushQueue();
+  });
+  return flushingPromise;
+}
+
+/** 异步等待所有排队日志写完（优雅关闭用）。 */
+export async function flushLogs() {
+  while (queue.length || flushingPromise) {
+    if (flushingPromise) await flushingPromise;
+    else await flushQueue();
+  }
+}
+
 function writeLine(file, line) {
-  try {
-    if (sizeCache.file !== file) {
-      sizeCache.file = file;
-      try { sizeCache.size = fs.statSync(file).size; } catch { sizeCache.size = 0; }
-    }
-    const bytes = Buffer.byteLength(line);
-    if (sizeCache.size > 0 && sizeCache.size + bytes > MAX_FILE_BYTES) {
-      try { fs.renameSync(file, file + '.1'); } catch { /* 目标被占用时继续追加 */ }
-      sizeCache.size = 0;
-    }
-    fs.appendFileSync(file, line);
-    sizeCache.size += bytes;
-  } catch { /* 写日志失败不影响业务 */ }
+  queue.push({ file, line, bytes: Buffer.byteLength(line) });
+  // 磁盘极慢时丢弃最早日志，避免队列无限增长。
+  if (queue.length > MAX_QUEUE) queue.shift();
+  void flushQueue();
+}
+
+/** 进程退出前同步刷盘，避免最后几条日志丢失。 */
+export function flushLogsSync() {
+  while (queue.length) {
+    const item = queue.shift();
+    try {
+      rotateIfNeeded(item.file, item.bytes);
+      fs.appendFileSync(item.file, item.line);
+      sizeCache.size += item.bytes;
+    } catch { /* 忽略 */ }
+  }
 }
 
 export function installFileLogging() {

@@ -267,6 +267,13 @@ CREATE TABLE IF NOT EXISTS meta (
   value TEXT NOT NULL
 );
 
+-- 迁移版本记录：每个版本只记录一次，便于审计与后续增量迁移。
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS report_generations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
@@ -558,6 +565,52 @@ function migrate(db) {
 
 let handle = null;
 
+/** 当前 schema 版本。新增增量迁移时 +1，并在 runMigrations 里登记。 */
+export const SCHEMA_VERSION = 2;
+
+function recordMigration(db, version, name) {
+  db.prepare('INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
+    .run(version, name, new Date().toISOString());
+}
+
+/**
+ * 迁移入口：
+ * - v1 是基线（SCHEMA 已用 IF NOT EXISTS 建好表）；
+ * - v2 是历史增量修复（migrate()），保持幂等并每次启动都跑，兼容早期版本
+ *   只把 schema_version 写成 2、但缺少后续补列/数据修复的库；
+ * - 以后新增迁移在 migrate() 之后按版本号追加并记录。
+ */
+function runMigrations(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+  )`);
+  const applied = new Set(
+    db.prepare('SELECT version FROM schema_migrations').all().map((r) => Number(r.version)),
+  );
+
+  if (!applied.has(1)) recordMigration(db, 1, 'baseline');
+
+  // 历史增量修复：PRAGMA 检查 + meta 标记，重复执行安全。
+  migrate(db);
+  if (!applied.has(2)) recordMigration(db, 2, 'legacy-repair');
+
+  db.prepare(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)
+              ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+    .run(String(SCHEMA_VERSION));
+}
+
+/** 健康检查/诊断用：当前库已应用到哪个版本。 */
+export function schemaVersion() {
+  try {
+    const row = getDb().prepare('SELECT MAX(version) AS v FROM schema_migrations').get();
+    return Number(row?.v) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 export function openDb(file = config.dbFile) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
@@ -565,8 +618,7 @@ export function openDb(file = config.dbFile) {
   db.exec('PRAGMA foreign_keys = ON;');
   db.exec('PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
-  migrate(db);
-  db.prepare('INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)').run('schema_version', '2');
+  runMigrations(db);
   return db;
 }
 

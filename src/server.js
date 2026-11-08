@@ -11,7 +11,7 @@ import { config } from './config.js';
 import { passwordStartupError } from './startup.js';
 import { isLoopbackPeer } from './client-ip.js';
 import { applyPendingRestore } from './restore.js';
-import { installFileLogging, startLogCleanup } from './logger.js';
+import { installFileLogging, startLogCleanup, flushLogs } from './logger.js';
 
 // 日志：同时落盘 data/logs（按天分文件，默认保留 10 天，启动时与每 6 小时清理）
 installFileLogging();
@@ -239,6 +239,7 @@ async function shutdown(signal) {
   }
 
   try { closeDb(); } catch { /* 已关闭 */ }
+  try { await flushLogs(); } catch { /* 忽略 */ }
   process.exit(0);
 }
 

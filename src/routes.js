@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import { Readable } from 'node:stream';
 import { config } from './config.js';
-import { dbSizeBytes, pingDb } from './db.js';
+import { dbSizeBytes, pingDb, schemaVersion } from './db.js';
 import { escapeHtml, localInputToIso, uid, fmtNum, readFormDataLimited, readJsonLimited } from './http.js';
 import * as auth from './auth.js';
 import * as store from './store.js';
@@ -2595,6 +2595,7 @@ route('GET', '/api/health', () => {
   return json({
     ok: db,
     db,
+    schema: db ? schemaVersion() : 0,
     version: '0.1.0',
     time: new Date().toISOString(),
   }, db ? 200 : 503);
