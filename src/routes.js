@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import { Readable } from 'node:stream';
 import { config } from './config.js';
 import { dbSizeBytes, pingDb, schemaVersion } from './db.js';
-import { escapeHtml, localInputToIso, uid, fmtNum, readFormDataLimited, readJsonLimited } from './http.js';
+import { escapeHtml, localInputToIso, uid, fmtNum, readFormDataLimited, readJsonLimited, isSameOriginRequest } from './http.js';
 import * as auth from './auth.js';
 import * as store from './store.js';
 import * as backup from './backup.js';
@@ -2776,14 +2776,15 @@ export async function handle(request) {
   const url = new URL(request.url);
   const pathname = url.pathname;
   // CSRF 第二层：浏览器发出的跨站写请求会带 Origin 头，与宿主不一致直接拒绝。
-  // 与 SameSite=Lax 叠加（curl/同源 fetch 不带 Origin 或同源，不受影响）。
+  // 与 SameSite=Lax 叠加。反向代理/内嵌浏览器可能改写 Host，此时浏览器给出的
+  // Sec-Fetch-Site: same-origin 作为同源兜底（跨站页面无法伪造该值）。
   if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
     const origin = request.headers.get('origin');
-    if (origin) {
-      const host = request.headers.get('host') || '';
-      let sameHost = false;
-      try { sameHost = new URL(origin).host === host; } catch { sameHost = false; }
-      if (!sameHost) return new Response('cross-origin request blocked', { status: 403 });
+    const host = request.headers.get('host') || '';
+    const secFetchSite = request.headers.get('sec-fetch-site') || '';
+    if (!isSameOriginRequest({ origin, host, secFetchSite })) {
+      console.warn('[csrf] blocked', { host, origin, secFetchSite });
+      return new Response('cross-origin request blocked', { status: 403 });
     }
   }
   try {

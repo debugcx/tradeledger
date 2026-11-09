@@ -25,6 +25,25 @@ export function parseCookies(header) {
   return out;
 }
 
+/**
+ * 写请求的同源判断。
+ *
+ * 常规情况比较 Origin 与 Host；但反向代理、NAS 内嵌浏览器或某些 WebView
+ * 会改写 Host（例如去掉端口、改成上游主机名），导致两者不相等。
+ * 浏览器发出的 Sec-Fetch-Site: same-origin 由浏览器自身按页面来源生成，
+ * 跨站页面无法伪造，因此可作为同源兜底。
+ */
+export function isSameOriginRequest({ origin, host, secFetchSite } = {}) {
+  if (!origin) return true; // curl / 部分同源表单不带 Origin
+  let sameHost = false;
+  try {
+    sameHost = new URL(origin).host === String(host || '');
+  } catch {
+    sameHost = false; // Origin: null 或非法值
+  }
+  return sameHost || secFetchSite === 'same-origin';
+}
+
 export const nowIso = () => new Date().toISOString();
 
 export const uid = () => (globalThis.crypto?.randomUUID
