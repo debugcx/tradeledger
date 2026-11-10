@@ -279,7 +279,7 @@ export function journalPage({ user, trades, filters, tags, symbols, pagination, 
         <button class="btn btn-ghost small danger" type="submit" data-bulk-submit disabled>删除选中</button>
         <span class="muted small" data-bulk-count>勾选左侧复选框可批量移入垃圾箱（只作用于本页）</span>
       </form>
-      <div class="table-wrap">
+      <div class="table-wrap journal-wrap">
       <table class="table journal-table">
         <thead><tr>
           <th class="bulk-cell"><input type="checkbox" form="journal-bulk" data-bulk-all aria-label="全选本页"></th>

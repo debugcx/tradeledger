@@ -434,19 +434,24 @@ svg.chart, svg.heatmap, svg.donut { cursor: zoom-in; }
 .table td.pnl-cell { width: 132px; max-width: 132px; }
 .table td.pnl-cell .amt-line { display: block; max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.35; }
 .table td.pnl-cell .unit { font-size: .78em; opacity: .75; margin-left: 2px; }
-/* 交易记录响应式：窄屏依次收起低优先级列，核心列（时间/币种/方向/开平/盈亏/操作）始终保留 */
-@media (max-width: 1240px) {
-  .journal-table .col-tags, .journal-table .col-review { display: none; }
+/* 交易记录响应式：按表格容器实际宽度逐级显示列，避免被侧边栏挤压后横向溢出。
+   核心列（时间/币种/方向/开平/盈亏/操作）始终保留，低优先级列按空间逐步放出。 */
+.journal-wrap { container-type: inline-size; }
+.journal-table .col-notional,
+.journal-table .col-type,
+.journal-table .col-duration,
+.journal-table .col-tags,
+.journal-table .col-review { display: none; }
+@container (min-width: 880px) {
+  .journal-table .col-notional { display: table-cell; }
 }
-@media (max-width: 1024px) {
-  .journal-table .col-type, .journal-table .col-duration { display: none; }
-  .journal-table th, .journal-table td { padding: 7px 8px; }
-  .journal-table td.pnl-cell { width: 116px; max-width: 116px; }
-  .journal-table td.pnl-cell .amt-line { max-width: 116px; }
+@container (min-width: 1000px) {
+  .journal-table .col-type, .journal-table .col-duration { display: table-cell; }
+  .journal-table td.pnl-cell { width: 126px; max-width: 126px; }
+  .journal-table td.pnl-cell .amt-line { max-width: 126px; }
 }
-@media (max-width: 820px) {
-  .journal-table .col-notional { display: none; }
-  .journal-table { min-width: 0; }
+@container (min-width: 1180px) {
+  .journal-table .col-tags, .journal-table .col-review { display: table-cell; }
 }
 .table tbody tr:hover { background: var(--panel-2); }
 .table tbody tr:last-child td { border-bottom: none; }
