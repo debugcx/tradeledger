@@ -169,7 +169,11 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
       const covered = done ? fromMs : cursorWatermark(nextCursor, fromMs);
       const nextWm = fillsFrom ? Math.min(fillsFrom, covered) : covered;
       if (nextWm !== fillsFrom) store.setMeta(fillsFromKey, String(Math.max(0, Math.round(nextWm))));
-      if (fillsComplete) {
+      // 覆盖恰好在本批完成时，也要立刻重算一遍；否则要等下一次同步
+      // （sync_done=1 后 worker 可能几小时才会再叫醒该账户）才生成回合。
+      const fillsCompleteNow = fillsComplete
+        || (done && nextWm > 0 && nextWm <= Date.now() - lookbackDays * DAY + DAY);
+      if (fillsCompleteNow) {
         const matcher = adapter.episodeMatching ? matchEpisodes : matchFills;
         const earliestOpen = new Map(
           store.listSymbolEarliestOpen(accountId).map((r) => [r.symbol, Date.parse(r.min_open)]),
