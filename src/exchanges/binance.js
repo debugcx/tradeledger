@@ -1,6 +1,6 @@
 import { hmacHex } from '../crypto.js';
 import { requestJson } from '../http-client.js';
-import { num, windowsDescending, matchFills, toSymbol, splitPair, quoteFee, SPOT_QUOTES, marketCache, cacheGet, cachePut } from './common.js';
+import { num, windowsDescending, matchFills, toSymbol, toCoinSymbol, parseStreamCursor, encodeStreamCursor, splitPair, quoteFee, SPOT_QUOTES, marketCache, cacheGet, cachePut } from './common.js';
 
 const candleCache = marketCache('binance:candles');
 const fillCache = marketCache('binance:fills');
@@ -14,6 +14,7 @@ const fillCache = marketCache('binance:fills');
  */
 
 const BASE = process.env.BINANCE_FAPI_BASE || 'https://fapi.binance.com';
+const BASE_DAPI = process.env.BINANCE_DAPI_BASE || 'https://dapi.binance.com';
 const BASE_SAPI = process.env.BINANCE_SAPI_BASE || 'https://api.binance.com';
 const WINDOW_MS = 7 * 86400_000;
 // 现货 myTrades 的 startTime/endTime 跨度不能超过 24 小时，留 1 小时余量
@@ -106,6 +107,124 @@ function toFill(row) {
   };
 }
 
+/** 币本位合约面值（USD/张）：/dapi/v1/exchangeInfo 的 contractSize。 */
+let coinmContracts = null;
+async function loadCoinmContracts() {
+  if (coinmContracts) return coinmContracts;
+  const res = await requestJson(`${BASE_DAPI}/dapi/v1/exchangeInfo`, { method: 'GET', timeout: 15_000, retries: 1 });
+  const map = new Map();
+  for (const c of res.json?.symbols || []) {
+    if (!c?.symbol) continue;
+    map.set(String(c.symbol), num(c.contractSize) || 100);
+  }
+  coinmContracts = map;
+  return map;
+}
+
+function coinmToFill(row, contractSize) {
+  const price = num(row.price);
+  return {
+    // 与 U 本位成交的 id 可能重号，加 dapi 前缀并带合约名保证唯一
+    id: `dapi:${row.symbol}:${row.id}`,
+    symbol: toCoinSymbol(row.symbol),
+    side: String(row.side || '').toUpperCase() === 'BUY' ? 'buy' : 'sell',
+    price,
+    // 反向合约保留「张」为数量单位，面值交给配对器换算盈亏与展示口径
+    qty: Math.abs(num(row.qty)),
+    contractValue: contractSize || 100,
+    orderType: 'other',
+    // 币本位手续费以结算币计价，按成交价折算成 USD；负数 = 支出
+    fee: price > 0 ? -Math.abs(num(row.commission)) * price : 0,
+    time: Number(row.time || 0),
+  };
+}
+
+/** U 本位批量：/fapi/v1/userTrades 全交易对，按 7 天窗口往回翻。 */
+async function usdmTradesBatch({ creds, fromMs, toMs, cap, maxWindows }) {
+  const windows = windowsDescending(fromMs, toMs, WINDOW_MS);
+  const fills = [];
+  let nextCursor = null;
+  let used = 0;
+  for (const w of windows) {
+    if (used >= maxWindows) { nextCursor = String(w.to); break; }
+    used++;
+    const q = new URLSearchParams({
+      startTime: String(w.from),
+      endTime: String(w.to),
+      limit: '1000',
+    });
+    const rows = await call(`/fapi/v1/userTrades?${q}`, creds);
+    if (!Array.isArray(rows) || !rows.length) continue;
+    for (const row of rows) fills.push(toFill(row));
+    if (fills.length >= cap) {
+      const oldest = Math.min(...fills.map((f) => f.time));
+      nextCursor = String(oldest - 1);
+      break;
+    }
+    if (rows.length >= 1000) {
+      const oldest = Math.min(...rows.map((r) => Number(r.time || 0)));
+      nextCursor = String(oldest - 1);
+      break;
+    }
+  }
+  return { fills: fills.slice(0, cap), nextCursor, windowsUsed: used };
+}
+
+/**
+ * 币本位批量：/dapi/v1/userTrades 必须指定 symbol，先用同窗口的 COMMISSION
+ * 账单找出有成交的合约，再逐个合约拉成交；返回的成交统一折算成 USD 口径。
+ */
+async function coinmTradesBatch({ creds, fromMs, toMs, cap, maxWindows }) {
+  const windows = windowsDescending(fromMs, toMs, WINDOW_MS);
+  const fills = [];
+  let nextCursor = null;
+  let used = 0;
+  const contracts = await loadCoinmContracts().catch(() => new Map());
+  outer:
+  for (const w of windows) {
+    if (used >= maxWindows) { nextCursor = String(w.to); break; }
+    used++;
+    const q = new URLSearchParams({
+      incomeType: 'COMMISSION',
+      startTime: String(w.from),
+      endTime: String(w.to),
+      limit: '1000',
+    });
+    const income = await call(`/dapi/v1/income?${q}`, creds, { baseUrl: BASE_DAPI });
+    const symbols = [...new Set((Array.isArray(income) ? income : []).map((r) => r.symbol).filter(Boolean))];
+    for (const symbol of symbols) {
+      const q2 = new URLSearchParams({
+        symbol,
+        startTime: String(w.from),
+        endTime: String(w.to),
+        limit: '1000',
+      });
+      const rows = await call(`/dapi/v1/userTrades?${q2}`, creds, { baseUrl: BASE_DAPI });
+      for (const row of rows || []) fills.push(coinmToFill(row, contracts.get(symbol) || 100));
+      if (fills.length >= cap) {
+        const oldest = Math.min(...fills.map((f) => f.time));
+        nextCursor = String(oldest - 1);
+        break outer;
+      }
+    }
+  }
+  return { fills: fills.slice(0, cap), nextCursor, windowsUsed: used };
+}
+
+/** 币本位标记价（把以币计价的资金费折算成 USD），30 分钟内复用。 */
+const coinmPriceCache = new Map();
+async function coinmMarkPrice(symbol) {
+  const hit = coinmPriceCache.get(symbol);
+  if (hit && Date.now() - hit.at < 30 * 60_000) return hit.price;
+  let price = 0;
+  try {
+    const res = await requestJson(`${BASE_DAPI}/dapi/v1/premiumIndex?symbol=${encodeURIComponent(symbol)}`);
+    price = num(res.json?.markPrice);
+  } catch { /* 拿不到价格就记 0，避免把资金费算错成美元 */ }
+  coinmPriceCache.set(symbol, { price, at: Date.now() });
+  return price;
+}
+
 export const binance = {
   id: 'binance',
   name: 'Binance',
@@ -131,37 +250,38 @@ export const binance = {
   async fetchTrades({ creds, fromMs, toMs, cursor, limit, windowBudget }) {
     const cap = Math.max(100, Number(limit) || 1000);
     const maxWindows = Math.max(1, Number(windowBudget) || 8);
-    const endBound = cursor ? Math.min(toMs, Number(cursor)) : toMs;
-    const windows = windowsDescending(fromMs, endBound, WINDOW_MS);
+    const state = parseStreamCursor(cursor);
     const fills = [];
+    const streamErrors = [];
     let nextCursor = null;
     let used = 0;
 
-    for (const w of windows) {
-      if (used >= maxWindows) { nextCursor = String(w.to); break; }
-      used++;
-      const q = new URLSearchParams({
-        startTime: String(w.from),
-        endTime: String(w.to),
-        limit: '1000',
-      });
-      const rows = await call(`/fapi/v1/userTrades?${q}`, creds);
-      if (!Array.isArray(rows) || !rows.length) continue;
-      for (const row of rows) fills.push(toFill(row));
+    // 通道 0 = U 本位（fapi），通道 1 = 币本位（dapi）。单个通道失败（API Key
+    // 未开通币本位权限等）只记录告警，不影响另一条通道的同步。
+    for (let si = state.index; si < 2; si++) {
+      const inner = si === state.index ? state.inner : null;
+      const endBound = inner ? Math.min(toMs, Number(inner)) : toMs;
+      let batch;
+      try {
+        batch = si === 0
+          ? await usdmTradesBatch({ creds, fromMs, toMs: endBound, cap: cap - fills.length, maxWindows: maxWindows - used })
+          : await coinmTradesBatch({ creds, fromMs, toMs: endBound, cap: cap - fills.length, maxWindows: maxWindows - used });
+      } catch (err) {
+        streamErrors.push(`${si === 0 ? 'U 本位' : '币本位'}：${err?.message || err}`);
+        continue;
+      }
+      used += batch.windowsUsed;
+      fills.push(...batch.fills);
+      if (batch.nextCursor) { nextCursor = encodeStreamCursor(si, batch.nextCursor); break; }
       if (fills.length >= cap) {
         const oldest = Math.min(...fills.map((f) => f.time));
-        nextCursor = String(oldest - 1);
-        break;
-      }
-      if (rows.length >= 1000) {
-        const oldest = Math.min(...rows.map((r) => Number(r.time || 0)));
-        nextCursor = String(oldest - 1);
+        nextCursor = encodeStreamCursor(si, String(oldest - 1));
         break;
       }
     }
 
     const trades = matchFills(fills.slice(0, cap), 'binance');
-    return { trades, fills: fills.slice(0, cap), nextCursor };
+    return { trades, fills: fills.slice(0, cap), nextCursor, streamErrors };
   },
 
   async fetchFunding({ creds, fromMs, toMs, limit }) {    const cap = Math.max(100, Number(limit) || 2000);
@@ -186,6 +306,31 @@ export const binance = {
       }
       if (events.length >= cap) break;
     }
+
+    // 币本位资金费：金额以结算币计价，按标记价折算成 USD；接口无权限时跳过。
+    try {
+      for (const w of windowsDescending(fromMs, toMs, WINDOW_MS)) {
+        if (events.length >= cap) break;
+        const q = new URLSearchParams({
+          incomeType: 'FUNDING_FEE',
+          startTime: String(w.from),
+          endTime: String(w.to),
+          limit: '1000',
+        });
+        const rows = await call(`/dapi/v1/income?${q}`, creds, { baseUrl: BASE_DAPI });
+        if (!Array.isArray(rows)) continue;
+        for (const row of rows) {
+          if (row.incomeType !== 'FUNDING_FEE' || !row.symbol) continue;
+          const price = await coinmMarkPrice(row.symbol);
+          events.push({
+            external_id: `binance:coinfund:${row.tranId || `${row.symbol}:${row.time}`}`,
+            symbol: toCoinSymbol(row.symbol),
+            time: new Date(Number(row.time)).toISOString(),
+            amount: num(row.income) * price,
+          });
+        }
+      }
+    } catch { /* 未开通币本位权限时不影响 U 本位资金费 */ }
     return { events: events.slice(0, cap), nextCursor: null };
   },
 
@@ -355,6 +500,16 @@ export const binance = {
     }
 
     try {
+      const account = await call('/dapi/v1/account', creds, { baseUrl: BASE_DAPI });
+      mark('futures');
+      for (const a of account.assets || []) {
+        push('futures', a.asset, num(a.walletBalance), 'binance:/dapi/v1/account', '币本位合约钱包');
+      }
+    } catch (err) {
+      errors.push(`币本位合约钱包：${err?.message || err}`);
+    }
+
+    try {
       const account = await call('/api/v3/account', creds, { baseUrl: BASE_SAPI });
       mark('spot');
       for (const b of account.balances || []) {
@@ -498,12 +653,38 @@ export const binance = {
         next_funding_time: next,
       });
     }
+
+    // 币本位持仓：positionAmt 是张数，按合约面值/标记价折算成币数量。
+    try {
+      const coinm = await call('/dapi/v1/account', creds, { baseUrl: BASE_DAPI });
+      const contracts = await loadCoinmContracts().catch(() => new Map());
+      for (const p of coinm.positions || []) {
+        const amt = num(p.positionAmt);
+        if (!amt) continue;
+        const mark = num(p.markPrice);
+        const size = mark > 0 ? Math.abs(amt) * (contracts.get(p.symbol) || 100) / mark : 0;
+        positions.push({
+          symbol: toCoinSymbol(p.symbol),
+          side: amt > 0 ? 'long' : 'short',
+          size,
+          entry_price: num(p.entryPrice),
+          mark_price: mark,
+          unrealized: num(p.unRealizedProfit),
+          funding_rate: null,
+          next_funding_time: null,
+        });
+      }
+    } catch { /* 未开通币本位权限时忽略 */ }
     return { balances, positions };
   },
 
   // 行情 K 线（公共接口）。行 = [开盘时间, 开, 高, 低, 收, ...]，升序。
   async fetchCandles({ symbol, market = 'futures', fromMs, toMs }) {
-    const instId = String(symbol || '').replace('/', '').toUpperCase();
+    // 币本位合约（BTC/USD）走 /dapi，合约名形如 BTCUSD_PERP
+    const coinm = market !== 'spot' && /\/USD$/i.test(String(symbol || ''));
+    const instId = coinm
+      ? `${String(symbol || '').split('/')[0].toUpperCase()}USD_PERP`
+      : String(symbol || '').replace('/', '').toUpperCase();
     if (!instId) return { bar: '1h', candles: [], truncated: false };
     const bars = [
       ['1m', 60_000], ['3m', 180_000], ['5m', 300_000], ['15m', 900_000], ['30m', 1_800_000],
@@ -519,8 +700,8 @@ export const binance = {
     const hit = cacheGet(candleCache, cacheKey);
     if (hit) return hit;
 
-    const base = market === 'spot' ? BASE_SAPI : BASE;
-    const path = market === 'spot' ? '/api/v3/klines' : '/fapi/v1/klines';
+    const base = market === 'spot' ? BASE_SAPI : coinm ? BASE_DAPI : BASE;
+    const path = market === 'spot' ? '/api/v3/klines' : coinm ? '/dapi/v1/klines' : '/fapi/v1/klines';
     const q = new URLSearchParams({
       symbol: instId, interval: bar, limit: '1000',
       startTime: String(Math.max(0, Number(fromMs))), endTime: String(Number(toMs)),
@@ -537,38 +718,55 @@ export const binance = {
 
   // 某个回合的逐笔成交（需签名）
   async fetchEpisodeFills({ creds, symbol, market = 'futures', fromMs, toMs, limit }) {
-    const instId = String(symbol || '').replace('/', '').toUpperCase();
+    const coinm = market !== 'spot' && /\/USD$/i.test(String(symbol || ''));
+    const instId = coinm
+      ? `${String(symbol || '').split('/')[0].toUpperCase()}USD_PERP`
+      : String(symbol || '').replace('/', '').toUpperCase();
     if (!instId) return { fills: [] };
     const cap = Math.max(50, Number(limit) || 300);
     const cacheKey = `bf|${instId}|${market}|${fromMs}|${toMs}`;
     const hit = cacheGet(fillCache, cacheKey);
     if (hit) return hit;
 
-    const base = market === 'spot' ? BASE_SAPI : BASE;
-    const path = market === 'spot' ? '/api/v3/myTrades' : '/fapi/v1/userTrades';
     const out = [];
-    for (let page = 0; page < 3 && out.length < cap; page++) {
+    if (coinm) {
+      // 币本位：数量/手续费都在合约与币之间换算，统一成币本位 + USD
+      const contracts = await loadCoinmContracts().catch(() => new Map());
       const q = new URLSearchParams({
         symbol: instId, limit: '1000',
         startTime: String(Math.max(0, Number(fromMs))), endTime: String(Number(toMs)),
-        ...(page && out.length ? { fromId: String(out[out.length - 1].billId + 1) } : {}),
       });
-      const rows = await call(`${path}?${q}`, creds, { baseUrl: base });
-      if (!Array.isArray(rows) || !rows.length) break;
-      for (const r of rows) {
-        const quoteFeeCcy = ['USDT', 'BUSD', 'USDC', 'FDUSD'].includes(String(r.commissionAsset || '').toUpperCase());
-        const maker = r.maker === true || r.isMaker === true;
-        const taker = r.maker === false || r.isMaker === false;
-        out.push({
-          t: Number(r.time || 0),
-          side: String(r.side).toUpperCase() === 'BUY' ? 'buy' : 'sell',
-          price: num(r.price), qty: num(r.qty),
-          fee: quoteFeeCcy ? -Math.abs(num(r.commission)) : 0,
-          feeCcy: r.commissionAsset || '', billId: r.id,
-          orderType: maker ? 'limit' : taker ? 'market' : null,
-        });
+      const rows = await call(`/dapi/v1/userTrades?${q}`, creds, { baseUrl: BASE_DAPI });
+      for (const r of rows || []) {
+        const f = coinmToFill(r, contracts.get(instId) || 100);
+        out.push({ t: f.time, side: f.side, price: f.price, qty: f.qty, fee: f.fee, feeCcy: '', billId: f.id, orderType: 'other' });
       }
-      if (rows.length < 1000) break;
+    } else {
+      const base = market === 'spot' ? BASE_SAPI : BASE;
+      const path = market === 'spot' ? '/api/v3/myTrades' : '/fapi/v1/userTrades';
+      for (let page = 0; page < 3 && out.length < cap; page++) {
+        const q = new URLSearchParams({
+          symbol: instId, limit: '1000',
+          startTime: String(Math.max(0, Number(fromMs))), endTime: String(Number(toMs)),
+          ...(page && out.length ? { fromId: String(out[out.length - 1].billId + 1) } : {}),
+        });
+        const rows = await call(`${path}?${q}`, creds, { baseUrl: base });
+        if (!Array.isArray(rows) || !rows.length) break;
+        for (const r of rows) {
+          const quoteFeeCcy = ['USDT', 'BUSD', 'USDC', 'FDUSD'].includes(String(r.commissionAsset || '').toUpperCase());
+          const maker = r.maker === true || r.isMaker === true;
+          const taker = r.maker === false || r.isMaker === false;
+          out.push({
+            t: Number(r.time || 0),
+            side: String(r.side).toUpperCase() === 'BUY' ? 'buy' : 'sell',
+            price: num(r.price), qty: num(r.qty),
+            fee: quoteFeeCcy ? -Math.abs(num(r.commission)) : 0,
+            feeCcy: r.commissionAsset || '', billId: r.id,
+            orderType: maker ? 'limit' : taker ? 'market' : null,
+          });
+        }
+        if (rows.length < 1000) break;
+      }
     }
     out.sort((a, b) => a.t - b.t);
     const result = { fills: out.slice(0, cap) };

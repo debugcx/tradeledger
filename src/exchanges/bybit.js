@@ -1,6 +1,6 @@
 import { hmacHex } from '../crypto.js';
 import { requestJson } from '../http-client.js';
-import { num, windowsDescending, matchFills, toSymbol, splitPair, quoteFee, isSupportedSpotSymbol, SPOT_QUOTES, marketCache, cacheGet, cachePut } from './common.js';
+import { num, windowsDescending, matchFills, toSymbol, parseStreamCursor, encodeStreamCursor, splitPair, quoteFee, isSupportedSpotSymbol, SPOT_QUOTES, marketCache, cacheGet, cachePut } from './common.js';
 
 const candleCache = marketCache('bybit:candles');
 const fillCache = marketCache('bybit:fills');
@@ -38,14 +38,19 @@ async function call(path, params, creds, opts = {}) {
   return data.result || {};
 }
 
-function toFill(row) {
+function toFill(row, category = 'linear') {
+  const price = num(row.execPrice);
+  const inverse = category === 'inverse';
+  // 反向合约：保留张数为数量单位（1 张 = 1 USD 面值），盈亏由配对器按
+  // 张数 × 面值 × (1/开仓价 − 1/平仓价) 计算；手续费以币计价，折成 USD。
   return {
-    id: row.execId,
+    id: inverse ? `inverse:${row.execId}` : row.execId,
     symbol: toSymbol(row.symbol),
     side: String(row.side || '').toLowerCase() === 'buy' ? 'buy' : 'sell',
-    price: num(row.execPrice),
+    price,
     qty: num(row.execQty),
-    fee: num(row.execFee),
+    ...(inverse ? { contractValue: 1 } : {}),
+    fee: inverse ? num(row.execFee) * price : num(row.execFee),
     time: Number(row.execTime || 0),
     orderType: row.orderType,
   };
@@ -75,40 +80,55 @@ export const bybit = {
   async fetchTrades({ creds, fromMs, toMs, cursor, limit, windowBudget }) {
     const cap = Math.max(100, Number(limit) || 1000);
     const maxWindows = Math.max(1, Number(windowBudget) || 8);
-    const endBound = cursor ? Math.min(toMs, Number(cursor)) : toMs;
-    const windows = windowsDescending(fromMs, endBound, WINDOW_MS);
+    const state = parseStreamCursor(cursor);
     const fills = [];
+    const streamErrors = [];
     let nextCursor = null;
     let used = 0;
 
-    outer:
-    for (const w of windows) {
-      if (used >= maxWindows) { nextCursor = String(w.to); break; }
-      used++;
-      let pageCursor = '';
-      const maxPages = Math.min(60, Math.ceil(cap / 100) + 2);
-      for (let page = 0; page < maxPages; page++) {
-        const result = await call('/v5/execution/list', {
-          category: 'linear',
-          startTime: String(w.from),
-          endTime: String(w.to),
-          limit: '100',
-          ...(pageCursor ? { cursor: pageCursor } : {}),
-        }, creds);
-        const rows = result.list || [];
-        for (const row of rows) fills.push(toFill(row));
-        if (fills.length >= cap) {
-          const oldest = Math.min(...fills.map((f) => f.time));
-          nextCursor = String(oldest - 1);
-          break outer;
+    // 通道 0 = linear（U 本位），通道 1 = inverse（币本位）。
+    // 未开通反向合约权限时只记录告警，不影响 U 本位。
+    for (let si = state.index; si < 2; si++) {
+      const category = si === 0 ? 'linear' : 'inverse';
+      const inner = si === state.index ? state.inner : null;
+      const endBound = inner ? Math.min(toMs, Number(inner)) : toMs;
+      const windows = windowsDescending(fromMs, endBound, WINDOW_MS);
+      let batchNext = null;
+      try {
+        outer:
+        for (const w of windows) {
+          if (used >= maxWindows) { batchNext = String(w.to); break; }
+          used++;
+          let pageCursor = '';
+          const maxPages = Math.min(60, Math.ceil(cap / 100) + 2);
+          for (let page = 0; page < maxPages; page++) {
+            const result = await call('/v5/execution/list', {
+              category,
+              startTime: String(w.from),
+              endTime: String(w.to),
+              limit: '100',
+              ...(pageCursor ? { cursor: pageCursor } : {}),
+            }, creds);
+            const rows = result.list || [];
+            for (const row of rows) fills.push(toFill(row, category));
+            if (fills.length >= cap) {
+              const oldest = Math.min(...fills.map((f) => f.time));
+              batchNext = String(oldest - 1);
+              break outer;
+            }
+            pageCursor = result.nextPageCursor || '';
+            if (!pageCursor || !rows.length) break;
+          }
         }
-        pageCursor = result.nextPageCursor || '';
-        if (!pageCursor || !rows.length) break;
+      } catch (err) {
+        streamErrors.push(`${si === 0 ? 'U 本位' : '币本位'}：${err?.message || err}`);
+        continue;
       }
+      if (batchNext) { nextCursor = encodeStreamCursor(si, batchNext); break; }
     }
 
     const trades = matchFills(fills.slice(0, cap), 'bybit');
-    return { trades, fills: fills.slice(0, cap), nextCursor };
+    return { trades, fills: fills.slice(0, cap), nextCursor, streamErrors };
   },
 
   async fetchFunding({ creds, fromMs, toMs, limit }) {
@@ -143,6 +163,54 @@ export const bybit = {
         if (!cursor || !rows.length) break;
       }
     }
+
+    // 币本位资金费：funding 以结算币计价，按合约标记价折算成 USD
+    try {
+      if (events.length < cap) {
+        const priceOf = new Map();
+        const markPriceOf = async (symbol) => {
+          if (!symbol) return 0;
+          if (priceOf.has(symbol)) return priceOf.get(symbol);
+          let p = 0;
+          try {
+            const res = await requestJson(`${BASE}/v5/market/tickers?category=inverse&symbol=${encodeURIComponent(symbol)}`);
+            p = num(res.json?.result?.list?.[0]?.markPrice);
+          } catch { p = 0; }
+          priceOf.set(symbol, p);
+          return p;
+        };
+        const inverseLoop = [];
+        for (const w of windowsDescending(fromMs, toMs, WINDOW_MS)) {
+          let cursor = '';
+          for (let page = 0; page < 40; page++) {
+            const result = await call('/v5/account/transaction-log', {
+              accountType: 'UNIFIED',
+              category: 'inverse',
+              type: 'FUNDING',
+              startTime: String(w.from),
+              endTime: String(w.to),
+              limit: '50',
+              ...(cursor ? { cursor } : {}),
+            }, creds);
+            const rows = result.list || [];
+            for (const row of rows) {
+              const time = Number(row.transactionTime || 0);
+              const price = await markPriceOf(row.symbol);
+              events.push({
+                external_id: `bybit:coinfund:${row.id || `${row.symbol}:${time}`}`,
+                symbol: toSymbol(row.symbol),
+                time: new Date(time).toISOString(),
+                amount: num(row.funding ?? row.cashFlow ?? row.change) * price,
+              });
+            }
+            if (events.length >= cap) { inverseLoop.push(1); break; }
+            cursor = result.nextPageCursor || '';
+            if (!cursor || !rows.length) break;
+          }
+          if (inverseLoop.length) break;
+        }
+      }
+    } catch { /* 未开通币本位权限时忽略 */ }
     return { events: events.slice(0, cap), nextCursor: null };
   },
 
@@ -369,6 +437,26 @@ export const bybit = {
         next_funding_time: ticker?.nextFundingTime ? new Date(Number(ticker.nextFundingTime)).toISOString() : null,
       });
     }
+
+    // 币本位持仓：size 是张数（1 张 = 1 USD），按标记价折算成币数量
+    try {
+      const coinPos = await call('/v5/position/list', { category: 'inverse', limit: '200' }, creds);
+      for (const p of coinPos.list || []) {
+        const contracts = Math.abs(num(p.size));
+        if (!contracts) continue;
+        const mark = num(p.markPrice);
+        positions.push({
+          symbol: toSymbol(p.symbol),
+          side: String(p.side).toLowerCase() === 'sell' ? 'short' : 'long',
+          size: mark > 0 ? contracts / mark : 0,
+          entry_price: num(p.avgPrice),
+          mark_price: mark,
+          unrealized: num(p.unrealisedPnl),
+          funding_rate: null,
+          next_funding_time: null,
+        });
+      }
+    } catch { /* 未开通币本位权限时忽略 */ }
     return { balances, positions };
   },
 
@@ -390,7 +478,7 @@ export const bybit = {
     const hit = cacheGet(candleCache, cacheKey);
     if (hit) return hit;
 
-    const category = market === 'spot' ? 'spot' : 'linear';
+    const category = market === 'spot' ? 'spot' : (/\/USD$/i.test(String(symbol || '')) ? 'inverse' : 'linear');
     const q = new URLSearchParams({
       category, symbol: instId, interval: bar, limit: '1000',
       start: String(Math.max(0, Number(fromMs))), end: String(Number(toMs)),
@@ -408,6 +496,7 @@ export const bybit = {
 
   // 某个回合的逐笔成交（需签名）
   async fetchEpisodeFills({ creds, symbol, market = 'futures', fromMs, toMs, limit }) {
+    const isCoinm = market !== 'spot' && /\/USD$/i.test(String(symbol || ''));
     const instId = String(symbol || '').replace('/', '').toUpperCase();
     if (!instId) return { fills: [] };
     const cap = Math.max(50, Number(limit) || 300);
@@ -415,7 +504,7 @@ export const bybit = {
     const hit = cacheGet(fillCache, cacheKey);
     if (hit) return hit;
 
-    const category = market === 'spot' ? 'spot' : 'linear';
+    const category = market === 'spot' ? 'spot' : isCoinm ? 'inverse' : 'linear';
     const out = [];
     let cursor = null;
     for (let page = 0; page < 3 && out.length < cap; page++) {
@@ -427,11 +516,14 @@ export const bybit = {
       const rows = result?.list || [];
       if (!rows.length) break;
       for (const r of rows) {
+        const price = num(r.execPrice);
         out.push({
           t: Number(r.execTime || 0),
           side: String(r.side || '').toLowerCase() === 'buy' ? 'buy' : 'sell',
-          price: num(r.execPrice), qty: num(r.execQty),
-          fee: -Math.abs(num(r.execFee)), feeCcy: r.feeTokenCurrency || 'USDT',
+          price,
+          qty: num(r.execQty),
+          fee: isCoinm ? -Math.abs(num(r.execFee)) * price : -Math.abs(num(r.execFee)),
+          feeCcy: r.feeTokenCurrency || 'USDT',
           billId: r.execId || '',
           orderType: r.isMaker === true ? 'limit' : r.isMaker === false ? 'market' : null,
         });

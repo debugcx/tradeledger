@@ -12,6 +12,7 @@ import { config } from './config.js';
 import * as store from './store.js';
 import { getExchange, exchangeList } from './exchanges/index.js';
 import { matchFills, matchEpisodes } from './fills.js';
+import { cursorWatermark } from './exchanges/common.js';
 
 const DAY = 86400_000;
 
@@ -163,7 +164,7 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
       // （最早成交不晚于库里最早开仓）时按全量重算回合（幂等 upsert）并清理
       // 增量批次产生的幻影；覆盖不足（成交已超出交易所保留期）则保持旧行为。
       fillsInserted = store.insertTradeFills(accountId, account.exchange, result.fills);
-      const covered = done ? fromMs : (Number(nextCursor) || fromMs);
+      const covered = done ? fromMs : cursorWatermark(nextCursor, fromMs);
       const nextWm = fillsFrom ? Math.min(fillsFrom, covered) : covered;
       if (nextWm !== fillsFrom) store.setMeta(fillsFromKey, String(Math.max(0, Math.round(nextWm))));
       if (fillsComplete) {
@@ -178,6 +179,8 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
           const fillObjs = raw.map((r) => ({
             id: r.external_id, symbol: sym, side: r.side, price: r.price, qty: r.qty,
             fee: r.fee, time: r.time, orderType: r.order_type || 'other',
+            // 反向（币本位）合约：数量单位是张，面值用于盈亏与展示口径换算
+            ...(Number(r.contract_value) > 0 ? { contractValue: Number(r.contract_value) } : {}),
           }));
           const earliestFill = fillObjs.length ? fillObjs[0].time : Infinity;
           const openBoundary = Number.isFinite(earliestOpen.get(sym)) ? earliestOpen.get(sym) : Infinity;
@@ -201,6 +204,10 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
     // 资金费：按本批交易覆盖的时间范围单独拉取，再回填到对应交易。
     // OKX 的 funding 已在仓位历史里，适配器返回空数组。
     const warnings = [];
+    if (Array.isArray(result?.streamErrors) && result.streamErrors.length) {
+      // 多通道适配器（U 本位 + 币本位）：某个通道无权限/不可用时提示，另一条照常同步
+      warnings.push(`部分通道跳过：${result.streamErrors.slice(0, 2).join('；')}`);
+    }
     let fundingInserted = 0;
     if (typeof adapter.fetchFunding === 'function' && trades.length) {
       const openTimes = trades.map((t) => Date.parse(t.open_time)).filter(Number.isFinite);

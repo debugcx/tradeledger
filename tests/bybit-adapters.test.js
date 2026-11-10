@@ -4,6 +4,7 @@ import http from 'node:http';
 
 const T0 = Date.UTC(2026, 9, 1, 8, 0, 0);
 let failEarn = false;
+let includeInverse = false;
 
 const send = (res, result, retCode = 0, retMsg = 'OK') => {
   res.writeHead(200, { 'content-type': 'application/json' });
@@ -36,6 +37,13 @@ const server = http.createServer((req, res) => {
       return cursor
         ? send(res, { list: [sell], nextPageCursor: '' })
         : send(res, { list: [buy], nextPageCursor: 'page2' });
+    }
+    if (category === 'inverse') {
+      if (!includeInverse) return send(res, { list: [], nextPageCursor: '' });
+      return send(res, { list: [
+        { execId: 'i1', symbol: 'BTCUSD', side: 'Buy', execPrice: '100', execQty: '100', execFee: '0', execTime: String(T0) },
+        { execId: 'i2', symbol: 'BTCUSD', side: 'Sell', execPrice: '110', execQty: '100', execFee: '0', execTime: String(T0 + 60_000) },
+      ], nextPageCursor: '' });
     }
     return send(res, { list: [
       { execId: 'sp1', symbol: 'ETHUSDT', side: 'Buy', execPrice: '2000', execQty: '0.5', execFee: '1', feeCurrency: 'USDT', execTime: String(T0) },
@@ -99,6 +107,29 @@ test('fetchTrades：cursor 翻页 + 多空配对 + 字段归一', async () => {
   assert.equal(out.trades[0].entry_price, 100);
   assert.equal(out.trades[0].exit_price, 110);
   assert.equal(out.trades[0].pnl, 10);
+});
+
+test('fetchTrades：币本位 inverse 按张配对，盈亏按美元名义额折算', async () => {
+  includeInverse = true;
+  try {
+    const out = await bybit.fetchTrades({ creds, fromMs, toMs, limit: 1000, windowBudget: 8 });
+    const invFills = out.fills.filter((f) => f.symbol === 'BTC/USD');
+    assert.equal(invFills.length, 2);
+    assert.ok(invFills.every((f) => f.contractValue === 1));
+    assert.deepEqual(invFills.map((f) => f.id), ['inverse:i1', 'inverse:i2']);
+    const t = out.trades.find((x) => x.symbol === 'BTC/USD');
+    assert.ok(t, '应产出 BTC/USD 回合');
+    assert.equal(t.side, 'long');
+    assert.equal(t.entry_price, 100);
+    assert.equal(t.exit_price, 110);
+    // 100 张 × 1 USD 面值 × (110−100)/100 = 10 USD
+    assert.equal(t.pnl, 10);
+    // 展示口径：币数量 = 100 张 × 1 USD ÷ 100 = 1 BTC；名义额 100 USD
+    assert.equal(t.size, 1);
+    assert.equal(t.notional, 100);
+  } finally {
+    includeInverse = false;
+  }
 });
 
 test('fetchSpotTrades：手续费符号归一', async () => {

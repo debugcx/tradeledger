@@ -475,6 +475,7 @@ function migrate(db) {
     fee REAL NOT NULL DEFAULT 0,
     time INTEGER NOT NULL,
     order_type TEXT,
+    contract_value REAL NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     UNIQUE(account_id, symbol, external_id)
   )`);
@@ -569,7 +570,7 @@ function migrate(db) {
 let handle = null;
 
 /** 当前 schema 版本。新增增量迁移时 +1，并在 runMigrations 里登记。 */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 4;
 
 function recordMigration(db, version, name) {
   db.prepare('INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
@@ -598,6 +599,52 @@ function runMigrations(db) {
   // 历史增量修复：PRAGMA 检查 + meta 标记，重复执行安全。
   migrate(db);
   if (!applied.has(2)) recordMigration(db, 2, 'legacy-repair');
+
+  // v3：OKX 币本位（BTC-USD-SWAP）历史行单位修正。
+  // 早期版本把以币计价的 realizedPnl / fee / fundingFee 当成 USD 入库，
+  // 并按「毛盈亏 ÷ 价差」反推了同样量级错误的 size / notional。
+  // 币本位金额统一按平仓价折算成 USD，size / notional 同比例放大即可。
+  if (!applied.has(3)) {
+    const rows = db.prepare(`
+      SELECT t.id, t.exit_price, t.pnl, t.fee, t.funding, t.size, t.notional
+        FROM trades t JOIN accounts a ON a.id = t.account_id
+       WHERE a.exchange = 'okx' AND t.source = 'api' AND t.market = 'futures'
+         AND t.symbol LIKE '%/USD' AND t.symbol NOT LIKE '%/USDT%'
+         AND t.exit_price > 0
+    `).all();
+    if (rows.length) {
+      const upd = db.prepare('UPDATE trades SET pnl = ?, fee = ?, funding = ?, size = ?, notional = ? WHERE id = ?');
+      db.exec('BEGIN');
+      try {
+        for (const r of rows) {
+          const fx = Number(r.exit_price) || 0;
+          upd.run(
+            (Number(r.pnl) || 0) * fx,
+            (Number(r.fee) || 0) * fx,
+            (Number(r.funding) || 0) * fx,
+            (Number(r.size) || 0) * fx,
+            (Number(r.notional) || 0) * fx,
+            r.id,
+          );
+        }
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+    }
+    recordMigration(db, 3, 'okx-coinm-usd');
+  }
+
+  // v4：trade_fills 增加 contract_value（反向合约的美元面值/张）。
+  // 币本位成交按「张」持久化，重算时靠面值还原盈亏，否则重启后重算会退化成线性口径。
+  if (!applied.has(4)) {
+    const fillCols = new Set(db.prepare('PRAGMA table_info(trade_fills)').all().map((c) => c.name));
+    if (!fillCols.has('contract_value')) {
+      db.exec('ALTER TABLE trade_fills ADD COLUMN contract_value REAL NOT NULL DEFAULT 0');
+    }
+    recordMigration(db, 4, 'fills-contract-value');
+  }
 
   db.prepare(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)
               ON CONFLICT(key) DO UPDATE SET value = excluded.value`)

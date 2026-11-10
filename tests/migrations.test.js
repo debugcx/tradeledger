@@ -9,16 +9,16 @@ const dbmod = await import('../src/db.js');
 
 const versionsOf = (db) => db.prepare('SELECT version, name FROM schema_migrations ORDER BY version').all();
 
-test('全新库：记录 baseline + legacy-repair，schema_version 同步为 2', () => {
+test('全新库：记录 baseline + legacy-repair，schema_version 同步为 4', () => {
   const db = dbmod.openDb(':memory:');
   try {
     const versions = versionsOf(db);
-    assert.deepEqual(versions.map((r) => r.version), [1, 2]);
+    assert.deepEqual(versions.map((r) => r.version), [1, 2, 3, 4]);
     assert.equal(versions[0].name, 'baseline');
     assert.equal(versions[1].name, 'legacy-repair');
     const meta = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
-    assert.equal(meta.value, '2');
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get().n, 2);
+    assert.equal(meta.value, '4');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get().n, 4);
   } finally {
     db.close();
   }
@@ -32,8 +32,8 @@ test('文件库重复打开：迁移记录不重复，schemaVersion() 可读', (
     const db = dbmod.openDb(file);
     dbmod.setDb(db);
     try {
-      assert.equal(versionsOf(db).length, 2);
-      assert.equal(dbmod.schemaVersion(), 2);
+      assert.equal(versionsOf(db).length, 4);
+      assert.equal(dbmod.schemaVersion(), 4);
     } finally {
       dbmod.closeDb();
     }
@@ -60,8 +60,8 @@ test('老库（只有 meta + 旧 accounts 表）自动补列并补齐迁移记�
     const cols = db.prepare('PRAGMA table_info(accounts)').all().map((c) => c.name);
     assert.ok(cols.includes('assets_only'));
     assert.ok(cols.includes('sync_done'));
-    assert.deepEqual(versionsOf(db).map((r) => r.version), [1, 2]);
-    assert.equal(db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get().value, '2');
+    assert.deepEqual(versionsOf(db).map((r) => r.version), [1, 2, 3, 4]);
+    assert.equal(db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get().value, '4');
   } finally {
     db.close();
     fs.rmSync(dir, { recursive: true, force: true });

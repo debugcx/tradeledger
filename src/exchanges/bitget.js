@@ -1,6 +1,6 @@
 import { hmacBase64 } from '../crypto.js';
 import { requestJson } from '../http-client.js';
-import { num, windowsDescending, matchFills, toSymbol, splitPair, quoteFee, isSupportedSpotSymbol, SPOT_QUOTES, marketCache, cacheGet, cachePut } from './common.js';
+import { num, windowsDescending, matchFills, toSymbol, parseStreamCursor, encodeStreamCursor, splitPair, quoteFee, isSupportedSpotSymbol, SPOT_QUOTES, marketCache, cacheGet, cachePut } from './common.js';
 
 const candleCache = marketCache('bitget:candles');
 const fillCache = marketCache('bitget:fills');
@@ -45,14 +45,20 @@ function fillFee(row) {
   return total === 0 ? 0 : -Math.abs(total);
 }
 
-function toFill(row) {
+function toFill(row, productType = 'USDT-FUTURES') {
+  const coin = productType === 'COIN-FUTURES';
+  const price = num(row.price);
+  const baseVolume = num(row.baseVolume ?? row.size ?? row.qty);
   return {
-    id: row.tradeId,
+    id: coin ? `coin:${row.tradeId}` : row.tradeId,
     symbol: toSymbol(row.symbol),
     side: String(row.side || '').toLowerCase() === 'buy' ? 'buy' : 'sell',
-    price: num(row.price),
-    qty: num(row.baseVolume ?? row.size ?? row.qty),
-    fee: fillFee(row),
+    price,
+    // 币本位：1 张 = 1 USD 面值，成交的币数量 × 价格 = 张数
+    qty: coin ? baseVolume * price : baseVolume,
+    ...(coin ? { contractValue: 1 } : {}),
+    // 币本位手续费以结算币计价，按成交价折算成 USD
+    fee: coin ? fillFee(row) * price : fillFee(row),
     time: Number(row.cTime || 0),
     orderType: row.orderType,
   };
@@ -83,41 +89,56 @@ export const bitget = {
   async fetchTrades({ creds, fromMs, toMs, cursor, limit, windowBudget }) {
     const cap = Math.max(100, Number(limit) || 1000);
     const maxWindows = Math.max(1, Number(windowBudget) || 8);
-    const endBound = cursor ? Math.min(toMs, Number(cursor)) : toMs;
-    const windows = windowsDescending(fromMs, endBound, WINDOW_MS);
+    const state = parseStreamCursor(cursor);
     const fills = [];
+    const streamErrors = [];
     let nextCursor = null;
     let used = 0;
 
-    outer:
-    for (const w of windows) {
-      if (used >= maxWindows) { nextCursor = String(w.to); break; }
-      used++;
-      let idLessThan = '';
-      const maxPages = Math.min(60, Math.ceil(cap / 100) + 2);
-      for (let page = 0; page < maxPages; page++) {
-        const rows = await call('/api/v2/mix/order/fill-history', {
-          productType: 'USDT-FUTURES',
-          startTime: String(w.from),
-          endTime: String(w.to),
-          limit: '100',
-          ...(idLessThan ? { idLessThan: String(idLessThan) } : {}),
-        }, creds);
-        if (!Array.isArray(rows) || !rows.length) break;
-        for (const row of rows) fills.push(toFill(row));
-        if (fills.length >= cap) {
-          const oldest = Math.min(...fills.map((f) => f.time));
-          nextCursor = String(oldest - 1);
-          break outer;
+    // 通道 0 = USDT 本位，通道 1 = 币本位（COIN-FUTURES）。
+    // 未开通币本位权限时只记录告警，不影响 U 本位。
+    for (let si = state.index; si < 2; si++) {
+      const productType = si === 0 ? 'USDT-FUTURES' : 'COIN-FUTURES';
+      const inner = si === state.index ? state.inner : null;
+      const endBound = inner ? Math.min(toMs, Number(inner)) : toMs;
+      const windows = windowsDescending(fromMs, endBound, WINDOW_MS);
+      let batchNext = null;
+      try {
+        outer:
+        for (const w of windows) {
+          if (used >= maxWindows) { batchNext = String(w.to); break; }
+          used++;
+          let idLessThan = '';
+          const maxPages = Math.min(60, Math.ceil(cap / 100) + 2);
+          for (let page = 0; page < maxPages; page++) {
+            const rows = await call('/api/v2/mix/order/fill-history', {
+              productType,
+              startTime: String(w.from),
+              endTime: String(w.to),
+              limit: '100',
+              ...(idLessThan ? { idLessThan: String(idLessThan) } : {}),
+            }, creds);
+            if (!Array.isArray(rows) || !rows.length) break;
+            for (const row of rows) fills.push(toFill(row, productType));
+            if (fills.length >= cap) {
+              const oldest = Math.min(...fills.map((f) => f.time));
+              batchNext = String(oldest - 1);
+              break outer;
+            }
+            const lastId = rows[rows.length - 1]?.tradeId;
+            if (rows.length < 100 || !lastId) break;
+            idLessThan = String(lastId);
+          }
         }
-        const lastId = rows[rows.length - 1]?.tradeId;
-        if (rows.length < 100 || !lastId) break;
-        idLessThan = String(lastId);
+      } catch (err) {
+        streamErrors.push(`${si === 0 ? 'U 本位' : '币本位'}：${err?.message || err}`);
+        continue;
       }
+      if (batchNext) { nextCursor = encodeStreamCursor(si, batchNext); break; }
     }
 
     const trades = matchFills(fills.slice(0, cap), 'bitget');
-    return { trades, fills: fills.slice(0, cap), nextCursor };
+    return { trades, fills: fills.slice(0, cap), nextCursor, streamErrors };
   },
 
   async fetchFunding({ creds, fromMs, toMs, limit }) {
@@ -152,6 +173,56 @@ export const bitget = {
         idLessThan = String(lastId);
       }
     }
+
+    // 币本位资金费：bill 金额以结算币计价，按合约标记价折算成 USD
+    try {
+      if (events.length < cap) {
+        const priceOf = new Map();
+        const markPriceOf = async (symbol) => {
+          if (!symbol) return 0;
+          if (priceOf.has(symbol)) return priceOf.get(symbol);
+          let p = 0;
+          try {
+            const rows = await call('/api/v2/mix/market/ticker', { productType: 'COIN-FUTURES', symbol }, creds);
+            const t = Array.isArray(rows) ? rows[0] : rows;
+            p = num(t?.markPrice ?? t?.lastPr);
+          } catch { p = 0; }
+          priceOf.set(symbol, p);
+          return p;
+        };
+        const coinLoop = { done: false };
+        for (const w of windowsDescending(fromMs, toMs, WINDOW_MS)) {
+          let idLessThan = '';
+          for (let page = 0; page < 40; page++) {
+            const payload = await call('/api/v2/mix/account/bill', {
+              productType: 'COIN-FUTURES',
+              businessType: 'contract_funding',
+              startTime: String(w.from),
+              endTime: String(w.to),
+              limit: '100',
+              ...(idLessThan ? { idLessThan: String(idLessThan) } : {}),
+            }, creds);
+            const rows = Array.isArray(payload) ? payload : (payload?.list || []);
+            if (!rows.length) break;
+            for (const row of rows) {
+              const time = Number(row.cTime || 0);
+              const price = await markPriceOf(row.symbol);
+              events.push({
+                external_id: `bitget:coinfund:${row.billId || `${row.symbol}:${time}`}`,
+                symbol: toSymbol(row.symbol),
+                time: new Date(time).toISOString(),
+                amount: num(row.amount) * price,
+              });
+            }
+            if (events.length >= cap) { coinLoop.done = true; break; }
+            const lastId = rows[rows.length - 1]?.billId;
+            if (rows.length < 100 || !lastId) break;
+            idLessThan = String(lastId);
+          }
+          if (coinLoop.done) break;
+        }
+      }
+    } catch { /* 未开通币本位权限时忽略 */ }
     return { events: events.slice(0, cap), nextCursor: null };
   },
 
@@ -297,6 +368,17 @@ export const bitget = {
     }
 
     try {
+      // 币本位合约账户：equity 以结算币计价，资产总览按币种行情折 USD
+      const rows = await call('/api/v2/mix/account/accounts', { productType: 'COIN-FUTURES' }, creds);
+      mark('futures');
+      for (const a of rows || []) {
+        push('futures', a.marginCoin || 'BTC', num(a.accountEquity), 'bitget:/api/v2/mix/account/accounts?coin', '币本位合约账户');
+      }
+    } catch (err) {
+      errors.push(`币本位合约账户：${err?.message || err}`);
+    }
+
+    try {
       const rows = await call('/api/v2/spot/account/assets', {}, creds);
       mark('spot');
       for (const a of rows || []) {
@@ -377,6 +459,15 @@ export const bitget = {
       if (Math.abs(total) <= 0) continue;
       balances.push({ asset: a.marginCoin || 'USDT', total, free: num(a.available) });
     }
+    // 币本位合约余额（以结算币计价）
+    try {
+      const coinAccounts = await call('/api/v2/mix/account/accounts', { productType: 'COIN-FUTURES' }, creds);
+      for (const a of coinAccounts || []) {
+        const total = num(a.accountEquity);
+        if (Math.abs(total) <= 0) continue;
+        balances.push({ asset: a.marginCoin || 'BTC', total, free: num(a.available) });
+      }
+    } catch { /* 未开通币本位权限时忽略 */ }
 
     const outPositions = [];
     const rates = new Map();
@@ -430,7 +521,7 @@ export const bitget = {
       symbol: instId, granularity: bar, limit: '1000',
       startTime: String(Math.max(0, Number(fromMs))), endTime: String(Number(toMs)),
     };
-    if (market !== 'spot') params.productType = 'USDT-FUTURES';
+    if (market !== 'spot') params.productType = /\/USD$/i.test(String(symbol || '')) ? 'COIN-FUTURES' : 'USDT-FUTURES';
     const res = await requestJson(`${BASE}${path}?${new URLSearchParams(params)}`, { method: 'GET' });
     if (!Array.isArray(res.json?.data)) throw new Error(`Bitget K 线返回异常（HTTP ${res.status}）`);
     const out = res.json.data
@@ -469,18 +560,22 @@ export const bitget = {
         if (rows.length < 100) break;
       }
     } else {
+      const coin = /\/USD$/i.test(String(symbol || ''));
       for (let page = 0; page < 3 && out.length < cap; page++) {
         const rows = await call('/api/v2/mix/trade/fills', {
-          symbol: instId, productType: 'USDT-FUTURES',
+          symbol: instId, productType: coin ? 'COIN-FUTURES' : 'USDT-FUTURES',
           startTime: String(fromMs), endTime: String(toMs), limit: '100',
         }, creds);
         if (!Array.isArray(rows) || !rows.length) break;
         for (const r of rows) {
+          const price = num(r.price);
+          const baseVolume = num(r.size ?? r.baseVolume);
           out.push({
             t: Number(r.fillTime ?? r.ts ?? r.cTime ?? 0),
             side: String(r.side || '').toLowerCase() === 'buy' ? 'buy' : 'sell',
-            price: num(r.price), qty: num(r.size ?? r.baseVolume),
-            fee: fillFee(r), feeCcy: r.feeCoin || 'USDT', billId: r.tradeId || '',
+            price, qty: coin ? baseVolume * price : baseVolume,
+            fee: coin ? fillFee(r) * price : fillFee(r),
+            feeCcy: r.feeCoin || (coin ? 'COIN' : 'USDT'), billId: r.tradeId || '',
             orderType: r.role === 'maker' ? 'limit' : r.role === 'taker' ? 'market' : null,
           });
         }

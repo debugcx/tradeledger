@@ -74,6 +74,44 @@ export function windowsDescending(fromMs, toMs, windowMs) {
 
 export const SPOT_QUOTES = new Set(['USDT', 'USDC', 'USD']);
 
+/**
+ * 币本位（反向合约）名称 → 统一符号。
+ * BTCUSD_PERP / BTCUSD / BTC_USD / BTCUSD_240628 → BTC/USD
+ */
+export function toCoinSymbol(raw) {
+  let s = String(raw || '').trim().toUpperCase();
+  if (!s) return '';
+  s = s.replace(/[-_](?:PERP|PERPETUAL|\d{6}|\d{8})$/g, '');
+  const compact = s.replace(/[-_/]/g, '');
+  const m = compact.match(/^([A-Z0-9]+?)(USDT|USDC|USD|BTC|ETH)$/);
+  if (m && m[1]) return `${m[1]}/${m[2]}`;
+  return toSymbol(raw);
+}
+
+/**
+ * 多通道游标：`<通道下标>|<通道内游标>`。
+ * 同一账户要同时拉 U 本位与币本位时，用通道下标记录当前走到哪条流；
+ * 旧版纯数字游标视为第 0 通道，保证升级后能接着跑。
+ */
+export function parseStreamCursor(cursor) {
+  if (cursor === null || cursor === undefined || cursor === '') return { index: 0, inner: null };
+  const m = String(cursor).match(/^(\d+)\|(.*)$/);
+  if (m) return { index: Math.max(0, Number(m[1]) || 0), inner: m[2] || null };
+  return { index: 0, inner: String(cursor) };
+}
+
+export function encodeStreamCursor(index, inner) {
+  if (inner === null || inner === undefined || inner === '') return null;
+  return `${Math.max(0, Number(index) || 0)}|${inner}`;
+}
+
+/** 游标里的「时间水位」：组合游标取冒号后的数字，取不到时回落到 fallback */
+export function cursorWatermark(cursor, fallback = 0) {
+  const inner = parseStreamCursor(cursor).inner;
+  const n = Number(inner);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 export function splitPair(symbol) {
   const parts = String(symbol || '').split('/');
   return { base: parts[0] || '', quote: parts[1] || '' };

@@ -1,6 +1,6 @@
 import { hmacHex512, sha512Hex } from '../crypto.js';
 import { requestJson } from '../http-client.js';
-import { num, matchFills, matchEpisodes, toSymbol, splitPair, quoteFee, isSupportedSpotSymbol, SPOT_QUOTES, windowsDescending, marketCache, cacheGet, cachePut } from './common.js';
+import { num, matchFills, matchEpisodes, toSymbol, parseStreamCursor, encodeStreamCursor, splitPair, quoteFee, isSupportedSpotSymbol, SPOT_QUOTES, windowsDescending, marketCache, cacheGet, cachePut } from './common.js';
 
 const ledgerCache = marketCache('gate:monthly-ledger');
 // Gate account_book 的限流较紧；账本分页任务用 12 路并发：单请求经代理约 1.5s，
@@ -36,6 +36,8 @@ const EMPTY_SHA512 = sha512Hex('');
 
 // 合约面值缓存（name → quanto_multiplier，不可变）与 K 线/成交缓存
 const ctValCache = new Map();
+// 已加载过面值表的结算币种（usdt / btc）
+const ctValLoaded = new Set();
 const candleCache = new Map();
 const fillCache = new Map();
 
@@ -67,28 +69,34 @@ async function call(path, params, creds, opts = {}) {
   return data;
 }
 
-function toFill(row, mult = 1) {
+function toFill(row, mult = 1, settle = 'usdt') {
   const size = num(row.size);
+  const price = num(row.price);
+  const inverse = settle === 'btc';
+  // 反向合约的面值是「美元/张」（Gate 的 quanto_multiplier 返回 0，按 1 USD 兜底），
+  // 数量保留张数、面值交给配对器；手续费以结算币计价，按价格折算成 USD。
   return {
-    id: row.id,
+    id: inverse ? `gatebtc:${row.id}` : row.id,
     symbol: toSymbol(row.contract),
     side: size > 0 ? 'buy' : 'sell',
-    price: num(row.price),
-    qty: Math.abs(size) * (mult || 1),
+    price,
+    qty: inverse ? Math.abs(size) : Math.abs(size) * (mult || 1),
+    ...(inverse ? { contractValue: mult || 1 } : {}),
     // Gate 的 fee 返回正数（支出金额）；统一归一化成「负数 = 支出」的应用口径
-    fee: -Math.abs(num(row.fee)),
+    fee: inverse ? -Math.abs(num(row.fee)) * price : -Math.abs(num(row.fee)),
     time: Number(row.create_time || 0) * 1000,
     orderType: 'other',
   };
 }
 
-/** 合约面值表（公共接口）：每张合约对应的币数量 */
-async function loadCtVals(creds) {
-  if (ctValCache.size) return ctValCache;
-  const rows = await call('/api/v4/futures/usdt/contracts', {}, creds, { timeout: 20_000, retries: 1 });
+/** 合约面值表（公共接口）：每张合约对应的币数量（反向合约为美元面值） */
+async function loadCtVals(creds, settle = 'usdt') {
+  if (ctValLoaded.has(settle)) return ctValCache;
+  const rows = await call(`/api/v4/futures/${settle}/contracts`, {}, creds, { timeout: 20_000, retries: 1 });
   if (Array.isArray(rows)) {
     for (const c of rows) ctValCache.set(c.name, num(c.quanto_multiplier) || 1);
   }
+  ctValLoaded.add(settle);
   return ctValCache;
 }
 
@@ -124,31 +132,45 @@ export const gate = {
   async fetchTrades({ creds, fromMs, toMs, cursor, limit }) {
     const cap = Math.max(100, Number(limit) || 1000);
     const pageSize = 1000;
+    const state = parseStreamCursor(cursor);
     const fills = [];
-    let offset = cursor ? Math.max(0, Number(cursor) || 0) : 0;
+    const streamErrors = [];
     let nextCursor = null;
-    const ctVals = await loadCtVals(creds).catch(() => ctValCache);
 
-    for (let page = 0; page < 20; page++) {
-      const rows = await call('/api/v4/futures/usdt/my_trades', {
-        from: String(Math.floor(fromMs / 1000)),
-        to: String(Math.ceil(toMs / 1000)),
-        limit: String(pageSize),
-        offset: String(offset),
-      }, creds);
-      if (!Array.isArray(rows) || !rows.length) break;
-      for (const row of rows) fills.push(toFill(row, ctVals.get(row.contract) || 1));
-      offset += rows.length;
-      if (fills.length >= cap) {
-        nextCursor = String(offset);
-        break;
+    // 通道 0 = USDT 本位（settle=usdt），通道 1 = 币本位（settle=btc）。
+    // 币本位没开权限时只记录告警，不影响 U 本位同步。
+    for (let si = state.index; si < 2; si++) {
+      const settle = si === 0 ? 'usdt' : 'btc';
+      let offset = si === state.index && state.inner !== null ? Math.max(0, Number(state.inner) || 0) : 0;
+      let batchNext = null;
+      try {
+        const ctVals = await loadCtVals(creds, settle).catch(() => ctValCache);
+        for (let page = 0; page < 20; page++) {
+          const rows = await call(`/api/v4/futures/${settle}/my_trades`, {
+            from: String(Math.floor(fromMs / 1000)),
+            to: String(Math.ceil(toMs / 1000)),
+            limit: String(pageSize),
+            offset: String(offset),
+          }, creds);
+          if (!Array.isArray(rows) || !rows.length) break;
+          for (const row of rows) fills.push(toFill(row, ctVals.get(row.contract) || 1, settle));
+          offset += rows.length;
+          if (fills.length >= cap) {
+            batchNext = String(offset);
+            break;
+          }
+          if (rows.length < pageSize) break;
+        }
+      } catch (err) {
+        streamErrors.push(`${settle === 'usdt' ? 'U 本位' : '币本位'}：${err?.message || err}`);
+        continue;
       }
-      if (rows.length < pageSize) break;
+      if (batchNext) { nextCursor = encodeStreamCursor(si, batchNext); break; }
     }
 
     // 净头寸 0→0 一个回合：开仓/加仓/减仓/清零不再拆成多条
     const trades = matchEpisodes(fills.slice(0, cap), 'gate');
-    return { trades, fills: fills.slice(0, cap), nextCursor };
+    return { trades, fills: fills.slice(0, cap), nextCursor, streamErrors };
   },
 
   async fetchFunding({ creds, fromMs, toMs, cursor, limit }) {
@@ -184,6 +206,41 @@ export const gate = {
         if (rows.length < 1000) break;
       }
     }
+
+    // 币本位资金费：change 以结算币（BTC）计价，按合约标记价折算成 USD
+    try {
+      if (events.length < cap) {
+        const tickers = await call('/api/v4/futures/btc/tickers', {}, creds, { timeout: 15_000, retries: 1 });
+        const priceOf = new Map();
+        for (const t of Array.isArray(tickers) ? tickers : []) {
+          priceOf.set(t.contract, num(t.mark_price) || num(t.last));
+        }
+        for (const w of windows) {
+          if (events.length >= cap) break;
+          for (let offset = 0; offset < 1000 && events.length < cap; offset += 1000) {
+            const rows = await call('/api/v4/futures/btc/account_book', {
+              type: 'fund',
+              from: String(Math.floor(w.from / 1000)),
+              to: String(Math.ceil(w.to / 1000)),
+              limit: '1000',
+              offset: String(offset),
+            }, creds);
+            if (!Array.isArray(rows) || !rows.length) break;
+            for (const row of rows) {
+              const time = Number(row.time || 0) * 1000;
+              const contract = String(row.text || '').split(':')[0].trim();
+              events.push({
+                external_id: `gate:coinfund:${row.time}:${row.text}:${row.change}:${row.balance}`,
+                symbol: toSymbol(contract),
+                time: new Date(time).toISOString(),
+                amount: num(row.change) * (priceOf.get(contract) || 0),
+              });
+            }
+            if (rows.length < 1000) break;
+          }
+        }
+      }
+    } catch { /* 未开通币本位权限时忽略 */ }
     return { events: events.slice(0, cap), nextCursor: null };
   },
 
@@ -399,6 +456,15 @@ export const gate = {
     }
 
     try {
+      // 币本位合约账户：余额以结算币（BTC）计价，资产总览按币种行情折 USD
+      const account = await call('/api/v4/futures/btc/accounts', {}, creds);
+      mark('futures');
+      push('futures', account?.currency || 'BTC', num(account?.total), 'gate:/api/v4/futures/btc/accounts', '币本位合约账户');
+    } catch (err) {
+      errors.push(`币本位合约账户：${err?.message || err}`);
+    }
+
+    try {
       const rows = await call('/api/v4/spot/accounts', {}, creds);
       mark('spot');
       for (const a of rows || []) {
@@ -502,6 +568,31 @@ export const gate = {
         next_funding_time: rate?.t ? new Date(Number(rate.t) * 1000).toISOString() : null,
       });
     }
+
+    // 币本位账户与持仓（张数按标记价折算成币数量）
+    try {
+      const coinAccount = await call('/api/v4/futures/btc/accounts', {}, creds);
+      const coinTotal = num(coinAccount?.total);
+      if (Math.abs(coinTotal) > 0) {
+        balances.push({ asset: coinAccount.currency || 'BTC', total: coinTotal, free: num(coinAccount.available) });
+      }
+      const coinPositions = await call('/api/v4/futures/btc/positions', {}, creds);
+      for (const p of coinPositions || []) {
+        const contracts = Math.abs(num(p.size));
+        if (!contracts) continue;
+        const mark = num(p.mark_price);
+        outPositions.push({
+          symbol: toSymbol(p.contract),
+          side: num(p.size) > 0 ? 'long' : 'short',
+          size: mark > 0 ? contracts / mark : 0,
+          entry_price: num(p.entry_price),
+          mark_price: mark,
+          unrealized: num(p.unrealised_pnl),
+          funding_rate: null,
+          next_funding_time: null,
+        });
+      }
+    } catch { /* 未开通币本位权限时忽略 */ }
     return { balances, positions: outPositions };
   },
 
@@ -573,7 +664,9 @@ export const gate = {
     const hit = candleCache.get(cacheKey);
     if (hit && Date.now() - hit.at < 6 * 3600_000) return hit;
 
-    const path = market === 'spot' ? '/api/v4/spot/candlesticks' : '/api/v4/futures/usdt/candlesticks';
+    const path = market === 'spot'
+      ? '/api/v4/spot/candlesticks'
+      : `/api/v4/futures/${/\/USD$/i.test(String(symbol || '')) ? 'btc' : 'usdt'}/candlesticks`;
     const key = market === 'spot' ? 'currency_pair' : 'contract';
     const out = [];
     let to = Number(toMs);
@@ -633,19 +726,22 @@ export const gate = {
         if (rows.length < 100) break;
       }
     } else {
-      const mult = (await loadCtVals(creds).catch(() => ctValCache)).get(instId) || 1;
+      // 币本位（BTC_USD 等）走 settle=btc，数量/手续费按反向合约口径换算
+      const coin = /\/USD$/i.test(String(symbol || ''));
+      const settle = coin ? 'btc' : 'usdt';
+      const mult = (await loadCtVals(creds, settle).catch(() => ctValCache)).get(instId) || 1;
       for (let offset = 0; offset < 1000 && out.length < cap; offset += 1000) {
-        const rows = await call('/api/v4/futures/usdt/my_trades', {
+        const rows = await call(`/api/v4/futures/${settle}/my_trades`, {
           contract: instId, from, to, limit: '1000', offset: String(offset),
         }, creds);
         if (!Array.isArray(rows) || !rows.length) break;
         for (const r of rows) {
-          const size = num(r.size);
+          const f = toFill(r, mult, settle);
           out.push({
-            t: Number(r.create_time || 0) * 1000,
-            side: size > 0 ? 'buy' : 'sell',
-            price: num(r.price), qty: Math.abs(size) * mult,
-            fee: -Math.abs(num(r.fee)), feeCcy: 'USDT', billId: String(r.id || ''),
+            t: f.time,
+            side: f.side,
+            price: f.price, qty: f.qty,
+            fee: f.fee, feeCcy: coin ? 'COIN' : 'USDT', billId: String(f.id),
             orderType: r.role === 'maker' ? 'limit' : r.role === 'taker' ? 'market' : null,
           });
         }

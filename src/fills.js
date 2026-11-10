@@ -111,6 +111,10 @@ export function matchFills(fills, source, { longOnly = false } = {}) {
     const time = Number(fill.time);
     const side = fill.side === 'buy' ? 'buy' : 'sell';
     const closeSide = side === 'buy' ? 'short' : 'long';
+    // 反向（币本位）合约：qty 是「张」，contractValue 是每张的美元面值。
+    // 配对按张数进行（开平张数一致），盈亏按 张数 × 面值 × (1/开仓价 − 1/平仓价)。
+    const contractValue = Math.abs(num(fill.contractValue));
+    const inverse = contractValue > 0;
     const bookKey = `${fill.symbol}|${closeSide}`;
     const book = lots.get(bookKey) || [];
     let remain = qty;
@@ -119,22 +123,27 @@ export function matchFills(fills, source, { longOnly = false } = {}) {
       const lot = book[0];
       const take = Math.min(remain, lot.qty);
       const dir = closeSide === 'long' ? 1 : -1;
+      const cv = lot.cv || contractValue;
       const openFee = lot.fee * (take / lot.qty);
       const closeFee = fee * (take / qty);
       const openType = lot.type || 'other';
       const closeType = normalizeOrderType(fill.orderType);
       const known = [openType, closeType].filter((t) => t !== 'other');
+      const inverseCore = inverse
+        ? dir * take * cv * (price - lot.price) / lot.price
+        : (price - lot.price) * take * dir;
       const trade = {
         symbol: fill.symbol,
         side: closeSide,
         order_type: known.length ? classifyOrderType(known.map((t) => ({ orderType: t }))) : 'other',
-        size: take,
-        notional: lot.price * take,
+        // 反向合约对外仍展示「币」口径：张数 × 面值 ÷ 开仓价
+        size: inverse ? take * cv / lot.price : take,
+        notional: inverse ? take * cv : lot.price * take,
         entry_price: lot.price,
         exit_price: price,
         open_time: new Date(lot.time).toISOString(),
         close_time: new Date(time).toISOString(),
-        pnl: (price - lot.price) * take * dir + openFee + closeFee,
+        pnl: inverseCore + openFee + closeFee,
         fee: openFee + closeFee,
         funding: 0,
         source: 'api',
@@ -162,7 +171,11 @@ export function matchFills(fills, source, { longOnly = false } = {}) {
       const openSide = side === 'buy' ? 'long' : 'short';
       const key = `${fill.symbol}|${openSide}`;
       const arr = lots.get(key) || [];
-      arr.push({ qty: remain, price, time, fee: fee * (remain / qty), type: normalizeOrderType(fill.orderType) });
+      arr.push({
+        qty: remain, price, time, fee: fee * (remain / qty),
+        type: normalizeOrderType(fill.orderType),
+        cv: contractValue, inverse,
+      });
       lots.set(key, arr);
     }
   }
@@ -291,6 +304,10 @@ export function matchEpisodes(fills, source) {
 
   const emit = (symbol, legs) => {
     if (legs.length < 2) return;
+    // 反向（币本位）合约：qty 是张数，面值 contractValue 为美元/张；
+    // 开仓均价用调和平均，盈亏按 张数 × 面值 × (1/开仓均价 − 1/平仓价)。
+    const contractValue = Math.abs(num(legs[0].contractValue));
+    const inverse = contractValue > 0;
     let pos = 0;
     let avg = 0;
     let openQty = 0, closeQty = 0, openFee = 0, closeFee = 0;
@@ -303,12 +320,24 @@ export function matchEpisodes(fills, source) {
       const reducing = Math.abs(pos) < Math.abs(before) - 1e-12;
       if (reducing) {
         const legQty = Math.min(f.qty, Math.abs(before));
-        pnl += (f.price - avg) * legQty * (before > 0 ? 1 : -1);
+        if (inverse) {
+          const dirSign = before > 0 ? 1 : -1;
+          // 张数 × 面值 是开仓美元名义额；盈亏 = 名义额 × (平仓价 − 开仓均价) / 开仓均价
+          pnl += dirSign * legQty * contractValue * (f.price - avg) / (avg || f.price);
+        } else {
+          pnl += (f.price - avg) * legQty * (before > 0 ? 1 : -1);
+        }
         closeQty += legQty;
         closeNotional += f.price * legQty;
         closeFee += f.fee;
       } else {
-        avg = (avg * Math.abs(before) + f.price * f.qty) / Math.abs(pos);
+        if (inverse) {
+          const prev = Math.abs(before);
+          const next = Math.abs(pos);
+          avg = next / ((prev / (avg || f.price)) + f.qty / f.price);
+        } else {
+          avg = (avg * Math.abs(before) + f.price * f.qty) / Math.abs(pos);
+        }
         openQty += f.qty;
         openNotional += f.price * f.qty;
         openFee += f.fee;
@@ -322,9 +351,9 @@ export function matchEpisodes(fills, source) {
       symbol,
       side,
       order_type: classifyOrderType(legs),
-      size: openQty,
-      notional: openNotional,
-      entry_price: openNotional / openQty,
+      size: inverse ? openQty * contractValue / (avg || 1) : openQty,
+      notional: inverse ? openQty * contractValue : openNotional,
+      entry_price: inverse ? avg : openNotional / openQty,
       exit_price: closeNotional / closeQty,
       open_time: new Date(openTime).toISOString(),
       close_time: new Date(closeTime).toISOString(),
@@ -347,7 +376,8 @@ export function matchEpisodes(fills, source) {
   for (const fill of sorted) {
     const qty = Math.abs(num(fill.qty));
     const dir = fill.side === 'buy' ? 1 : -1;
-    let book = books.get(fill.symbol) || { pos: 0, avgPx: 0, legs: [] };
+    const cv = Math.abs(num(fill.contractValue));
+    let book = books.get(fill.symbol) || { pos: 0, avgPx: 0, legs: [], cv, inverse: cv > 0 };
     const before = book.pos;
     book.pos += dir * qty;
     book.legs.push({ ...fill, qty });
@@ -355,7 +385,7 @@ export function matchEpisodes(fills, source) {
     if (Math.abs(before) > 1e-12 && Math.sign(book.pos) !== Math.sign(before) && Math.abs(book.pos) > 1e-12) {
       const carried = Math.abs(book.pos);
       emit(fill.symbol, book.legs);
-      books.set(fill.symbol, { pos: book.pos, avgPx: 0, legs: [{ ...fill, qty: carried }] });
+      books.set(fill.symbol, { pos: book.pos, avgPx: 0, legs: [{ ...fill, qty: carried }], cv: book.cv, inverse: book.inverse });
       continue;
     }
     if (Math.abs(book.pos) <= 1e-12) {

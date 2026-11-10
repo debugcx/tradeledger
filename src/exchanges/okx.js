@@ -83,16 +83,20 @@ export function nextCursorOf(rows, pageSize) {
   return t > 0 ? String(t + 1) : null;
 }
 
-function toTrade(row) {  const openMs = Number(row.openTime || row.cTime || 0);
+export function toTrade(row) {  const openMs = Number(row.openTime || row.cTime || 0);
   const closeMs = Number(row.closeTime || row.uTime || openMs);
   if (!openMs || !closeMs) return null;
   const entry = num(row.openAvgPx);
   const exit = num(row.closeAvgPx);
   if (!entry && !exit) return null;
   const side = inferSide(row);
-  const fee = num(row.fee) + num(row.liqPenalty);
-  const funding = num(row.fundingFee);
-  const pnl = row.realizedPnl !== undefined && row.realizedPnl !== null ? num(row.realizedPnl) : num(row.pnl);
+  // 币本位（反向）合约的 realizedPnl / fee / fundingFee 以结算币计价（如 BTC），
+  // 统一按平仓价折算成 USD；否则会被当成美元直接计入统计，少算几个数量级。
+  const coinMargined = /-USD-SWAP$/i.test(String(row.instId || ''));
+  const fx = coinMargined ? (exit || entry || 0) : 1;
+  const fee = (num(row.fee) + num(row.liqPenalty)) * fx;
+  const funding = num(row.fundingFee) * fx;
+  const pnl = (row.realizedPnl !== undefined && row.realizedPnl !== null ? num(row.realizedPnl) : num(row.pnl)) * fx;
 
   // 仓位大小统一换算成「币」：OKX 的 openMaxPos 是张数，直接拿去做价格复算会差合约面值。
   // 用毛盈亏 ÷ 价差反推币数量，使 notional 与复算口径一致；价差为 0 时退回张数。

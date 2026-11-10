@@ -899,8 +899,8 @@ export function insertTradeFills(accountId, exchange, fills) {
   return tx((db) => {
     const stmt = db.prepare(
       `INSERT OR IGNORE INTO trade_fills
-         (account_id, exchange, symbol, external_id, side, price, qty, fee, time, order_type, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (account_id, exchange, symbol, external_id, side, price, qty, fee, time, order_type, contract_value, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     let inserted = 0;
     for (const f of fills) {
@@ -909,7 +909,8 @@ export function insertTradeFills(accountId, exchange, fills) {
         Number(accountId), String(exchange), String(f.symbol), String(f.id),
         f.side === 'buy' ? 'buy' : 'sell',
         Number(f.price) || 0, Number(f.qty) || 0, Number(f.fee) || 0,
-        Math.floor(Number(f.time) || 0), f.orderType ? String(f.orderType) : null, nowIso(),
+        Math.floor(Number(f.time) || 0), f.orderType ? String(f.orderType) : null,
+        Number(f.contractValue) || 0, nowIso(),
       );
       inserted += Number(r.changes) || 0;
     }
@@ -936,12 +937,12 @@ export function listSymbolEarliestOpen(accountId) {
 export function listTradeFills(accountId, symbol, { exchange = null } = {}) {
   const rows = exchange
     ? all(
-      `SELECT external_id, side, price, qty, fee, time, order_type
+      `SELECT external_id, side, price, qty, fee, time, order_type, contract_value
        FROM trade_fills WHERE account_id = ? AND symbol = ? AND exchange = ? ORDER BY time ASC, id ASC`,
       Number(accountId), String(symbol), String(exchange),
     )
     : all(
-      `SELECT external_id, side, price, qty, fee, time, order_type
+      `SELECT external_id, side, price, qty, fee, time, order_type, contract_value
        FROM trade_fills WHERE account_id = ? AND symbol = ? ORDER BY time ASC, id ASC`,
       Number(accountId), String(symbol),
     );
