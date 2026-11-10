@@ -32,6 +32,18 @@ test('组合游标编解码与水位提取', () => {
   assert.equal(cursorWatermark(null, 42), 42);
 });
 
+test('列表紧凑金额：宽度有界，极小值用科学计数法', async () => {
+  const { fmtCoinShort } = await import('../src/views/journal.js');
+  assert.equal(fmtCoinShort(0), '0');
+  assert.equal(fmtCoinShort(0.00012369), '+0.00012369');
+  assert.equal(fmtCoinShort(-0.00012369), '-0.00012369');
+  assert.equal(fmtCoinShort(0.00003524), '+0.00003524');
+  assert.equal(fmtCoinShort(1.2345), '+1.2345');
+  assert.equal(fmtCoinShort(12345.678), '+12,345.68');
+  assert.equal(fmtCoinShort(1.2345e-9), '+1.23e-9');
+  assert.equal(fmtCoinShort(-1.2345e-9), '-1.23e-9');
+});
+
 test('交易详情：币本位金额按平仓价折回结算币', async () => {
   const { coinMarginedAmounts, inverseFillQty } = await import('../src/views/journal.js');
   const coin = coinMarginedAmounts({

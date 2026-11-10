@@ -430,6 +430,10 @@ svg.chart, svg.heatmap, svg.donut { cursor: zoom-in; }
 }
 .table td { padding: 9px 10px; border-bottom: 1px solid var(--border-soft); white-space: nowrap; vertical-align: middle; }
 .table th.num, .table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+/* 币本位盈亏列：固定宽度 + 省略号，长小数或大金额都不会撑破表格（完整值在 title） */
+.table td.pnl-cell { width: 132px; max-width: 132px; }
+.table td.pnl-cell .amt-line { display: block; max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.35; }
+.table td.pnl-cell .unit { font-size: .78em; opacity: .75; margin-left: 2px; }
 .table tbody tr:hover { background: var(--panel-2); }
 .table tbody tr:last-child td { border-bottom: none; }
 .row-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }

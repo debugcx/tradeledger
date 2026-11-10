@@ -27,6 +27,22 @@ export function coinMarginedAmounts(trade) {
 }
 
 /**
+ * 列表用的紧凑金额：控制字符宽度，避免币本位的小数把表格撑宽。
+ * 完整精度仍保留在 title 与详情页；这里只负责「看得清、放得下」。
+ */
+export function fmtCoinShort(v) {
+  const n = Number(v) || 0;
+  const abs = Math.abs(n);
+  let s;
+  if (abs === 0) s = '0';
+  else if (abs >= 1000) s = n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  else if (abs >= 1) s = n.toLocaleString('en-US', { maximumFractionDigits: 4 });
+  else if (abs >= 1e-8) s = n.toLocaleString('en-US', { maximumFractionDigits: 8 });
+  else s = n.toExponential(2); // 尘埃级金额才用科学计数法，宽度封顶
+  return `${n > 0 ? '+' : ''}${s}`;
+}
+
+/**
  * 反向合约成交的展示数量：库里的 qty 是张数，contractValue 是美元/张，
  * 按成交价折回结算币。非反向合约原样返回。
  */
@@ -218,8 +234,8 @@ export function journalPage({ user, trades, filters, tags, symbols, pagination, 
     <td>${t.order_type === 'limit' ? '挂单' : t.order_type === 'market' ? '吃单' : t.order_type === 'mixed' ? '混合' : '—'}</td>
     <td class="num">${fmtPrice(t.entry_price)} → ${fmtPrice(t.exit_price)}</td>
     <td class="num">${fmtMoney(t.notional, { sign: false })}</td>
-    <td class="num"><div class="${sign(t.pnl)} strong">${coin ? `${fmtNum(coin.pnl, 8)} ${e(coin.base)}` : fmtMoney(t.pnl)}</div>
-      ${coin ? `<div class="muted small">${fmtMoney(t.pnl)}</div>` : ''}</td>
+    <td class="num pnl-cell"><div class="amt-line ${sign(t.pnl)} strong" title="${coin ? `${fmtCoin(coin.pnl)}（${fmtMoney(t.pnl)}）` : fmtMoney(t.pnl)}">${coin ? `${fmtCoinShort(coin.pnl)} <span class="unit">${e(coin.base)}</span>` : fmtMoney(t.pnl)}</div>
+      ${coin ? `<div class="muted small amt-line">${fmtMoney(t.pnl)}</div>` : ''}</td>
     <td class="num muted">${e(fmtDurationShort(new Date(t.close_time) - new Date(t.open_time)))}</td>
     <td class="tags-cell">${(t.tags || []).map((x) => `<span class="tag-pill">${e(x)}</span>`).join(' ')}</td>
     <td class="quick-note-cell">${quickNoteBtn(t)}</td>
