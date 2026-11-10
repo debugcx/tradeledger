@@ -231,14 +231,14 @@ export function journalPage({ user, trades, filters, tags, symbols, pagination, 
     <td><a href="/dashboard/journal/${t.id}"><b>${e(t.symbol)}</b></a>${coin ? ' <span class="status-badge muted" title="币本位（反向合约），盈亏按结算币显示">币本位</span>' : ''}
       <div class="muted small">${t.market === 'spot' ? '现货' : '合约'} · ${e(t.account_name || '—')} · <a href="/dashboard/notes/symbol/${encodeURIComponent(t.symbol)}">档案</a></div></td>
     <td><span class="side-tag ${t.side}">${e(tradeSideLabel(t))}</span></td>
-    <td>${t.order_type === 'limit' ? '挂单' : t.order_type === 'market' ? '吃单' : t.order_type === 'mixed' ? '混合' : '—'}</td>
+    <td class="col-type">${t.order_type === 'limit' ? '挂单' : t.order_type === 'market' ? '吃单' : t.order_type === 'mixed' ? '混合' : '—'}</td>
     <td class="num">${fmtPrice(t.entry_price)} → ${fmtPrice(t.exit_price)}</td>
-    <td class="num">${fmtMoney(t.notional, { sign: false })}</td>
+    <td class="num col-notional">${fmtMoney(t.notional, { sign: false })}</td>
     <td class="num pnl-cell"><div class="amt-line ${sign(t.pnl)} strong" title="${coin ? `${fmtNum(coin.pnl, 8)} ${e(coin.base)}（${fmtMoney(t.pnl)}）` : fmtMoney(t.pnl)}">${coin ? `${fmtCoinShort(coin.pnl)} <span class="unit">${e(coin.base)}</span>` : fmtMoney(t.pnl)}</div>
       ${coin ? `<div class="muted small amt-line">${fmtMoney(t.pnl)}</div>` : ''}</td>
-    <td class="num muted">${e(fmtDurationShort(new Date(t.close_time) - new Date(t.open_time)))}</td>
-    <td class="tags-cell">${(t.tags || []).map((x) => `<span class="tag-pill">${e(x)}</span>`).join(' ')}</td>
-    <td class="quick-note-cell">${quickNoteBtn(t)}</td>
+    <td class="num muted col-duration">${e(fmtDurationShort(new Date(t.close_time) - new Date(t.open_time)))}</td>
+    <td class="tags-cell col-tags">${(t.tags || []).map((x) => `<span class="tag-pill">${e(x)}</span>`).join(' ')}</td>
+    <td class="quick-note-cell col-review">${quickNoteBtn(t)}</td>
     <td class="row-actions">
       <a class="btn btn-ghost small" href="/dashboard/journal/${t.id}${backQ}">详情</a>
       <a class="btn btn-ghost small" href="/dashboard/journal/${t.id}/edit${backQ}">编辑</a>
@@ -280,11 +280,11 @@ export function journalPage({ user, trades, filters, tags, symbols, pagination, 
         <span class="muted small" data-bulk-count>勾选左侧复选框可批量移入垃圾箱（只作用于本页）</span>
       </form>
       <div class="table-wrap">
-      <table class="table">
+      <table class="table journal-table">
         <thead><tr>
           <th class="bulk-cell"><input type="checkbox" form="journal-bulk" data-bulk-all aria-label="全选本页"></th>
-          <th>平仓时间</th><th>币种</th><th>方向</th><th>类型</th><th class="num">开仓 → 平仓</th>
-          <th class="num">名义价值</th><th class="num" title="币本位（反向合约）按结算币显示，下方灰字为折合 USD">净盈亏</th><th class="num">持仓</th><th>标签</th><th>复盘</th><th></th>
+          <th>平仓时间</th><th>币种</th><th>方向</th><th class="col-type">类型</th><th class="num">开仓 → 平仓</th>
+          <th class="num col-notional">名义价值</th><th class="num" title="币本位（反向合约）按结算币显示，下方灰字为折合 USD">净盈亏</th><th class="num col-duration">持仓</th><th class="col-tags">标签</th><th class="col-review">复盘</th><th></th>
         </tr></thead>
         <tbody>${rows || '<tr><td colspan="12" class="muted center">没有符合条件的交易</td></tr>'}</tbody>
       </table>

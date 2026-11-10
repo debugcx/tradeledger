@@ -54,6 +54,11 @@ test('交易列表：币本位行渲染币口径且不报错', async () => {
   assert.match(html, /BTC\/USD/);
   assert.match(html, /币本位/);
   assert.match(html, /pnl-cell/);
+  assert.match(html, /journal-table/);
+  // 响应式：低优先级列带可隐藏类名
+  for (const cls of ['col-type', 'col-duration', 'col-tags', 'col-review', 'col-notional']) {
+    assert.match(html, new RegExp(`class="[^"]*${cls}`));
+  }
   assert.match(html, /BTC/);
 });
 
