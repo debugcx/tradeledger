@@ -80,10 +80,15 @@ test('Host 自带端口时不做主机名兜底，端口不一致仍拒绝', () 
   }), false);
 });
 
-test('Origin: null 或非法 Origin 只在浏览器声明 same-origin 时放行', () => {
+test('Origin: null（不透明来源）在未声明 cross-site 时放行，声明 cross-site 仍拒绝', () => {
+  // 代理重放 / sandbox iframe：Origin: null 且 Sec-Fetch-Site 被剥掉
   assert.equal(isSameOriginRequest({
     origin: 'null',
     host: '10.0.0.2:8790',
+  }), true);
+  assert.equal(isSameOriginRequest({
+    origin: 'null',
+    host: '10.0.0.2',
     secFetchSite: 'same-origin',
   }), true);
   assert.equal(isSameOriginRequest({
@@ -91,8 +96,16 @@ test('Origin: null 或非法 Origin 只在浏览器声明 same-origin 时放行'
     host: '10.0.0.2:8790',
     secFetchSite: 'cross-site',
   }), false);
+});
+
+test('其它非法 Origin 串不放行', () => {
   assert.equal(isSameOriginRequest({
     origin: 'not a url',
     host: '10.0.0.2:8790',
+  }), false);
+  assert.equal(isSameOriginRequest({
+    origin: 'http://evil.example',
+    host: '10.0.0.2:8790',
+    secFetchSite: 'same-site',
   }), false);
 });

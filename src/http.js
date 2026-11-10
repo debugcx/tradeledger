@@ -42,6 +42,13 @@ function hasExplicitPort(host) {
  *
  * 浏览器发出的 Sec-Fetch-Site: same-origin 由浏览器自身按页面来源生成，
  * 跨站页面无法伪造，仍然是最可靠的兜底。
+ *
+ * 外置代理/内嵌 WebView 还可能把页面放进不透明来源（sandbox iframe、代理
+ * 重放请求），此时 Origin 为字面量 "null"，且 Sec-Fetch-Site 也会被剥掉。
+ * 这类请求与跨站 POST 无法在头部层面区分，放行它依赖 SameSite=Lax 会话
+ * Cookie：跨站 POST 不会带 Cookie，一切需要登录的写操作仍会被 401 拒绝，
+ * 只有无需登录的 /login、/logout 存在登录/登出 CSRF 的低风险。若浏览器
+ * 明确声明 cross-site，仍然拒绝。
  */
 export function isSameOriginRequest({ origin, host, secFetchSite, appPort } = {}) {
   if (!origin) return true; // curl / 部分同源表单不带 Origin
@@ -60,7 +67,9 @@ export function isSameOriginRequest({ origin, host, secFetchSite, appPort } = {}
       return true;
     }
   }
-  return secFetchSite === 'same-origin';
+  if (secFetchSite === 'same-origin') return true;
+  if (String(origin).toLowerCase() === 'null' && secFetchSite !== 'cross-site') return true;
+  return false;
 }
 
 export const nowIso = () => new Date().toISOString();
