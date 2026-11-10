@@ -374,6 +374,12 @@ function opsPanel(trade, ops) {
   };
   const coin = coinMarginedAmounts(trade);
   const coinCcy = coin ? coin.base : '';
+  // 币金额普遍很小（BTC 手续费常常 1e-7 级），币口径改用 8 位小数
+  const fmtCoinQty = (v) => {
+    const n = Math.abs(Number(v) || 0);
+    return (n < 1e-12 ? 0 : n).toLocaleString('en-US', { maximumFractionDigits: 8 });
+  };
+  const fq = coinCcy ? fmtCoinQty : fmtQty;
   const isInverseFill = (f) => Number(f.contractValue) > 0;
   const feeInCoin = (f) => {
     const price = Number(f.price) || 0;
@@ -391,10 +397,15 @@ function opsPanel(trade, ops) {
   const rows = ops.fills.map((f) => {
     const before = pos;
     const opened = Math.abs(before) < 1e-9;
-    const qty = inverseFillQty(f);
-    pos += f.side === 'buy' ? qty : -qty;
+    const rawQty = Math.abs(Number(f.qty) || 0);
+    // 净头寸按「张」累计（开平张数一致才能归零）；展示时再按当前成交价折成币
+    pos += f.side === 'buy' ? rawQty : -rawQty;
     const flat = Math.abs(pos) < 1e-9;
     const grew = Math.abs(pos) > Math.abs(before) + 1e-9;
+    const qty = inverseFillQty(f);
+    const heldQty = isInverseFill(f)
+      ? (Number(f.price) > 0 ? pos * (Number(f.contractValue) || 0) / Number(f.price) : 0)
+      : pos;
     const op = opened ? '首次开仓' : flat ? '平仓（清零）' : grew ? '加仓' : '减仓 / 做T';
     const ot = fillOrderType(f);
     if (ot === 'limit') makerCount++;
@@ -411,9 +422,9 @@ function opsPanel(trade, ops) {
       <td>${f.side === 'buy' ? '<span class="pos">买入</span>' : '<span class="neg">卖出</span>'}</td>
       <td>${otCell}</td>
       <td class="num">${fmtPrice(f.price)}</td>
-      <td class="num">${fmtQty(qty)}</td>
-      <td class="num ${f.fee <= 0 ? 'neg' : 'pos'}">${f.fee ? `${fmtQty(feeInCoin(f))} ${e(feeUnit || '')}` : '—'}</td>
-      <td class="num strong">${fmtQty(pos)}</td>
+      <td class="num">${fq(qty)}</td>
+      <td class="num ${f.fee <= 0 ? 'neg' : 'pos'}">${f.fee ? `${fq(feeInCoin(f))} ${e(feeUnit || '')}` : '—'}</td>
+      <td class="num strong">${fq(heldQty)}</td>
     </tr>`;
   }).join('');
   let buy = 0, sell = 0;
@@ -426,10 +437,10 @@ function opsPanel(trade, ops) {
       fees.set(ccy, (fees.get(ccy) || 0) + feeInCoin(f));
     }
   }
-  const feeText = [...fees.entries()].map(([ccy, v]) => `${fmtQty(v)} ${e(ccy)}`).join(' + ') || '—';
+  const feeText = [...fees.entries()].map(([ccy, v]) => `${fq(v)} ${e(ccy)}`).join(' + ') || '—';
   const qtyHead = coinCcy ? `数量（${e(coinCcy)}）` : '数量';
   const qtyNote = coinCcy
-    ? `数量与手续费按结算币（${e(coinCcy)}）显示：合约张数 × 面值 ÷ 成交价 换算成币，手续费由 USD 折回币；「本笔后持仓」为净头寸。`
+    ? `数量与手续费按结算币（${e(coinCcy)}）显示：每笔成交按「合约张数 × 面值 ÷ 成交价」换算，手续费由 USD 折回币；「本笔后持仓」按张数净头寸折算，平仓归零。`
     : '数量为币本位（合约已按面值换算成币）；「本笔后持仓」为净头寸。头部统计里的「数量」是按毛盈亏反推的等效值，多腿回合以本表为准。';
   return `<section class="panel">
     <div class="panel-head"><h2>操作明细（开仓 → 平仓）</h2>
@@ -441,9 +452,9 @@ function opsPanel(trade, ops) {
         ${rows}
         <tr><td colspan="4" class="strong">合计</td>
           <td></td>
-          <td class="strong">买 ${fmtQty(buy)} / 卖 ${fmtQty(sell)}</td>
+          <td class="strong">买 ${fq(buy)} / 卖 ${fq(sell)}</td>
           <td class="num">${feeText}</td>
-          <td class="num strong">${Math.abs(pos) < 1e-9 ? '归零' : fmtQty(pos)}</td></tr>
+          <td class="num strong">${Math.abs(pos) < 1e-9 ? '归零' : fq(pos)}</td></tr>
       </tbody>
     </table>
     </div>
