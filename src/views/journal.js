@@ -8,6 +8,24 @@ import { shell, quickNoteBtn, tradeSideLabel } from './layout.js';
 
 const sign = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : 'flat');
 
+/**
+ * 币本位（反向合约）的币口径金额。
+ * 库里统一存 USD；按平仓价折回结算币，便于和交易所账单对账。
+ * 非币本位（现货或 USDT/USDC 本位）返回 null。
+ */
+export function coinMarginedAmounts(trade) {
+  const [base = '', quote = ''] = String(trade?.symbol || '').split('/');
+  if (!base || String(quote).toUpperCase() !== 'USD' || trade?.market === 'spot') return null;
+  const fx = Number(trade.exit_price);
+  if (!(fx > 0)) return null;
+  return {
+    base,
+    pnl: (Number(trade.pnl) || 0) / fx,
+    fee: (Number(trade.fee) || 0) / fx,
+    funding: (Number(trade.funding) || 0) / fx,
+  };
+}
+
 /** 持仓期间浮盈亏曲线：K 线收盘价 × 方向 × 数量，不含手续费与资金费 */
 function curvePanel(trade, curve) {
   if (!curve) return '';
@@ -408,6 +426,12 @@ function opsPanel(trade, ops) {
 export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTags = [], allTags = [], aiReady = false, aiModel = '', back = '', notice, error }) {
   const b = tradeBreakdown(trade);
   const pnlCls = sign(trade.pnl);
+  // 币本位（反向合约）：交易所按结算币结算盈亏，库里统一存 USD。
+  // 这里按平仓价折回币数量，方便和交易所账单直接对账。
+  const coin = coinMarginedAmounts(trade);
+  const baseCcy = coin ? coin.base : '';
+  const coinPnl = coin ? coin.pnl : null;
+  const fmtCoin = (v) => `${Number(v) > 0 ? '+' : ''}${fmtNum(Number(v) || 0, 8)} ${baseCcy}`;
   const tags = (trade.tags || []).map((x) => `<span class="tag-pill">${e(x)}</span>`).join(' ');
   // 详情页行内快捷标签：与仪表盘复盘队列同一套交互（点击即切换，免去进编辑表单）
   const current = new Set(trade.tags || []);
@@ -437,6 +461,7 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTa
         <h2>${e(trade.symbol)}
           <span class="side-tag ${trade.side}">${e(tradeSideLabel(trade))}</span>
           <span class="status-badge ${trade.market === 'spot' ? 'blue' : 'muted'}">${trade.market === 'spot' ? '现货' : '合约'}</span>
+          ${coin ? '<span class="status-badge muted" title="反向合约：交易所按结算币结算，页面统计统一折成 USD">币本位</span>' : ''}
           ${trade.kind === 't_shot' ? '<span class="status-badge blue" title="做T：24 小时内同数量闭环，不影响底仓成本">T 回合</span>' : ''}
           <span class="pill ${b.pnl > 0 ? 'pill-green' : b.pnl < 0 ? 'pill-red' : ''}">${fmtMoney(trade.pnl)}</span>
         </h2>
@@ -453,6 +478,7 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTa
       </div>
       <div class="mini-strip">
         <div class="mini-stat"><span>净盈亏</span><b class="${pnlCls}">${fmtMoney(trade.pnl)}</b></div>
+        ${coin ? `<div class="mini-stat" title="反向合约按结算币结算；已按平仓价把 USD 口径折回币数量"><span>币本位盈亏（${e(baseCcy)}）</span><b class="${sign(coinPnl)}">${fmtCoin(coinPnl)}</b></div>` : ''}
         <div class="mini-stat"><span>收益率（按名义价值）</span><b class="${sign(b.returnPct)}">${b.returnPct === null ? '—' : fmtPct(b.returnPct)}</b></div>
         <div class="mini-stat"><span>持仓时长</span><b>${e(fmtDuration(b.durationMs))}</b></div>
         <div class="mini-stat"><span>账户</span><b class="small">${e(trade.account_name || '—')}</b></div>

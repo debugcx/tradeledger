@@ -31,3 +31,16 @@ test('组合游标编解码与水位提取', () => {
   assert.equal(cursorWatermark('2000'), 2000);
   assert.equal(cursorWatermark(null, 42), 42);
 });
+
+test('交易详情：币本位金额按平仓价折回结算币', async () => {
+  const { coinMarginedAmounts } = await import('../src/views/journal.js');
+  const coin = coinMarginedAmounts({
+    symbol: 'BTC/USD', market: 'futures', pnl: 0.8089, fee: -0.0693, funding: 0, exit_price: 77227.3,
+  });
+  assert.equal(coin.base, 'BTC');
+  assert.ok(Math.abs(coin.pnl - 0.8089 / 77227.3) < 1e-12);
+  assert.ok(Math.abs(coin.fee - (-0.0693 / 77227.3)) < 1e-12);
+  assert.equal(coinMarginedAmounts({ symbol: 'BTC/USDT', market: 'futures', pnl: 1, exit_price: 100 }), null);
+  assert.equal(coinMarginedAmounts({ symbol: 'BTC/USD', market: 'spot', pnl: 1, exit_price: 100 }), null);
+  assert.equal(coinMarginedAmounts({ symbol: 'BTC/USD', market: 'futures', pnl: 1, exit_price: 0 }), null);
+});
