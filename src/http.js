@@ -25,23 +25,42 @@ export function parseCookies(header) {
   return out;
 }
 
+/** Host 头里是否显式带了端口（IPv6 字面量带方括号，需要单独判断）。 */
+function hasExplicitPort(host) {
+  if (host.startsWith('[')) return /^\[[^\]]+\]:\d+$/.test(host);
+  return /:\d+$/.test(host);
+}
+
 /**
  * 写请求的同源判断。
  *
  * 常规情况比较 Origin 与 Host；但反向代理、NAS 内嵌浏览器或某些 WebView
- * 会改写 Host（例如去掉端口、改成上游主机名），导致两者不相等。
+ * 会改写 Host（去掉端口、改成上游主机名），甚至删除 Sec-Fetch-Site，导致
+ * 两者对不上。此时退回按主机名比较：仅当 Host 头没有端口可比（端口已被
+ * 上游改写），且 Origin 的端口是本服务端口或该协议默认端口时才放行，
+ * 避免把同一主机其它端口上的服务当成同源。
+ *
  * 浏览器发出的 Sec-Fetch-Site: same-origin 由浏览器自身按页面来源生成，
- * 跨站页面无法伪造，因此可作为同源兜底。
+ * 跨站页面无法伪造，仍然是最可靠的兜底。
  */
-export function isSameOriginRequest({ origin, host, secFetchSite } = {}) {
+export function isSameOriginRequest({ origin, host, secFetchSite, appPort } = {}) {
   if (!origin) return true; // curl / 部分同源表单不带 Origin
-  let sameHost = false;
+  const hostHeader = String(host || '');
+  let parsed = null;
   try {
-    sameHost = new URL(origin).host === String(host || '');
+    parsed = new URL(origin);
   } catch {
-    sameHost = false; // Origin: null 或非法值
+    parsed = null; // Origin: null 或非法值
   }
-  return sameHost || secFetchSite === 'same-origin';
+  if (parsed) {
+    if (parsed.host === hostHeader) return true;
+    const portOk = parsed.port === '' || (appPort != null && parsed.port === String(appPort));
+    if (hostHeader && !hasExplicitPort(hostHeader) && portOk
+      && parsed.hostname.toLowerCase() === hostHeader.toLowerCase()) {
+      return true;
+    }
+  }
+  return secFetchSite === 'same-origin';
 }
 
 export const nowIso = () => new Date().toISOString();

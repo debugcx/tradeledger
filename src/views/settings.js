@@ -1,15 +1,7 @@
 import { escapeHtml as e, fmtBytes, fmtNum, fmtDateTime } from '../http.js';
+import { APP_VERSION } from '../version.js';
 import fs from 'node:fs';
 import { shell, settingsNav } from './layout.js';
-
-/** 应用版本：package.json 的 version，模块加载时取一次。 */
-const APP_VERSION = (() => {
-  try {
-    return JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version || '0.9.0';
-  } catch {
-    return '0.9.0';
-  }
-})();
 
 /** 前端资源构建时间（app.js 的修改时间，模块加载时取一次；重启服务即刷新）。
  *  排查「页面还是旧版」用：浏览器里跑的是旧 JS 时这个时间对不上。 */

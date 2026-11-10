@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import { Readable } from 'node:stream';
 import { config } from './config.js';
+import { APP_VERSION } from './version.js';
 import { dbSizeBytes, pingDb, schemaVersion } from './db.js';
 import { escapeHtml, localInputToIso, uid, fmtNum, readFormDataLimited, readJsonLimited, isSameOriginRequest } from './http.js';
 import * as auth from './auth.js';
@@ -2597,7 +2598,7 @@ route('GET', '/api/health', () => {
     ok: db,
     db,
     schema: db ? schemaVersion() : 0,
-    version: process.env.npm_package_version || '0.9.0',
+    version: APP_VERSION,
     time: new Date().toISOString(),
   }, db ? 200 : 503);
 }, { public: true });
@@ -2782,7 +2783,7 @@ export async function handle(request) {
     const origin = request.headers.get('origin');
     const host = request.headers.get('host') || '';
     const secFetchSite = request.headers.get('sec-fetch-site') || '';
-    if (!isSameOriginRequest({ origin, host, secFetchSite })) {
+    if (!isSameOriginRequest({ origin, host, secFetchSite, appPort: config.port })) {
       console.warn('[csrf] blocked', { host, origin, secFetchSite });
       return new Response('cross-origin request blocked', { status: 403 });
     }
