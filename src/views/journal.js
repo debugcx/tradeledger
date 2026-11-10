@@ -49,6 +49,14 @@ function curvePanel(trade, curve) {
   const dir = trade.side === 'long' ? 1 : -1;
   const entry = Number(trade.entry_price) || 0;
   const size = Number(trade.size) || 0;
+  const coin = coinMarginedAmounts(trade);
+  const base = coin ? coin.base : '';
+  // 反向合约：USD 浮盈 ÷ 当时价格 = 币计浮盈（等价于张数 × 面值 × (1/开仓价 − 1/现价)）
+  const conv = (usd, price) => (coin && price > 0 ? usd / price : usd);
+  const fmtVal = (v) => (coin
+    ? `${Number(v) > 0 ? '+' : ''}${fmtNum(Number(v) || 0, 8)} ${base}`
+    : fmtMoney(v));
+  const fmtAbs = (v) => (coin ? `${fmtNum(Number(v) || 0, 8)} ${base}` : fmtMoney(v, { sign: false }));
   const multiDay = Date.parse(trade.close_time) - Date.parse(trade.open_time) > 86_400_000;
   const label = (v) => {
     const d = new Date(v);
@@ -58,9 +66,9 @@ function curvePanel(trade, curve) {
       : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
   };
   const points = [{ x: label(trade.open_time), value: 0 }];
-  for (const k of curve.candles) points.push({ x: label(k.t), value: (k.c - entry) * dir * size });
+  for (const k of curve.candles) points.push({ x: label(k.t), value: conv((k.c - entry) * dir * size, k.c) });
   const exit = Number(trade.exit_price) || 0;
-  const final = exit ? (exit - entry) * dir * size : points[points.length - 1].value;
+  const final = exit ? conv((exit - entry) * dir * size, exit) : points[points.length - 1].value;
   points.push({ x: `${label(trade.close_time)} 平仓`, value: final });
 
   let peak = -Infinity, trough = Infinity;
@@ -74,21 +82,23 @@ function curvePanel(trade, curve) {
     <div class="panel-head"><h2>持仓盈亏曲线（开仓 → 平仓）</h2>
       <span class="muted small">按 ${e(curve.bar)} K 线收盘价估算 · 不含手续费与资金费</span></div>
     <div class="mini-strip">
-      <div class="mini-stat"><span>浮盈峰值</span><b class="${sign(peak)}">${fmtMoney(peak)}</b></div>
-      <div class="mini-stat"><span>最大浮亏</span><b class="${trough < 0 ? 'neg' : 'flat'}">${fmtMoney(trough)}</b></div>
-      <div class="mini-stat"><span>平仓价格毛盈亏</span><b class="${sign(final)}">${fmtMoney(final)}</b></div>
-      <div class="mini-stat"><span>利润回吐</span><b class="${giveback > 0 ? 'neg' : 'flat'}">${fmtMoney(giveback, { sign: false })}</b>
+      <div class="mini-stat"><span>浮盈峰值</span><b class="${sign(peak)}">${fmtVal(peak)}</b></div>
+      <div class="mini-stat"><span>最大浮亏</span><b class="${trough < 0 ? 'neg' : 'flat'}">${fmtVal(trough)}</b></div>
+      <div class="mini-stat"><span>平仓价格毛盈亏</span><b class="${sign(final)}">${fmtVal(final)}</b></div>
+      <div class="mini-stat"><span>利润回吐</span><b class="${giveback > 0 ? 'neg' : 'flat'}">${fmtAbs(giveback)}</b>
         <div class="muted small">浮盈峰值到平仓的回落幅度</div></div>
     </div>
     <div class="chart-box">
       ${lineChart({
         points,
         color: final >= 0 ? PALETTE.green : PALETTE.red,
-        yFormat: (v) => fmtMoney(v, { sign: false }),
+        yFormat: (v) => (coin ? fmtNum(v, 8) : fmtMoney(v, { sign: false })),
         xFormat: (v) => String(v),
       })}
     </div>
-    <p class="chart-note">曲线 = （K 线收盘价 − 开仓价） × 方向 × 数量，即未实现毛盈亏；手续费与资金费的结算时点交易所未提供，未计入曲线，最终净盈亏以上表为准。${curve.truncated ? '持仓时间过长，仅展示最近 300 根 K 线。' : ''}</p>
+    <p class="chart-note">${coin
+      ? `曲线 = 张数 × 面值 × (1/开仓价 − 1/收盘价)，即未实现毛盈亏（${e(base)} 计）；手续费与资金费的结算时点交易所未提供，未计入曲线，最终净盈亏以上表为准。`
+      : '曲线 = （K 线收盘价 − 开仓价） × 方向 × 数量，即未实现毛盈亏；手续费与资金费的结算时点交易所未提供，未计入曲线，最终净盈亏以上表为准。'}${curve.truncated ? '持仓时间过长，仅展示最近 300 根 K 线。' : ''}</p>
   </section>`;
 }
 
@@ -197,16 +207,19 @@ function exportQuery(filters) {
 
 export function journalPage({ user, trades, filters, tags, symbols, pagination, noteCoverage, accounts = [], trashedCount = 0, back = '', notice, error }) {
   const backQ = back ? `?back=${encodeURIComponent(back)}` : '';
-  const rows = trades.map((t) => `<tr>
+  const rows = trades.map((t) => {
+    const coin = coinMarginedAmounts(t);
+    return `<tr>
     <td class="bulk-cell"><input type="checkbox" form="journal-bulk" class="bulk-check" name="ids" value="${t.id}" aria-label="选择 ${e(t.symbol)} ${e(fmtDateTime(t.close_time))}"></td>
     <td>${fmtDateTime(t.close_time)}</td>
-    <td><a href="/dashboard/journal/${t.id}"><b>${e(t.symbol)}</b></a>
+    <td><a href="/dashboard/journal/${t.id}"><b>${e(t.symbol)}</b></a>${coin ? ' <span class="status-badge muted" title="币本位（反向合约），盈亏按结算币显示">币本位</span>' : ''}
       <div class="muted small">${t.market === 'spot' ? '现货' : '合约'} · ${e(t.account_name || '—')} · <a href="/dashboard/notes/symbol/${encodeURIComponent(t.symbol)}">档案</a></div></td>
     <td><span class="side-tag ${t.side}">${e(tradeSideLabel(t))}</span></td>
     <td>${t.order_type === 'limit' ? '挂单' : t.order_type === 'market' ? '吃单' : t.order_type === 'mixed' ? '混合' : '—'}</td>
     <td class="num">${fmtPrice(t.entry_price)} → ${fmtPrice(t.exit_price)}</td>
     <td class="num">${fmtMoney(t.notional, { sign: false })}</td>
-    <td class="num ${sign(t.pnl)} strong">${fmtMoney(t.pnl)}</td>
+    <td class="num"><div class="${sign(t.pnl)} strong">${coin ? `${fmtNum(coin.pnl, 8)} ${e(coin.base)}` : fmtMoney(t.pnl)}</div>
+      ${coin ? `<div class="muted small">${fmtMoney(t.pnl)}</div>` : ''}</td>
     <td class="num muted">${e(fmtDurationShort(new Date(t.close_time) - new Date(t.open_time)))}</td>
     <td class="tags-cell">${(t.tags || []).map((x) => `<span class="tag-pill">${e(x)}</span>`).join(' ')}</td>
     <td class="quick-note-cell">${quickNoteBtn(t)}</td>
@@ -220,7 +233,8 @@ export function journalPage({ user, trades, filters, tags, symbols, pagination, 
           data-confirm="把这条记录移入垃圾箱？&#10;统计会立即排除它，交易所同步也不会再把它导回来；可在交易记录 → 垃圾箱里恢复。">删除</button>
       </form>
     </td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
 
   const coverage = noteCoverage && noteCoverage.total
     ? `<div class="coverage-inline"><span class="muted">复盘覆盖率</span>
@@ -254,7 +268,7 @@ export function journalPage({ user, trades, filters, tags, symbols, pagination, 
         <thead><tr>
           <th class="bulk-cell"><input type="checkbox" form="journal-bulk" data-bulk-all aria-label="全选本页"></th>
           <th>平仓时间</th><th>币种</th><th>方向</th><th>类型</th><th class="num">开仓 → 平仓</th>
-          <th class="num">名义价值</th><th class="num">净盈亏</th><th class="num">持仓</th><th>标签</th><th>复盘</th><th></th>
+          <th class="num">名义价值</th><th class="num" title="币本位（反向合约）按结算币显示，下方灰字为折合 USD">净盈亏</th><th class="num">持仓</th><th>标签</th><th>复盘</th><th></th>
         </tr></thead>
         <tbody>${rows || '<tr><td colspan="12" class="muted center">没有符合条件的交易</td></tr>'}</tbody>
       </table>
@@ -466,11 +480,16 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTa
   const b = tradeBreakdown(trade);
   const pnlCls = sign(trade.pnl);
   // 币本位（反向合约）：交易所按结算币结算盈亏，库里统一存 USD。
-  // 这里按平仓价折回币数量，方便和交易所账单直接对账。
+  // 页面以币口径为主、USD 为辅，方便和交易所账单直接对账。
   const coin = coinMarginedAmounts(trade);
   const baseCcy = coin ? coin.base : '';
+  const coinFx = coin ? Number(trade.exit_price) || 0 : 0;
   const coinPnl = coin ? coin.pnl : null;
   const fmtCoin = (v) => `${Number(v) > 0 ? '+' : ''}${fmtNum(Number(v) || 0, 8)} ${baseCcy}`;
+  const coinText = (v) => (coin ? `${fmtNum(Number(v) / (coinFx || 1), 8)} ${baseCcy}` : fmtMoney(v));
+  const breakdownVal = (v) => (coin
+    ? `<span>${fmtCoin(Number(v) / (coinFx || 1))}</span><div class="muted small">${fmtMoney(v)}</div>`
+    : fmtMoney(v));
   const tags = (trade.tags || []).map((x) => `<span class="tag-pill">${e(x)}</span>`).join(' ');
   // 详情页行内快捷标签：与仪表盘复盘队列同一套交互（点击即切换，免去进编辑表单）
   const current = new Set(trade.tags || []);
@@ -502,7 +521,7 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTa
           <span class="status-badge ${trade.market === 'spot' ? 'blue' : 'muted'}">${trade.market === 'spot' ? '现货' : '合约'}</span>
           ${coin ? '<span class="status-badge muted" title="反向合约：交易所按结算币结算，页面统计统一折成 USD">币本位</span>' : ''}
           ${trade.kind === 't_shot' ? '<span class="status-badge blue" title="做T：24 小时内同数量闭环，不影响底仓成本">T 回合</span>' : ''}
-          <span class="pill ${b.pnl > 0 ? 'pill-green' : b.pnl < 0 ? 'pill-red' : ''}">${fmtMoney(trade.pnl)}</span>
+          <span class="pill ${b.pnl > 0 ? 'pill-green' : b.pnl < 0 ? 'pill-red' : ''}" ${coin ? `title="折合 ${fmtMoney(trade.pnl)}"` : ''}>${coin ? fmtCoin(coinPnl) : fmtMoney(trade.pnl)}</span>
         </h2>
         <div class="head-actions">
           <a class="btn btn-ghost small" href="${e(back || '/dashboard/journal')}">返回列表</a>
@@ -516,8 +535,10 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTa
         </div>
       </div>
       <div class="mini-strip">
-        <div class="mini-stat"><span>净盈亏</span><b class="${pnlCls}">${fmtMoney(trade.pnl)}</b></div>
-        ${coin ? `<div class="mini-stat" title="反向合约按结算币结算；已按平仓价把 USD 口径折回币数量"><span>币本位盈亏（${e(baseCcy)}）</span><b class="${sign(coinPnl)}">${fmtCoin(coinPnl)}</b></div>` : ''}
+        ${coin
+          ? `<div class="mini-stat"><span>净盈亏（${e(baseCcy)}）</span><b class="${pnlCls}">${fmtCoin(coinPnl)}</b><div class="muted small">≈ ${fmtMoney(trade.pnl)}</div></div>
+             <div class="mini-stat"><span>折合 USD</span><b class="${pnlCls}">${fmtMoney(trade.pnl)}</b></div>`
+          : `<div class="mini-stat"><span>净盈亏</span><b class="${pnlCls}">${fmtMoney(trade.pnl)}</b></div>`}
         <div class="mini-stat"><span>收益率（按名义价值）</span><b class="${sign(b.returnPct)}">${b.returnPct === null ? '—' : fmtPct(b.returnPct)}</b></div>
         <div class="mini-stat"><span>持仓时长</span><b>${e(fmtDuration(b.durationMs))}</b></div>
         <div class="mini-stat"><span>账户</span><b class="small">${e(trade.account_name || '—')}</b></div>
@@ -555,24 +576,25 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTa
         <span class="muted small">只做展示与核对，不修改任何数据</span></div>
       <table class="table breakdown-table">
         <tbody>
-          <tr><td>净盈亏（交易所记录）</td><td class="${pnlCls} strong">${fmtMoney(b.pnl)}</td>
-            <td class="muted">统计口径使用这个数字</td></tr>
-          <tr><td>手续费（记录值）</td><td class="${sign(b.fee)}">${fmtMoney(b.fee)}</td>
+          <tr><td>净盈亏（交易所记录${coin ? `，${e(baseCcy)}` : ''}）</td><td class="${pnlCls} strong">${breakdownVal(b.pnl)}</td>
+            <td class="muted">统计汇总仍按 USD 聚合；明细按钮里的币口径为「USD ÷ 平仓价」</td></tr>
+          <tr><td>手续费（记录值${coin ? `，${e(baseCcy)}` : ''}）</td><td class="${sign(b.fee)}">${breakdownVal(b.fee)}</td>
             <td class="muted">负数 = 支出，正数 = 返佣；公式里按「减手续费」处理</td></tr>
-          <tr><td>资金费（记录值）</td><td class="${sign(b.funding)}">${fmtMoney(b.funding)}</td>
+          <tr><td>资金费（记录值${coin ? `，${e(baseCcy)}` : ''}）</td><td class="${sign(b.funding)}">${breakdownVal(b.funding)}</td>
             <td class="muted">负数 = 支付，正数 = 收取；公式里按「减资金费」处理</td></tr>
-          <tr class="breakdown-total"><td>毛盈亏 = 净盈亏 − 手续费 − 资金费</td><td class="${sign(b.gross)} strong">${fmtMoney(b.gross)}</td>
-            <td class="muted">${fmtMoney(b.pnl)} − (${fmtMoney(b.fee)}) − (${fmtMoney(b.funding)})</td></tr>
+          <tr class="breakdown-total"><td>毛盈亏 = 净盈亏 − 手续费 − 资金费</td><td class="${sign(b.gross)} strong">${breakdownVal(b.gross)}</td>
+            <td class="muted">${coinText(b.pnl)} − (${coinText(b.fee)}) − (${coinText(b.funding)})</td></tr>
           <tr><td>独立复算：(平仓价 − 开仓价) × 数量 × 方向</td>
-            <td class="${sign(b.pricePnl)}">${b.pricePnl === null ? '—' : fmtMoney(b.pricePnl)}</td>
-            <td class="muted">只用价格与数量，不参考手续费</td></tr>
-          <tr><td>复算差异</td><td class="${diffCls}">${b.priceDiff === null ? '—' : fmtMoney(b.priceDiff)}</td>
+            <td class="${sign(b.pricePnl)}">${b.pricePnl === null ? '—' : breakdownVal(b.pricePnl)}</td>
+            <td class="muted">只用价格与数量，不参考手续费${coin ? `；USD 结果 ÷ 平仓价 = ${e(baseCcy)}` : ''}</td></tr>
+          <tr><td>复算差异</td><td class="${diffCls}">${b.priceDiff === null ? '—' : breakdownVal(b.priceDiff)}</td>
             <td class="muted">${e(diffText)}</td></tr>
         </tbody>
       </table>
       <p class="chart-note">
         公式：毛盈亏 = 净盈亏 − 手续费 − 资金费；净盈亏 = 毛盈亏 + 手续费 + 资金费。
         各交易所四舍五入可能带来 ±0.01 的显示差异。若复算不一致，优先核对数量单位（币 vs 张）与合约面值。
+        ${coin ? `当前为币本位：表中主数字为 ${e(baseCcy)} 口径（按平仓价折算），灰色小字为 USD 口径。` : ''}
       </p>
     </section>
 

@@ -1,6 +1,6 @@
 {
   "name": "tradeledger",
-  "version": "0.9.10",
+  "version": "0.9.11",
   "private": true,
   "type": "module",
   "description": "TradeLedger - 本地优先的加密合约交易复盘台账（交易统计、盈亏推导、CSV 导入、标签与笔记）",
