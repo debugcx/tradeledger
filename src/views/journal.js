@@ -234,7 +234,7 @@ export function journalPage({ user, trades, filters, tags, symbols, pagination, 
     <td>${t.order_type === 'limit' ? '挂单' : t.order_type === 'market' ? '吃单' : t.order_type === 'mixed' ? '混合' : '—'}</td>
     <td class="num">${fmtPrice(t.entry_price)} → ${fmtPrice(t.exit_price)}</td>
     <td class="num">${fmtMoney(t.notional, { sign: false })}</td>
-    <td class="num pnl-cell"><div class="amt-line ${sign(t.pnl)} strong" title="${coin ? `${fmtCoin(coin.pnl)}（${fmtMoney(t.pnl)}）` : fmtMoney(t.pnl)}">${coin ? `${fmtCoinShort(coin.pnl)} <span class="unit">${e(coin.base)}</span>` : fmtMoney(t.pnl)}</div>
+    <td class="num pnl-cell"><div class="amt-line ${sign(t.pnl)} strong" title="${coin ? `${fmtNum(coin.pnl, 8)} ${e(coin.base)}（${fmtMoney(t.pnl)}）` : fmtMoney(t.pnl)}">${coin ? `${fmtCoinShort(coin.pnl)} <span class="unit">${e(coin.base)}</span>` : fmtMoney(t.pnl)}</div>
       ${coin ? `<div class="muted small amt-line">${fmtMoney(t.pnl)}</div>` : ''}</td>
     <td class="num muted">${e(fmtDurationShort(new Date(t.close_time) - new Date(t.open_time)))}</td>
     <td class="tags-cell">${(t.tags || []).map((x) => `<span class="tag-pill">${e(x)}</span>`).join(' ')}</td>

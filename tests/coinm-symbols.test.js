@@ -32,6 +32,31 @@ test('组合游标编解码与水位提取', () => {
   assert.equal(cursorWatermark(null, 42), 42);
 });
 
+test('交易列表：币本位行渲染币口径且不报错', async () => {
+  const { journalPage } = await import('../src/views/journal.js');
+  const html = journalPage({
+    user: { username: 'u' },
+    trades: [{
+      id: 1, symbol: 'BTC/USD', market: 'futures', side: 'long',
+      pnl: 0.8089, exit_price: 77227.3, entry_price: 76555, size: 0.001306, notional: 100,
+      open_time: '2026-11-03T00:07:00.000Z', close_time: '2026-11-03T14:39:00.000Z',
+      order_type: 'other', tags: [], account_name: 'Binance', source: 'api', kind: null,
+    }],
+    filters: {
+      account_id: 'all', market: 'all', side: 'all', result: 'all', symbol: 'BTC/USD',
+      orderType: 'all', tag: '', note: 'all', from: '', to: '', q: '', sort: 'time',
+    },
+    tags: [], symbols: ['BTC/USD'],
+    pagination: { page: 1, totalPages: 1, total: 1, pageSize: 50 },
+    noteCoverage: null,
+    accounts: [],
+  });
+  assert.match(html, /BTC\/USD/);
+  assert.match(html, /币本位/);
+  assert.match(html, /pnl-cell/);
+  assert.match(html, /BTC/);
+});
+
 test('列表紧凑金额：宽度有界，极小值用科学计数法', async () => {
   const { fmtCoinShort } = await import('../src/views/journal.js');
   assert.equal(fmtCoinShort(0), '0');
