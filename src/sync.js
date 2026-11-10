@@ -112,10 +112,12 @@ async function runSync(accountId, { limit = config.syncBatchLimit, registry = nu
     fromMs = now;
     cursor = null;
   } else if (needFillsBackfill) {
+    // 成交回溯也要断点续传：历史上这里每次从 now 重新扫，窗口预算只有 8 个
+    // （约 56 天），回溯范围大于预算时游标永远推不下去，会无限重扫最近一段。
     mode = 'fills_backfill';
-    toMs = now;
-    fromMs = now - lookbackDays * DAY;
-    cursor = null;
+    toMs = Number(previous.toMs) || now;
+    fromMs = Number(previous.fromMs) || (now - lookbackDays * DAY);
+    cursor = previous.cursor || null;
   } else if (account.sync_done && previous.cursor) {
     // 增量同步在 2 天窗口里超过一页时，继续把游标走完
     mode = 'incremental';

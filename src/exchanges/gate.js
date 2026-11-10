@@ -100,6 +100,11 @@ async function loadCtVals(creds, settle = 'usdt') {
   return ctValCache;
 }
 
+/** Gate 未开通币本位合约账户时接口返回 400 USER_NOT_FOUND，按「无数据」处理 */
+function isNoCoinAccount(err) {
+  return /USER_NOT_FOUND|transfer funds first/i.test(String(err?.message || err));
+}
+
 /** Gate 现货/合约符号：BTC/USDT → BTC_USDT */
 function instOf(symbol) {
   const [base, quote = 'USDT'] = String(symbol || '').split('/');
@@ -162,6 +167,8 @@ export const gate = {
           if (rows.length < pageSize) break;
         }
       } catch (err) {
+        // 没有币本位合约账户不算故障：静默跳过该通道
+        if (settle === 'btc' && isNoCoinAccount(err)) continue;
         streamErrors.push(`${settle === 'usdt' ? 'U 本位' : '币本位'}：${err?.message || err}`);
         continue;
       }
@@ -461,7 +468,7 @@ export const gate = {
       mark('futures');
       push('futures', account?.currency || 'BTC', num(account?.total), 'gate:/api/v4/futures/btc/accounts', '币本位合约账户');
     } catch (err) {
-      errors.push(`币本位合约账户：${err?.message || err}`);
+      if (!isNoCoinAccount(err)) errors.push(`币本位合约账户：${err?.message || err}`);
     }
 
     try {
