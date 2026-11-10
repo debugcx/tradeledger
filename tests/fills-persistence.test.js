@@ -44,12 +44,11 @@ test('回合跨批次：持久化成交后全量重算，不再产生幻影', as
     pnl: 0, fee: -0.03, funding: 0, source: 'api',
   }], acc.id, { upsert: true });
 
-  // 第一次同步：回溯窗口内只有开仓腿 → 持久化成交但不导入半截回合；
-  // 幻影清理在覆盖检查通过后的下一轮才执行
+  // 第一次同步：覆盖在本批完成 → 立即全量重算。窗口内只有开仓腿，
+  // 不产生半截回合，旧逻辑留下的幻影同时被清理。
   await runSync(acc.id, { registry: { fake } });
   const afterFirst = store.listTrades().filter((t) => t.account_id === acc.id && t.symbol === 'ETH/USDT');
-  assert.equal(afterFirst.length, 1, '本轮只有开仓腿：不导入半截回合，幻影留到下一轮清理');
-  assert.equal(afterFirst[0].external_id, 'fake:ep:phantom');
+  assert.equal(afterFirst.length, 0, '本轮只有开仓腿：不产生半截回合，幻影应被清理');
 
   // 第二次同步（增量窗口只有平仓腿）→ 全量重算命中完整回合
   await runSync(acc.id, { registry: { fake } });
