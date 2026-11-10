@@ -664,7 +664,7 @@ async function loadTradeFills(trade) {
   const toMs = Date.parse(trade.close_time || '');
   if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) return null;
   // 版本后缀：成交明细结构升级（新增吃挂标记）后旧缓存自动失效
-  const inputs = `${detailCacheInputs(trade)}|fills-v2`;
+  const inputs = `${detailCacheInputs(trade)}|fills-v3`;
   const cached = store.getTradeFillsCache(trade.id);
   if (cached && cached.inputs === inputs && cached.fills?.length) {
     return { fills: cached.fills };

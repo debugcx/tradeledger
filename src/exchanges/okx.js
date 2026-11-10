@@ -356,11 +356,18 @@ export const okx = {
       for (const row of rows) {
         const t = Number(row.ts || 0);
         if (!t || t < Number(fromMs) || t > Number(toMs)) continue;
+        const fillPx = num(row.fillPx);
+        // SWAP 的 fillSz 是张数：线性合约 × ctVal（币/张）得币数量；
+        // 币本位（-USD-SWAP）的 ctVal 是美元/张，需要再除以成交价才得到币数量。
+        const coinMargined = /-USD-SWAP$/i.test(instId);
+        const qty = coinMargined
+          ? (fillPx > 0 ? num(row.fillSz) * ctVal / fillPx : 0)
+          : num(row.fillSz) * ctVal;
         out.push({
           t,
           side: String(row.side).toLowerCase() === 'buy' ? 'buy' : 'sell',
-          price: num(row.fillPx),
-          qty: num(row.fillSz) * ctVal,
+          price: fillPx,
+          qty,
           fee: num(row.fee),
           feeCcy: row.feeCcy || '',
           billId: row.billId || '',

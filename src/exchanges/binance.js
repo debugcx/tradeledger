@@ -739,7 +739,7 @@ export const binance = {
       const rows = await call(`/dapi/v1/userTrades?${q}`, creds, { baseUrl: BASE_DAPI });
       for (const r of rows || []) {
         const f = coinmToFill(r, contracts.get(instId) || 100);
-        out.push({ t: f.time, side: f.side, price: f.price, qty: f.qty, fee: f.fee, feeCcy: '', billId: f.id, orderType: 'other' });
+        out.push({ t: f.time, side: f.side, price: f.price, qty: f.qty, contractValue: f.contractValue, fee: f.fee, feeCcy: '', billId: f.id, orderType: 'other' });
       }
     } else {
       const base = market === 'spot' ? BASE_SAPI : BASE;

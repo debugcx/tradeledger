@@ -748,6 +748,7 @@ export const gate = {
             t: f.time,
             side: f.side,
             price: f.price, qty: f.qty,
+            ...(f.contractValue ? { contractValue: f.contractValue } : {}),
             fee: f.fee, feeCcy: coin ? 'COIN' : 'USDT', billId: String(f.id),
             orderType: r.role === 'maker' ? 'limit' : r.role === 'taker' ? 'market' : null,
           });

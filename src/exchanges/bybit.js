@@ -522,6 +522,7 @@ export const bybit = {
           side: String(r.side || '').toLowerCase() === 'buy' ? 'buy' : 'sell',
           price,
           qty: num(r.execQty),
+          ...(isCoinm ? { contractValue: 1 } : {}),
           fee: isCoinm ? -Math.abs(num(r.execFee)) * price : -Math.abs(num(r.execFee)),
           feeCcy: r.feeTokenCurrency || 'USDT',
           billId: r.execId || '',

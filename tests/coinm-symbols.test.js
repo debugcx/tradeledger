@@ -33,7 +33,7 @@ test('组合游标编解码与水位提取', () => {
 });
 
 test('交易详情：币本位金额按平仓价折回结算币', async () => {
-  const { coinMarginedAmounts } = await import('../src/views/journal.js');
+  const { coinMarginedAmounts, inverseFillQty } = await import('../src/views/journal.js');
   const coin = coinMarginedAmounts({
     symbol: 'BTC/USD', market: 'futures', pnl: 0.8089, fee: -0.0693, funding: 0, exit_price: 77227.3,
   });
@@ -43,4 +43,9 @@ test('交易详情：币本位金额按平仓价折回结算币', async () => {
   assert.equal(coinMarginedAmounts({ symbol: 'BTC/USDT', market: 'futures', pnl: 1, exit_price: 100 }), null);
   assert.equal(coinMarginedAmounts({ symbol: 'BTC/USD', market: 'spot', pnl: 1, exit_price: 100 }), null);
   assert.equal(coinMarginedAmounts({ symbol: 'BTC/USD', market: 'futures', pnl: 1, exit_price: 0 }), null);
+
+  // 成交数量：张数 × 美元面值 ÷ 成交价 = 币数量；线性成交原样返回
+  assert.ok(Math.abs(inverseFillQty({ qty: 1, price: 76555, contractValue: 100 }) - 100 / 76555) < 1e-12);
+  assert.ok(Math.abs(inverseFillQty({ qty: 4, price: 74176.4, contractValue: 100 }) - 400 / 74176.4) < 1e-12);
+  assert.equal(inverseFillQty({ qty: 2, price: 700, contractValue: 0 }), 2);
 });

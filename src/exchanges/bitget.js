@@ -574,6 +574,7 @@ export const bitget = {
             t: Number(r.fillTime ?? r.ts ?? r.cTime ?? 0),
             side: String(r.side || '').toLowerCase() === 'buy' ? 'buy' : 'sell',
             price, qty: coin ? baseVolume * price : baseVolume,
+            ...(coin ? { contractValue: 1 } : {}),
             fee: coin ? fillFee(r) * price : fillFee(r),
             feeCcy: r.feeCoin || (coin ? 'COIN' : 'USDT'), billId: r.tradeId || '',
             orderType: r.role === 'maker' ? 'limit' : r.role === 'taker' ? 'market' : null,

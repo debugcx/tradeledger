@@ -26,6 +26,17 @@ export function coinMarginedAmounts(trade) {
   };
 }
 
+/**
+ * 反向合约成交的展示数量：库里的 qty 是张数，contractValue 是美元/张，
+ * 按成交价折回结算币。非反向合约原样返回。
+ */
+export function inverseFillQty(fill) {
+  const cv = Number(fill?.contractValue) || 0;
+  const price = Number(fill?.price) || 0;
+  if (!(cv > 0) || !(price > 0)) return Number(fill?.qty) || 0;
+  return (Number(fill.qty) || 0) * cv / price;
+}
+
 /** 持仓期间浮盈亏曲线：K 线收盘价 × 方向 × 数量，不含手续费与资金费 */
 function curvePanel(trade, curve) {
   if (!curve) return '';
@@ -361,6 +372,13 @@ function opsPanel(trade, ops) {
     const n = Math.abs(Number(v) || 0);
     return (n < 1e-10 ? 0 : n).toLocaleString('en-US', { maximumFractionDigits: 6 });
   };
+  const coin = coinMarginedAmounts(trade);
+  const coinCcy = coin ? coin.base : '';
+  const isInverseFill = (f) => Number(f.contractValue) > 0;
+  const feeInCoin = (f) => {
+    const price = Number(f.price) || 0;
+    return isInverseFill(f) && price > 0 ? Math.abs(Number(f.fee) || 0) / price : Math.abs(Number(f.fee) || 0);
+  };
   let pos = 0;
   let makerCount = 0;
   let takerCount = 0;
@@ -373,7 +391,8 @@ function opsPanel(trade, ops) {
   const rows = ops.fills.map((f) => {
     const before = pos;
     const opened = Math.abs(before) < 1e-9;
-    pos += f.side === 'buy' ? f.qty : -f.qty;
+    const qty = inverseFillQty(f);
+    pos += f.side === 'buy' ? qty : -qty;
     const flat = Math.abs(pos) < 1e-9;
     const grew = Math.abs(pos) > Math.abs(before) + 1e-9;
     const op = opened ? '首次开仓' : flat ? '平仓（清零）' : grew ? '加仓' : '减仓 / 做T';
@@ -385,30 +404,39 @@ function opsPanel(trade, ops) {
       : ot === 'market'
         ? '<span class="status-badge muted">市价吃单</span>'
         : '<span class="muted">—</span>';
+    const feeUnit = isInverseFill(f) ? coinCcy : f.feeCcy;
     return `<tr>
       <td class="small">${e(fmtDateTime(new Date(f.t).toISOString()))}</td>
       <td>${op}</td>
       <td>${f.side === 'buy' ? '<span class="pos">买入</span>' : '<span class="neg">卖出</span>'}</td>
       <td>${otCell}</td>
       <td class="num">${fmtPrice(f.price)}</td>
-      <td class="num">${fmtQty(f.qty)}</td>
-      <td class="num ${f.fee <= 0 ? 'neg' : 'pos'}">${f.fee ? `${fmtQty(Math.abs(f.fee))} ${e(f.feeCcy)}` : '—'}</td>
+      <td class="num">${fmtQty(qty)}</td>
+      <td class="num ${f.fee <= 0 ? 'neg' : 'pos'}">${f.fee ? `${fmtQty(feeInCoin(f))} ${e(feeUnit || '')}` : '—'}</td>
       <td class="num strong">${fmtQty(pos)}</td>
     </tr>`;
   }).join('');
   let buy = 0, sell = 0;
   const fees = new Map();
   for (const f of ops.fills) {
-    if (f.side === 'buy') buy += f.qty; else sell += f.qty;
-    if (f.fee) fees.set(f.feeCcy || '—', (fees.get(f.feeCcy || '—') || 0) + Math.abs(f.fee));
+    const qty = inverseFillQty(f);
+    if (f.side === 'buy') buy += qty; else sell += qty;
+    if (f.fee) {
+      const ccy = isInverseFill(f) ? (coinCcy || '—') : (f.feeCcy || '—');
+      fees.set(ccy, (fees.get(ccy) || 0) + feeInCoin(f));
+    }
   }
   const feeText = [...fees.entries()].map(([ccy, v]) => `${fmtQty(v)} ${e(ccy)}`).join(' + ') || '—';
+  const qtyHead = coinCcy ? `数量（${e(coinCcy)}）` : '数量';
+  const qtyNote = coinCcy
+    ? `数量与手续费按结算币（${e(coinCcy)}）显示：合约张数 × 面值 ÷ 成交价 换算成币，手续费由 USD 折回币；「本笔后持仓」为净头寸。`
+    : '数量为币本位（合约已按面值换算成币）；「本笔后持仓」为净头寸。头部统计里的「数量」是按毛盈亏反推的等效值，多腿回合以本表为准。';
   return `<section class="panel">
     <div class="panel-head"><h2>操作明细（开仓 → 平仓）</h2>
       <span class="muted small">同一回合的开仓、加仓、减仓、做T 全部归属这条记录 · 共 ${fmtNum(ops.fills.length)} 笔成交${makerCount || takerCount ? ` · 挂单 ${fmtNum(makerCount)} / 吃单 ${fmtNum(takerCount)}` : ''}</span></div>
     <div class="table-wrap">
     <table class="table">
-      <thead><tr><th>时间</th><th>操作</th><th>方向</th><th>委托</th><th class="num">价格</th><th class="num">数量</th><th class="num">手续费</th><th class="num">本笔后持仓</th></tr></thead>
+      <thead><tr><th>时间</th><th>操作</th><th>方向</th><th>委托</th><th class="num">价格</th><th class="num">${qtyHead}</th><th class="num">手续费</th><th class="num">本笔后持仓</th></tr></thead>
       <tbody>
         ${rows}
         <tr><td colspan="4" class="strong">合计</td>
@@ -419,7 +447,7 @@ function opsPanel(trade, ops) {
       </tbody>
     </table>
     </div>
-    <p class="chart-note">数量为币本位（合约已按面值换算成币）；「本笔后持仓」为净头寸。头部统计里的「数量」是按毛盈亏反推的等效值，多腿回合以本表为准。</p>
+    <p class="chart-note">${qtyNote}</p>
   </section>`;
 }
 
@@ -486,7 +514,7 @@ export function tradeDetailPage({ user, trade, curve = null, ops = null, quickTa
       <div class="stat-grid">
         <div class="stat-col">
           <div class="stat-item"><span class="stat-label">开仓 → 平仓</span><span class="stat-value">${fmtPrice(trade.entry_price)} → ${fmtPrice(trade.exit_price)}</span></div>
-          <div class="stat-item"><span class="stat-label">数量</span><span class="stat-value">${fmtNum(trade.size, 6)}</span></div>
+          <div class="stat-item"><span class="stat-label">数量${coin ? `（${e(baseCcy)}）` : ''}</span><span class="stat-value">${fmtNum(trade.size, 6)}</span></div>
           <div class="stat-item"><span class="stat-label">名义价值</span><span class="stat-value">${fmtMoney(trade.notional, { sign: false })}</span></div>
           <div class="stat-item"><span class="stat-label">订单类型</span><span class="stat-value">${trade.order_type === 'limit' ? '限价（纯挂单）' : trade.order_type === 'market' ? '市价（纯吃单）' : trade.order_type === 'mixed' ? '混合（吃挂均有）' : '其他/未知'}</span></div>
         </div>
