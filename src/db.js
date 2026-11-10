@@ -570,7 +570,7 @@ function migrate(db) {
 let handle = null;
 
 /** 当前 schema 版本。新增增量迁移时 +1，并在 runMigrations 里登记。 */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 function recordMigration(db, version, name) {
   db.prepare('INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
@@ -644,6 +644,15 @@ function runMigrations(db) {
       db.exec('ALTER TABLE trade_fills ADD COLUMN contract_value REAL NOT NULL DEFAULT 0');
     }
     recordMigration(db, 4, 'fills-contract-value');
+  }
+
+  // v5：清理旧版实验路径留下的畸形币本位符号（BTCUSD/PERP）。
+  // 这些成交没有 contract_value，重算时会被当成线性合约，按张数×价差算出
+  // 放大约 100 倍的假盈亏；正确的同批成交已以 BTC/USD 形式存在。
+  if (!applied.has(5)) {
+    db.exec("DELETE FROM trades WHERE source = 'api' AND symbol LIKE '%/PERP%'");
+    db.exec("DELETE FROM trade_fills WHERE symbol LIKE '%/PERP%'");
+    recordMigration(db, 5, 'cleanup-malformed-perp-symbols');
   }
 
   db.prepare(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)
