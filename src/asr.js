@@ -29,6 +29,14 @@ export const ASR_PRESETS = [
 
 const PRESET_DEFAULTS = Object.fromEntries(ASR_PRESETS.map((p) => [p.id, p]));
 
+/** 当前 Base URL 匹配哪个预设；都不匹配则视为自定义 */
+function matchedPresetId(baseUrl) {
+  const norm = String(baseUrl || '').trim().replace(/\/+$/, '').toLowerCase();
+  if (!norm) return 'custom';
+  const hit = ASR_PRESETS.find((p) => p.baseUrl && p.baseUrl.replace(/\/+$/, '').toLowerCase() === norm);
+  return hit ? hit.id : 'custom';
+}
+
 export function getAsrConfig({ withSecret = false } = {}) {
   const provider = store.getMeta('asr_provider', 'minimax');
   const preset = PRESET_DEFAULTS[provider] || PRESET_DEFAULTS.minimax;
@@ -41,6 +49,8 @@ export function getAsrConfig({ withSecret = false } = {}) {
     provider,
     baseUrl,
     model,
+    // 快速预设下拉框按当前 Base URL 反推选中项，避免永远停在第一项
+    matchedPreset: matchedPresetId(baseUrl),
     hasKey: Boolean(keyEnc) || reusesLlmKey,
     hasDedicatedKey: Boolean(keyEnc),
     reusesLlmKey,

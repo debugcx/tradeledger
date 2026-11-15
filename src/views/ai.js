@@ -84,11 +84,11 @@ function asrHistoryTable(history) {
 }
 
 function asrPanel({ asr, asrPresets }) {
-  const presetOptions = asrPresets.map((p) => `<option value="${e(p.id)}" data-provider="${e(p.id === 'minimax' ? 'minimax' : 'openai')}" data-base="${e(p.baseUrl)}" data-model="${e(p.model)}">${e(p.label)}</option>`).join('');
+  const presetOptions = asrPresets.map((p) => `<option value="${e(p.id)}" data-provider="${e(p.id === 'minimax' ? 'minimax' : 'openai')}" data-base="${e(p.baseUrl)}" data-model="${e(p.model)}" ${asr.matchedPreset === p.id ? 'selected' : ''}>${e(p.label)}</option>`).join('');
   const keyState = asr.hasDedicatedKey
     ? `已保存专用 Key ••••${e(asr.keyHint || '')}`
-    : asr.reusesLlmKey ? '未配置专用 Key，复用「AI 模型」的 MiniMax Key'
-    : asr.fallbackLlm ? '未配置主接口 Key，将自动降级到 AI 模型的 MiniMax Key'
+    : asr.reusesLlmKey ? '未配置专用 Key，复用「AI 模型」的 Key'
+    : asr.fallbackLlm ? '未配置主接口 Key，将自动降级到「AI 模型」的 Key'
     : '没有可用 Key';
   return `
     <section class="panel">
@@ -111,10 +111,10 @@ function asrPanel({ asr, asrPresets }) {
           <input name="model" value="${e(asr.model)}" placeholder="asr-1.0 / whisper-1 / FunAudioLLM/SenseVoiceSmall">
         </label>
         <label class="field"><span>API Key（留空保持不变）</span>
-          <input name="apiKey" type="password" autocomplete="off" placeholder="${asr.hasDedicatedKey ? '已保存，留空不改' : asr.reusesLlmKey ? '留空则复用 AI 模型的 MiniMax Key' : 'sk-...'}">
+          <input name="apiKey" type="password" autocomplete="off" placeholder="${asr.hasDedicatedKey ? '已保存，留空不改' : asr.reusesLlmKey ? '留空则复用「AI 模型」的 Key' : 'sk-...'}">
         </label>
         <label class="field wide checkbox-field">
-          <label><input type="checkbox" name="fallbackLlm" value="1" ${asr.fallbackLlm ? 'checked' : ''}> 主接口不可用时自动降级到「AI 模型」的 MiniMax Key</label>
+          <label><input type="checkbox" name="fallbackLlm" value="1" ${asr.fallbackLlm ? 'checked' : ''}> 主接口不可用时自动降级到「AI 模型」的 Key（仅当 AI 模型配的是 MiniMax 时生效）</label>
         </label>
         <div class="form-actions wide">
           <button class="btn btn-primary" type="submit">保存配置</button>
@@ -124,7 +124,7 @@ function asrPanel({ asr, asrPresets }) {
       </form>
       <p class="chart-note">
         用于笔记 / 复盘的语音输入：浏览器录音上传到上面配置的服务转写成文字。音频只发往该接口，不落盘不进数据库。
-        保存的配置（如硅基流动 SenseVoice）优先使用；勾选降级时，主接口没配 Key、网络不通或额度用尽会自动改用 AI 模型里的 MiniMax Key 识别。
+        保存的配置（如硅基流动 SenseVoice）优先使用；勾选降级时，主接口没配 Key、网络不通或额度用尽会自动改用「AI 模型」里的 Key（仅限 MiniMax，其接口互通）。
       </p>
       ${asrHistoryTable(asr.history)}
     </section>`;

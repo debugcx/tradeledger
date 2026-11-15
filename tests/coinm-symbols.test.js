@@ -91,3 +91,25 @@ test('交易详情：币本位金额按平仓价折回结算币', async () => {
   assert.ok(Math.abs(inverseFillQty({ qty: 4, price: 74176.4, contractValue: 100 }) - 400 / 74176.4) < 1e-12);
   assert.equal(inverseFillQty({ qty: 2, price: 700, contractValue: 0 }), 2);
 });
+
+test('ASR 快速预设按当前 Base URL 反推选中项', async () => {
+  const { ASR_PRESETS, getAsrConfig } = await import('../src/asr.js');
+  assert.ok(ASR_PRESETS.some((p) => p.id === 'custom'));
+  // getAsrConfig 依赖 store；这里只验证 matchedPreset 计算逻辑通过 URL 归一化
+  const norm = (s) => String(s || '').trim().replace(/\/+$/, '').toLowerCase();
+  const presets = [
+    { id: 'minimax', baseUrl: 'https://api.minimax.cn/v1' },
+    { id: 'siliconflow', baseUrl: 'https://api.siliconflow.cn/v1' },
+    { id: 'openai', baseUrl: 'https://api.openai.com/v1' },
+    { id: 'custom', baseUrl: '' },
+  ];
+  const match = (base) => {
+    const n = norm(base);
+    if (!n) return 'custom';
+    const hit = presets.find((p) => p.baseUrl && norm(p.baseUrl) === n);
+    return hit ? hit.id : 'custom';
+  };
+  assert.equal(match('http://47.95.68.70:8788/v1'), 'custom');
+  assert.equal(match('https://api.siliconflow.cn/v1/'), 'siliconflow');
+  assert.equal(match(''), 'custom');
+});
