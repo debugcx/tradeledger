@@ -1,8 +1,8 @@
 /**
  * 语音识别（ASR）：浏览器录音 → 服务端转写。
  *
- * - 默认 MiniMax /v1/speech_to_text，未配置专用 Key 时自动复用「AI 模型」里的 MiniMax Key；
- * - 也支持任意 OpenAI 兼容转写接口（OpenAI whisper、SiliconFlow SenseVoice、Groq…）；
+ * - 支持任意 OpenAI 兼容转写接口（OpenAI whisper、SiliconFlow SenseVoice、Groq…）
+ *   与 MiniMax /v1/speech_to_text；
  * - 配置存 meta 表，Key 用 AES-256-GCM 加密；
  * - 音频不上库、不落盘，转写完即丢。
  */
@@ -11,19 +11,10 @@ import * as store from './store.js';
 import { encryptSecret, decryptSecret, hintKey } from './crypto.js';
 import { assertSafeOutboundUrl } from './url-guard.js';
 
-const LLM_ASR_FALLBACK = { provider: 'minimax', baseUrl: 'https://api.minimax.cn/v1', model: 'asr-1.0' };
-
-/** 「AI 模型」里配的是 MiniMax 时，它的 Key 可用于语音识别（主接口或降级通道） */
-function llmMinimaxKey() {
-  if (!/minimax/i.test(store.getMeta('llm_base_url', ''))) return '';
-  const enc = store.getMeta('llm_api_key_enc', '');
-  return enc ? decryptSecret(enc) : '';
-}
-
 export const ASR_PRESETS = [
-  { id: 'minimax', label: 'MiniMax（复用 AI 模型的 MiniMax Key）', baseUrl: 'https://api.minimax.cn/v1', model: 'asr-1.0' },
   { id: 'siliconflow', label: '硅基流动 SiliconFlow（SenseVoice，有免费额度）', baseUrl: 'https://api.siliconflow.cn/v1', model: 'FunAudioLLM/SenseVoiceSmall' },
   { id: 'openai', label: 'OpenAI（whisper-1）', baseUrl: 'https://api.openai.com/v1', model: 'whisper-1' },
+  { id: 'minimax', label: 'MiniMax（speech_to_text）', baseUrl: 'https://api.minimax.cn/v1', model: 'asr-1.0' },
   { id: 'custom', label: '自定义 OpenAI 兼容转写接口', baseUrl: '', model: '' },
 ];
 
@@ -38,28 +29,26 @@ function matchedPresetId(baseUrl) {
 }
 
 export function getAsrConfig({ withSecret = false } = {}) {
-  const provider = store.getMeta('asr_provider', 'minimax');
-  const preset = PRESET_DEFAULTS[provider] || PRESET_DEFAULTS.minimax;
+  const provider = store.getMeta('asr_provider', 'siliconflow');
+  const preset = PRESET_DEFAULTS[provider] || PRESET_DEFAULTS.siliconflow;
   const baseUrl = store.getMeta('asr_base_url', '') || preset.baseUrl;
   const model = store.getMeta('asr_model', '') || preset.model;
   const keyEnc = store.getMeta('asr_api_key_enc', '');
-  const llmKey = provider === 'minimax' ? llmMinimaxKey() : '';
-  const reusesLlmKey = Boolean(!keyEnc && llmKey);
   const config = {
     provider,
     baseUrl,
     model,
     // 快速预设下拉框按当前 Base URL 反推选中项，避免永远停在第一项
     matchedPreset: matchedPresetId(baseUrl),
-    hasKey: Boolean(keyEnc) || reusesLlmKey,
+    hasKey: Boolean(keyEnc),
     hasDedicatedKey: Boolean(keyEnc),
-    reusesLlmKey,
-    fallbackLlm: store.getMeta('asr_fallback_llm', '1') !== '0',
+    reusesLlmKey: false,
+    fallbackLlm: false,
     history: readHistory(),
-    keyHint: store.getMeta('asr_api_key_hint', '') || (reusesLlmKey ? store.getMeta('llm_api_key_hint', '') : ''),
+    keyHint: store.getMeta('asr_api_key_hint', ''),
   };
   if (withSecret) {
-    config.apiKey = keyEnc ? decryptSecret(keyEnc) : llmKey;
+    config.apiKey = keyEnc ? decryptSecret(keyEnc) : '';
   }
   return config;
 }
@@ -72,7 +61,6 @@ export function saveAsrConfig(input = {}) {
     store.setMeta('asr_base_url', baseUrl);
   }
   if (input.model !== undefined) store.setMeta('asr_model', String(input.model).trim().slice(0, 120));
-  if (input.fallbackLlm !== undefined) store.setMeta('asr_fallback_llm', input.fallbackLlm ? '1' : '0');
   if (input.apiKey) {
     store.setMeta('asr_api_key_enc', encryptSecret(input.apiKey));
     store.setMeta('asr_api_key_hint', hintKey(input.apiKey));
@@ -82,24 +70,6 @@ export function saveAsrConfig(input = {}) {
     store.setMeta('asr_api_key_hint', '');
   }
   return getAsrConfig();
-}
-
-function minimaxFallbackConfig() {
-  const key = llmMinimaxKey();
-  if (!key) return null;
-  return { ...LLM_ASR_FALLBACK, apiKey: key, reusesLlmKey: true, hasDedicatedKey: false };
-}
-
-/** 主接口配置 → 不可用时降级到 AI 模型的 MiniMax Key（两者相同则只跑一次） */
-function asrAttempts() {
-  const primary = getAsrConfig({ withSecret: true });
-  const attempts = [{ label: '主接口', config: primary }];
-  if (primary.fallbackLlm) {
-    const fb = minimaxFallbackConfig();
-    const sameAsPrimary = primary.provider === 'minimax' && fb && primary.apiKey === fb.apiKey;
-    if (fb && !sameAsPrimary) attempts.push({ label: '降级 MiniMax', config: fb });
-  }
-  return attempts;
 }
 
 function isMinimax(cfg) {
@@ -115,10 +85,15 @@ function readHistory() {
   }
 }
 
-/** 探测单个配置是否可用：带鉴权发一个空表单，按状态码区分「可用 / Key 错 / 地址错 / 不可达」 */
+/** 主接口即唯一通道：配置了什么就用什么 */
+function asrAttempts() {
+  return [{ label: '主接口', config: getAsrConfig({ withSecret: true }) }];
+}
+
+/** 探测配置是否可用：带鉴权发一个空表单，按状态码区分「可用 / Key 错 / 地址错 / 不可达」 */
 async function probeAsrConfig(cfg, timeout = 15_000) {
   if (!cfg.baseUrl) return { ok: false, error: '请先填写 Base URL' };
-  if (!cfg.apiKey) return { ok: false, error: '没有可用的 API Key（未配置专用 Key，也无法复用 AI 模型的 Key）' };
+  if (!cfg.apiKey) return { ok: false, error: '没有可用的 API Key，请先在上方保存 Key' };
   const url = (String(cfg.baseUrl).replace(/\/+$/, '')) + (isMinimax(cfg) ? '/speech_to_text' : '/audio/transcriptions');
   let res;
   try {
@@ -145,26 +120,13 @@ export async function testAsrConfig(config = null, timeout = 15_000) {
   return probeAsrConfig(cfg, timeout);
 }
 
-/** 同时探测主接口与降级通道，任一可用即视为可用（与真实识别行为一致） */
-export async function testAsrAll(timeout = 15_000) {
-  const attempts = asrAttempts();
-  const results = [];
-  for (const attempt of attempts) {
-    const r = await probeAsrConfig(attempt.config, timeout);
-    results.push({ label: attempt.label, provider: attempt.config.provider, model: attempt.config.model, ...r });
-  }
-  return { ok: results.some((r) => r.ok), results };
-}
-
 /** 转写音频；data 是 Buffer，返回识别文本（静音段可能为空字符串） */
 export async function transcribeAudio({ data, filename = 'audio.wav', contentType = 'audio/wav', config = null, timeout = 60_000 }) {
   const cfg = config || getAsrConfig({ withSecret: true });
   if (!cfg.baseUrl) throw new Error('请先在 设置 → AI 模型 里配置语音识别 Base URL');
   if (!cfg.model) throw new Error('请先配置语音识别模型名');
   if (!cfg.apiKey) {
-    throw new Error(cfg.reusesLlmKey === false && cfg.provider === 'minimax'
-      ? '请配置语音识别 API Key，或在「AI 模型」里配置 MiniMax Key 以便复用'
-      : '请先配置语音识别 API Key');
+    throw new Error('请先配置语音识别 API Key');
   }
   const base = String(cfg.baseUrl).replace(/\/+$/, '');
   assertSafeOutboundUrl(base, { label: '语音识别接口地址' });
@@ -196,7 +158,7 @@ export async function transcribeAudio({ data, filename = 'audio.wav', contentTyp
   return String(out?.text || '').trim();
 }
 
-/** 主接口优先，不可用时自动降级；两条都失败时返回合并后的错误信息。
+/** 主接口即唯一通道；失败时返回错误信息。
  *  每次识别都记录到日志和 meta（设置页可查看最近记录）。 */
 export async function transcribeAudioWithFallback(input = {}) {
   const attempts = asrAttempts();

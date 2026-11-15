@@ -18,7 +18,7 @@ import {
   getLlmConfig, saveLlmConfig, callLlm, LLM_PRESETS, buildTradeReviewPrompt,
 } from './llm.js';
 import {
-  getAsrConfig, saveAsrConfig, transcribeAudioWithFallback, testAsrAll, ASR_PRESETS,
+  getAsrConfig, saveAsrConfig, transcribeAudioWithFallback, testAsrConfig, ASR_PRESETS,
 } from './asr.js';
 import { tradeBreakdown } from './breakdown.js';
 import { summarizeHoldingCandles } from './trade-context.js';
@@ -2119,7 +2119,6 @@ route('POST', '/dashboard/asr/config', (ctx) => requireUser(ctx, async (c) => {
       model: val(body, 'model'),
       apiKey: String(val(body, 'apiKey') || '').trim(),
       clearKey: val(body, 'clear_key') === '1',
-      fallbackLlm: val(body, 'fallbackLlm') === '1',
     });
   } catch (err) {
     return redirect('/dashboard/settings/ai?error=' + encodeURIComponent(err?.message || String(err)));
@@ -2168,9 +2167,8 @@ route('POST', '/api/asr', (ctx) => requireUser(ctx, async (c) => {
 route('POST', '/api/asr/test', async (ctx) => {
   if (!ctx.user) return json({ error: 'unauthorized' }, 401);
   try {
-    const out = await testAsrAll();
-    const lines = out.results.map((r) => `${r.label}（${r.provider} · ${r.model}）：${r.ok ? (r.note || '可用') : r.error}`);
-    return json({ ok: out.ok, note: lines.join('；') }, out.ok ? 200 : 400);
+    const r = await testAsrConfig();
+    return json({ ok: r.ok, note: r.ok ? (r.note || '可用') : (r.error || '不可用') }, r.ok ? 200 : 400);
   } catch (err) {
     return json({ ok: false, error: err?.message || String(err) }, 400);
   }
