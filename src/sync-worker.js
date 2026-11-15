@@ -83,12 +83,16 @@ async function tick() {
       const last = Date.parse(account.last_spot_sync_at || '') || 0;
       return !last || now - last > config.spotRefreshHours * 3600_000;
     };
+    const autoDue = (account) => {
+      const last = Date.parse(account.last_sync_at || '') || 0;
+      return !last || now - last > config.syncAutoMinutes * 60_000;
+    };
     const accounts = store.listAccounts()
       .filter((a) => !a.is_demo && a.exchange !== 'manual')
       // 仅资产账户不拉交易/现货：只在资金流水到期（6 小时节流）时唤醒
       .filter((a) => a.assets_only
         ? transferDue(a)
-        : (!a.sync_done || a.sync_state || transferDue(a) || spotDue(a)));
+        : (!a.sync_done || a.sync_state || transferDue(a) || spotDue(a) || autoDue(a)));
     for (const account of accounts) {
       if (isSyncing(account.id)) continue;
       // 退避状态由同步层持久化：连续失败 5 次后 24 小时内不再自动重试

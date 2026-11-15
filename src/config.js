@@ -29,6 +29,8 @@ export const config = {
   syncWindowBudget: Number(process.env.SYNC_WINDOW_BUDGET || 8),
   transferRefreshHours: Math.max(1, Number(process.env.TRANSFER_REFRESH_HOURS || 6)),
   spotRefreshHours: Math.max(1, Number(process.env.SPOT_REFRESH_HOURS || 1)),
+  // 后台增量同步的间隔（分钟）：到点把各账户最近两天增量拉一遍，不依赖网页打开
+  syncAutoMinutes: Math.max(5, Number(process.env.SYNC_AUTO_MINUTES || 60)),
   liveRefreshSeconds: Number(process.env.LIVE_REFRESH_SECONDS || 60),
   syncWorkerSeconds: Number(process.env.SYNC_WORKER_SECONDS || 5),
   // 资产总览：交易所账内资产 10 分钟；链上索引器按次计费，默认 4 小时（页面可改）
