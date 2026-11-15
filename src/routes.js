@@ -2093,28 +2093,37 @@ route('GET', '/dashboard/ai', (ctx) => requireUser(ctx, () => redirect('/dashboa
 
 route('POST', '/dashboard/ai/config', (ctx) => requireUser(ctx, async (c) => {
   const body = await readForm(c.req);
-  saveLlmConfig({
-    provider: val(body, 'provider'),
-    baseUrl: val(body, 'baseUrl'),
-    model: val(body, 'model'),
-    apiKey: String(val(body, 'apiKey') || '').trim(),
-    temperature: val(body, 'temperature'),
-    maxTokens: val(body, 'maxTokens'),
-    systemPrompt: val(body, 'systemPrompt'),
-  });
+  try {
+    saveLlmConfig({
+      provider: val(body, 'provider'),
+      baseUrl: val(body, 'baseUrl'),
+      model: val(body, 'model'),
+      apiKey: String(val(body, 'apiKey') || '').trim(),
+      temperature: val(body, 'temperature'),
+      maxTokens: val(body, 'maxTokens'),
+      systemPrompt: val(body, 'systemPrompt'),
+    });
+  } catch (err) {
+    // 校验失败（URL 非法/明文 http 等）回到设置页展示原因，而不是 500
+    return redirect('/dashboard/settings/ai?error=' + encodeURIComponent(err?.message || String(err)));
+  }
   return redirect('/dashboard/settings/ai?notice=' + encodeURIComponent('模型配置已保存'));
 }));
 
 route('POST', '/dashboard/asr/config', (ctx) => requireUser(ctx, async (c) => {
   const body = await readForm(c.req);
-  saveAsrConfig({
-    provider: val(body, 'provider'),
-    baseUrl: val(body, 'baseUrl'),
-    model: val(body, 'model'),
-    apiKey: String(val(body, 'apiKey') || '').trim(),
-    clearKey: val(body, 'clear_key') === '1',
-    fallbackLlm: val(body, 'fallbackLlm') === '1',
-  });
+  try {
+    saveAsrConfig({
+      provider: val(body, 'provider'),
+      baseUrl: val(body, 'baseUrl'),
+      model: val(body, 'model'),
+      apiKey: String(val(body, 'apiKey') || '').trim(),
+      clearKey: val(body, 'clear_key') === '1',
+      fallbackLlm: val(body, 'fallbackLlm') === '1',
+    });
+  } catch (err) {
+    return redirect('/dashboard/settings/ai?error=' + encodeURIComponent(err?.message || String(err)));
+  }
   return redirect('/dashboard/settings/ai?notice=' + encodeURIComponent('语音识别配置已保存'));
 }));
 
