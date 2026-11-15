@@ -2,7 +2,7 @@ import { escapeHtml as e } from '../http.js';
 import { shell, settingsNav } from './layout.js';
 
 function configPanel({ config, presets, notice, error }) {
-  const presetOptions = presets.map((p) => `<option value="${e(p.id)}" data-provider="${e(p.provider)}" data-base="${e(p.baseUrl)}" data-model="${e(p.model)}">${e(p.label)}</option>`).join('');
+  const presetOptions = presets.map((p) => `<option value="${e(p.id)}" data-provider="${e(p.provider)}" data-base="${e(p.baseUrl)}" data-model="${e(p.model)}" ${config.matchedPreset === p.id ? 'selected' : ''}>${e(p.label)}</option>`).join('');
   const insecureHint = /明文/.test(error || '');
   return `
     ${error ? `<div class="alert alert-error">${e(error)}${insecureHint ? `

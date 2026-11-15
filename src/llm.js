@@ -19,6 +19,16 @@ export const LLM_PRESETS = [
   { id: 'custom', label: '自定义 OpenAI 兼容接口', baseUrl: '', model: '', provider: 'openai' },
 ];
 
+/** 当前 Base URL + 接口类型匹配哪个预设；都不匹配则视为自定义 */
+function matchedLlmPresetId(baseUrl, provider) {
+  const norm = String(baseUrl || '').trim().replace(/\/+$/, '').toLowerCase();
+  if (!norm) return 'custom';
+  const hit = LLM_PRESETS.find((p) => p.baseUrl
+    && p.baseUrl.replace(/\/+$/, '').toLowerCase() === norm
+    && (!p.provider || p.provider === provider));
+  return hit ? hit.id : 'custom';
+}
+
 export function getLlmConfig({ withSecret = false } = {}) {
   const provider = store.getMeta('llm_provider', 'openai');
   const baseUrl = store.getMeta('llm_base_url', 'https://api.openai.com/v1');
@@ -31,6 +41,7 @@ export function getLlmConfig({ withSecret = false } = {}) {
     provider,
     baseUrl,
     model,
+    matchedPreset: matchedLlmPresetId(baseUrl, provider),
     temperature: Number.isFinite(temperature) ? Math.min(2, Math.max(0, temperature)) : 0.4,
     maxTokens: Number.isFinite(maxTokens) ? Math.min(32000, Math.max(200, maxTokens)) : 2000,
     systemPrompt,

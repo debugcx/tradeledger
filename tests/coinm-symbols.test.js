@@ -113,3 +113,20 @@ test('ASR 快速预设按当前 Base URL 反推选中项', async () => {
   assert.equal(match('https://api.siliconflow.cn/v1/'), 'siliconflow');
   assert.equal(match(''), 'custom');
 });
+
+test('LLM 快速预设按 Base URL + 接口类型匹配（协议切换后仍匹配同一预设）', async () => {
+  const { LLM_PRESETS } = await import('../src/llm.js');
+  const match = (base, provider) => {
+    const norm = String(base || '').trim().replace(/\/+$/, '').toLowerCase();
+    if (!norm) return 'custom';
+    const hit = LLM_PRESETS.find((p) => p.baseUrl
+      && p.baseUrl.replace(/\/+$/, '').toLowerCase() === norm
+      && (!p.provider || p.provider === provider));
+    return hit ? hit.id : 'custom';
+  };
+  assert.equal(match('http://47.95.68.70:8788/v1', 'openai'), 'custom');
+  assert.equal(match('https://api.deepseek.com/v1', 'openai'), 'deepseek');
+  // Ollama 预设绑定 provider，openai 接口类型即使 URL 相同也不匹配
+  assert.equal(match('http://127.0.0.1:11434', 'ollama'), 'ollama');
+  assert.equal(match('http://127.0.0.1:11434', 'openai'), 'custom');
+});
