@@ -3,8 +3,10 @@ import { shell, settingsNav } from './layout.js';
 
 function configPanel({ config, presets, notice, error }) {
   const presetOptions = presets.map((p) => `<option value="${e(p.id)}" data-provider="${e(p.provider)}" data-base="${e(p.baseUrl)}" data-model="${e(p.model)}">${e(p.label)}</option>`).join('');
+  const insecureHint = /明文/.test(error || '');
   return `
-    ${error ? `<div class="alert alert-error">${e(error)}</div>` : ''}
+    ${error ? `<div class="alert alert-error">${e(error)}${insecureHint ? `
+      <div class="muted small" style="margin-top:6px">如果这个服务确实只提供 http（例如内网自建网关），可以给容器加环境变量 <code>TRADELEDGER_ALLOW_INSECURE_EGRESS=1</code> 后重启容器再保存；注意 API Key 会明文传输，不建议对公网服务这么做。</div>` : ''}</div>` : ''}
     ${notice ? `<div class="alert alert-ok">${e(notice)}</div>` : ''}
     <section class="panel">
       <div class="panel-head"><h2>模型配置</h2>
