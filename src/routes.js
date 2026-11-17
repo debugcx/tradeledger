@@ -628,16 +628,18 @@ function detailCacheInputs(trade) {
 }
 
 /** 交易详情页的持仓盈亏曲线：优先读库（历史 K 线不可变），未命中再拉接口并落库 */
-async function loadTradeCurve(trade) {
+async function loadTradeCurve(trade, fills = null) {
   const entry = Number(trade.entry_price) || 0;
   const size = Number(trade.size) || 0;
   const fromMs = Date.parse(trade.open_time || '');
   const toMs = Date.parse(trade.close_time || '');
   if (!entry || !size || !Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) return null;
-  const inputs = detailCacheInputs(trade);
+  // 指纹含成交序列：曲线按真实建仓路径计算，成交变化必须重算
+  const fillStamp = (fills || []).map((f) => `${f.t}:${f.side}:${f.price}:${f.qty}`).join(';');
+  const inputs = `${detailCacheInputs(trade)}|curve-v2|${fillStamp}`;
   const cached = store.getTradeCurveCache(trade.id);
   if (cached && cached.inputs === inputs && cached.candles?.length >= 2) {
-    return { bar: cached.bar, candles: cached.candles, truncated: cached.truncated };
+    return { bar: cached.bar, candles: cached.candles, truncated: cached.truncated, fills: fills || [] };
   }
   if (trade.account_is_demo) return { unsupported: '演示账户不拉取真实行情' };
   const adapter = getExchange(trade.account_exchange);
@@ -650,7 +652,7 @@ async function loadTradeCurve(trade) {
       creds: store.getAccountCredentials(trade.account_id), // Gate 的 K 线接口也要签名
     });
     if (!res?.candles || res.candles.length < 2) return { unsupported: '该持仓区间没有可用的 K 线数据' };
-    const result = { bar: res.bar, candles: res.candles, truncated: Boolean(res.truncated) };
+    const result = { bar: res.bar, candles: res.candles, truncated: Boolean(res.truncated), fills: fills || [] };
     store.saveTradeCurveCache(trade.id, inputs, result);
     return result;
   } catch (err) {
@@ -749,7 +751,10 @@ route('POST', '/dashboard/journal/:id/restore', (ctx) => requireUser(ctx, async 
 route('GET', '/dashboard/journal/:id', (ctx) => requireUser(ctx, async (c) => {
   const trade = store.getTrade(c.params.id);
   if (!trade) return redirect('/dashboard/journal?error=' + encodeURIComponent('交易记录不存在'));
-  const [curve, ops] = await Promise.all([loadTradeCurve(trade), loadTradeFills(trade)]);
+  // 先取成交（曲线按真实建仓路径计算需要它），再并行取曲线与其余数据
+  const ops = await loadTradeFills(trade);
+  const fills = Array.isArray(ops?.fills) ? ops.fills : [];
+  const [curve] = await Promise.all([loadTradeCurve(trade, fills)]);
   const llmCfg = getLlmConfig();
   return html(page({
     title: `${trade.symbol} | TradeLedger`,

@@ -53,7 +53,146 @@ export function inverseFillQty(fill) {
   return (Number(fill.qty) || 0) * cv / price;
 }
 
-/** 持仓期间浮盈亏曲线：K 线收盘价 × 方向 × 数量，不含手续费与资金费 */
+/**
+ * 持仓盈亏曲线数据：按「逐笔成交的真实净持仓路径」计算，画的是**累计权益**：
+ *
+ *   每个时点的值 = 已实现盈亏（此前所有减仓/做T落袋部分，含已付手续费）
+ *                + 当前持仓的未实现浮盈
+ *
+ * 这样中途减仓落袋的盈亏不会从曲线上消失，止损瞬间的谷值就是这一单真实的
+ * 累计亏损，终点也与交易所净盈亏一致。取样价用对持仓最不利的一端
+ * （多单取 low、空单取 high），插针/止损的极值才不会被收盘价抹平。
+ * fills 为空（历史成交超出保留期等）时退回旧的满仓算法。
+ * 返回 { points, peak, trough, final, byPath }；byPath=false 表示用了退回算法。
+ */
+export function buildCurvePoints({ trade, candles, fills = [] }) {
+  const dir = trade.side === 'long' ? 1 : -1;
+  const exit = Number(trade.exit_price) || 0;
+  const coin = coinMarginedAmounts(trade);
+  const conv = (usd, price) => (coin && price > 0 ? usd / price : usd);
+
+  // 排序后的成交 + 逐步净持仓（fee 为负数 = 支出）
+  const sorted = (fills || [])
+    .filter((f) => Number(f.time || f.t) > 0 && Number(f.qty) > 0 && Number(f.price) > 0)
+    .map((f) => ({
+      t: Number(f.time ?? f.t),
+      side: f.side === 'buy' ? 'buy' : 'sell',
+      price: Number(f.price),
+      qty: Number(inverseFillQty(f)) || Number(f.qty) || 0,
+      fee: Number(f.fee) || 0,
+    }))
+    .sort((a, b) => a.t - b.t);
+
+  // 时间线节点：每笔成交后记录 {t, pos, avgPx, realized}（realized 含手续费）
+  const hasFills = sorted.length > 0;
+  const timeline = [];
+  if (hasFills) {
+    let pos = 0;          // 带方向的净持仓
+    let openQty = 0;      // 当前持仓的绝对数量
+    let openNotional = 0; // 当前持仓的加权名义额（openQty × avgPx）
+    let realized = 0;     // 已实现盈亏（含已付手续费）
+    for (const f of sorted) {
+      const d = f.side === 'buy' ? 1 : -1;
+      const before = pos;
+      pos += d * f.qty;
+      const reducing = Math.abs(pos) < Math.abs(before) - 1e-12;
+      // 每笔成交的手续费都计入权益
+      realized += f.fee;
+      if (!reducing) {
+        // 开仓/加仓：累加名义额（含反向穿越零轴后从零开始的新仓）
+        const sameDir = Math.abs(before) <= 1e-12 || Math.sign(pos) === Math.sign(before);
+        if (sameDir) {
+          openQty = Math.abs(pos);
+          openNotional += f.price * f.qty;
+        } else {
+          openQty = Math.abs(pos);
+          openNotional = f.price * openQty;
+        }
+        timeline.push({
+          t: f.t, pos: Math.abs(pos), avgPx: openNotional / Math.max(openQty, 1e-12), realized,
+        });
+      } else {
+        // 减仓：按平仓部分结算已实现盈亏，仓位与名义额同比例缩减，均价不变
+        const closedQty = Math.min(f.qty, Math.abs(before));
+        const avgPx = openQty > 1e-12 ? openNotional / openQty : f.price;
+        realized += (f.price - avgPx) * closedQty * dir;
+        const ratio = Math.abs(before) > 1e-12 ? Math.abs(pos) / Math.abs(before) : 0;
+        openQty = Math.abs(pos);
+        openNotional *= ratio;
+        timeline.push({
+          t: f.t,
+          pos: Math.abs(pos),
+          avgPx: openQty > 1e-12 ? openNotional / openQty : f.price,
+          realized,
+        });
+        if (openQty <= 1e-12) { openQty = 0; openNotional = 0; }
+      }
+    }
+  }
+
+  const openMs = Date.parse(trade.open_time || '');
+  const closeMs = Date.parse(trade.close_time || '');
+  // 每根 K 线：找到 ≤ k.t 的最近成交节点，用其已实现盈亏 + 该段持仓的浮盈。
+  // 取样价用对持仓最不利的一端（多单取 low、空单取 high）。
+  let nodeIdx = -1;
+  const pointValue = (k) => {
+    while (nodeIdx + 1 < timeline.length && timeline[nodeIdx + 1].t <= k.t) nodeIdx++;
+    if (nodeIdx >= 0) {
+      const node = timeline[nodeIdx];
+      if (node.pos > 1e-12) {
+        const adverse = dir === 1 ? (Number(k.l) || k.c) : (Number(k.h) || k.c);
+        return conv(node.realized + (adverse - node.avgPx) * dir * node.pos, adverse);
+      }
+      return conv(node.realized, k.c); // 仓位已清零：只剩余已实现盈亏
+    }
+    return 0; // 第一笔成交之前
+  };
+
+  const points = [{ x: '', value: 0 }];
+  for (const k of candles) points.push({ x: labelOf(k.t, trade), value: pointValue(k) });
+
+  // 终点：优先用交易所净盈亏（最权威），否则按已实现 + 平仓价浮盈推算
+  let final;
+  let byPath = hasFills;
+  if (hasFills) {
+    const last = timeline[timeline.length - 1];
+    const computed = last.pos > 1e-12 && exit > 0
+      ? conv(last.realized + (exit - last.avgPx) * dir * last.pos, exit)
+      : conv(last.realized, exit || 1);
+    const pnl = Number(trade.pnl);
+    final = Number.isFinite(pnl) && pnl !== 0 ? pnl : computed;
+  } else {
+    byPath = false;
+    const entry = Number(trade.entry_price) || 0;
+    const size = Number(trade.size) || 0;
+    final = exit ? conv((exit - entry) * dir * size, exit) : points[points.length - 1].value;
+    // 无成交：整条曲线退回旧的满仓算法
+    let i2 = 1;
+    for (const k of candles) {
+      points[i2++].value = conv((k.c - entry) * dir * size, k.c);
+    }
+  }
+  points.push({ x: '平仓', value: final });
+  for (const p of points) p.x = p.x || '';
+
+  let peak = -Infinity, trough = Infinity;
+  for (const p of points) {
+    if (p.value > peak) peak = p.value;
+    if (p.value < trough) trough = p.value;
+  }
+  return { points, peak, trough, final, byPath };
+}
+
+function labelOf(t, trade) {
+  const d = new Date(t);
+  const p = (n) => String(n).padStart(2, '0');
+  const multiDay = Date.parse(trade.close_time || '') - Date.parse(trade.open_time || '') > 86_400_000;
+  return multiDay
+    ? `${p(d.getMonth() + 1)}-${p(d.getDate())}`
+    : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** 持仓期间浮盈亏曲线：优先按真实仓位路径，无成交数据时退回满仓估算 */
 function curvePanel(trade, curve) {
   if (!curve) return '';
   if (curve.unsupported) {
@@ -62,36 +201,15 @@ function curvePanel(trade, curve) {
       <div class="chart-empty">${e(curve.unsupported)}</div>
     </section>`;
   }
-  const dir = trade.side === 'long' ? 1 : -1;
-  const entry = Number(trade.entry_price) || 0;
-  const size = Number(trade.size) || 0;
   const coin = coinMarginedAmounts(trade);
   const base = coin ? coin.base : '';
-  // 反向合约：USD 浮盈 ÷ 当时价格 = 币计浮盈（等价于张数 × 面值 × (1/开仓价 − 1/现价)）
-  const conv = (usd, price) => (coin && price > 0 ? usd / price : usd);
   const fmtVal = (v) => (coin
     ? `${Number(v) > 0 ? '+' : ''}${fmtNum(Number(v) || 0, 8)} ${base}`
     : fmtMoney(v));
   const fmtAbs = (v) => (coin ? `${fmtNum(Number(v) || 0, 8)} ${base}` : fmtMoney(v, { sign: false }));
-  const multiDay = Date.parse(trade.close_time) - Date.parse(trade.open_time) > 86_400_000;
-  const label = (v) => {
-    const d = new Date(v);
-    const p = (n) => String(n).padStart(2, '0');
-    return multiDay
-      ? `${p(d.getMonth() + 1)}-${p(d.getDate())}`
-      : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-  };
-  const points = [{ x: label(trade.open_time), value: 0 }];
-  for (const k of curve.candles) points.push({ x: label(k.t), value: conv((k.c - entry) * dir * size, k.c) });
-  const exit = Number(trade.exit_price) || 0;
-  const final = exit ? conv((exit - entry) * dir * size, exit) : points[points.length - 1].value;
-  points.push({ x: `${label(trade.close_time)} 平仓`, value: final });
-
-  let peak = -Infinity, trough = Infinity;
-  for (const p of points) {
-    if (p.value > peak) peak = p.value;
-    if (p.value < trough) trough = p.value;
-  }
+  const { points, peak, trough, final, byPath } = buildCurvePoints({
+    trade, candles: curve.candles, fills: curve.fills || [],
+  });
   const giveback = Math.max(0, peak - final);
 
   return `<section class="panel">
@@ -112,9 +230,9 @@ function curvePanel(trade, curve) {
         xFormat: (v) => String(v),
       })}
     </div>
-    <p class="chart-note">${coin
-      ? `曲线 = 张数 × 面值 × (1/开仓价 − 1/收盘价)，即未实现毛盈亏（${e(base)} 计）；手续费与资金费的结算时点交易所未提供，未计入曲线，最终净盈亏以上表为准。`
-      : '曲线 = （K 线收盘价 − 开仓价） × 方向 × 数量，即未实现毛盈亏；手续费与资金费的结算时点交易所未提供，未计入曲线，最终净盈亏以上表为准。'}${curve.truncated ? '持仓时间过长，仅展示最近 300 根 K 线。' : ''}</p>
+    <p class="chart-note">${byPath
+      ? `曲线按逐笔成交后的真实净持仓计算（分批建仓/加减仓每段用各自的仓位与加权开仓价）；不含手续费与资金费，最终净盈亏以上表为准。`
+      : `曲线 = （K 线收盘价 − 开仓价） × 方向 × 最大数量估算：该回合的逐笔成交已超出交易所保留期，无法还原建仓路径；不含手续费与资金费，最终净盈亏以上表为准。`}${curve.truncated ? '持仓时间过长，仅展示最近 300 根 K 线。' : ''}</p>
   </section>`;
 }
 
