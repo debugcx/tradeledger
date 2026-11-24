@@ -139,35 +139,111 @@ function coinmToFill(row, contractSize) {
   };
 }
 
-/** U 本位批量：/fapi/v1/userTrades 全交易对，按 7 天窗口往回翻。 */
+/**
+ * 某时间窗内有成交的 USDM 合约名。
+ *
+ * /fapi/v1/userTrades 不带 symbol 时只返回至多 1000 笔、且会被活跃标的挤占
+ * （实测 ETHUSDC 整个消失），所以必须先发现标的再逐个拉。
+ * 用 income 的 COMMISSION / REALIZED_PNL 反推：每笔成交都会产生手续费。
+ * income 单次同样限 1000 条，命中上限时把窗口对半切开递归。
+ */
+async function usdmSymbolsInWindow(creds, from, to) {
+  const symbols = new Set();
+  for (const incomeType of ['COMMISSION', 'REALIZED_PNL']) {
+    const q = new URLSearchParams({
+      incomeType,
+      startTime: String(from),
+      endTime: String(to),
+      limit: '1000',
+    });
+    const rows = await call(`/fapi/v1/income?${q}`, creds);
+    if (!Array.isArray(rows) || !rows.length) continue;
+    if (rows.length >= 1000 && to - from > 60_000) {
+      // 命中上限：窗口对半切开递归，避免漏掉标的
+      const mid = Math.floor((from + to) / 2);
+      const [a, b] = await Promise.all([
+        usdmSymbolsInWindow(creds, from, mid),
+        usdmSymbolsInWindow(creds, mid + 1, to),
+      ]);
+      for (const s of a) symbols.add(s);
+      for (const s of b) symbols.add(s);
+      return [...symbols];
+    }
+    for (const row of rows) if (row.symbol) symbols.add(String(row.symbol));
+  }
+  return [...symbols];
+}
+
+/** 单标的成交；同一标的单窗超过 1000 笔时对半切窗递归，保证不丢成交。 */
+async function usdmSymbolTrades(creds, symbol, from, to, depth = 0) {
+  const q = new URLSearchParams({
+    symbol,
+    startTime: String(from),
+    endTime: String(to),
+    limit: '1000',
+  });
+  const rows = await call(`/fapi/v1/userTrades?${q}`, creds);
+  if (!Array.isArray(rows) || !rows.length) return [];
+  if (rows.length >= 1000 && to - from > 60_000 && depth < 6) {
+    const mid = Math.floor((from + to) / 2);
+    const [a, b] = await Promise.all([
+      usdmSymbolTrades(creds, symbol, from, mid, depth + 1),
+      usdmSymbolTrades(creds, symbol, mid + 1, to, depth + 1),
+    ]);
+    return a.concat(b);
+  }
+  return rows;
+}
+
+/**
+ * 单个 7 天窗口的 U 本位成交。
+ *
+ * 不带 symbol 的 /fapi/v1/userTrades 单次至多 1000 笔，且是「按标的切片」返回：
+ * 活跃标的会把其他标的整块挤掉（实测 ETHUSDC 448 笔完全消失）。所以只在
+ * 恰好拿满 1000 笔时才走「发现标的 → 逐标的拉」的补救路径；没拿满说明完整，
+ * 不必多花 income 请求（该接口权重 30）。
+ */
+async function usdmWindowTrades(creds, from, to) {
+  const q = new URLSearchParams({
+    startTime: String(from),
+    endTime: String(to),
+    limit: '1000',
+  });
+  const rows = await call(`/fapi/v1/userTrades?${q}`, creds);
+  const list = Array.isArray(rows) ? rows : [];
+  if (list.length < 1000) return list;
+  const symbols = await usdmSymbolsInWindow(creds, from, to).catch(() => []);
+  // 标的发现失败时退回截断结果：能拿到多少算多少，别把整个窗口丢掉
+  if (!symbols.length) return list;
+  const all = [];
+  for (const symbol of symbols) {
+    const perSymbol = await usdmSymbolTrades(creds, symbol, from, to);
+    for (const row of perSymbol || []) all.push(row);
+  }
+  return all.length ? all : list;
+}
+
+/** U 本位批量：按 7 天窗口往回翻，命中 1000 笔上限的窗口改为逐标的拉取。 */
 async function usdmTradesBatch({ creds, fromMs, toMs, cap, maxWindows }) {
   const windows = windowsDescending(fromMs, toMs, WINDOW_MS);
-  const fills = [];
+  const rawFills = [];
   let nextCursor = null;
   let used = 0;
   for (const w of windows) {
     if (used >= maxWindows) { nextCursor = String(w.to); break; }
     used++;
-    const q = new URLSearchParams({
-      startTime: String(w.from),
-      endTime: String(w.to),
-      limit: '1000',
-    });
-    const rows = await call(`/fapi/v1/userTrades?${q}`, creds);
-    if (!Array.isArray(rows) || !rows.length) continue;
-    for (const row of rows) fills.push(toFill(row));
-    if (fills.length >= cap) {
-      const oldest = Math.min(...fills.map((f) => f.time));
-      nextCursor = String(oldest - 1);
-      break;
-    }
-    if (rows.length >= 1000) {
-      const oldest = Math.min(...rows.map((r) => Number(r.time || 0)));
-      nextCursor = String(oldest - 1);
-      break;
-    }
+    const rows = await usdmWindowTrades(creds, w.from, w.to);
+    for (const row of rows) rawFills.push(row);
+    if (rawFills.length >= cap) break;
   }
-  return { fills: fills.slice(0, cap), nextCursor, windowsUsed: used };
+  // 超出批次上限时保留「最新」的 cap 笔，游标指向保留部分最早一笔之前：
+  // 被截掉的更老成交下一批会重新拉到，不会像 slice(0, cap) 那样凭空丢成交
+  rawFills.sort((a, b) => Number(b.time || 0) - Number(a.time || 0));
+  const kept = rawFills.slice(0, cap);
+  if (rawFills.length > cap) {
+    nextCursor = String(Math.min(...kept.map((r) => Number(r.time || 0))) - 1);
+  }
+  return { fills: kept.map(toFill), nextCursor, windowsUsed: used };
 }
 
 /**
