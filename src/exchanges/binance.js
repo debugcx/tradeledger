@@ -718,7 +718,14 @@ export const binance = {
 
     const positions = [];
     const rates = new Map();
-    for (const p of account.positions || []) {
+    // 统一账户（Portfolio Margin）的 /fapi/v2/account 持仓不再返回
+    // markPrice / unRealizedProfit（实测全为 0），实时盈亏改从 positionRisk 取。
+    let usdmPositions = null;
+    try {
+      const rows = await call('/fapi/v2/positionRisk', creds);
+      if (Array.isArray(rows)) usdmPositions = rows;
+    } catch { /* 接口不可用时回退到 account.positions */ }
+    for (const p of usdmPositions || account.positions || []) {
       const amt = num(p.positionAmt);
       if (!amt) continue;
       let rate = null;
@@ -750,9 +757,18 @@ export const binance = {
 
     // 币本位持仓：positionAmt 是张数，按合约面值/标记价折算成币数量。
     try {
-      const coinm = await call('/dapi/v1/account', creds, { baseUrl: BASE_DAPI });
+      // 与 U 本位同理：优先 positionRisk（才有 markPrice/unRealizedProfit）
+      let coinmRows = null;
+      try {
+        const rows = await call('/dapi/v1/positionRisk', creds, { baseUrl: BASE_DAPI });
+        if (Array.isArray(rows)) coinmRows = rows;
+      } catch { /* 回退到 account */ }
+      if (!coinmRows) {
+        const coinm = await call('/dapi/v1/account', creds, { baseUrl: BASE_DAPI });
+        coinmRows = coinm.positions || [];
+      }
       const contracts = await loadCoinmContracts().catch(() => new Map());
-      for (const p of coinm.positions || []) {
+      for (const p of coinmRows) {
         const amt = num(p.positionAmt);
         if (!amt) continue;
         const mark = num(p.markPrice);
