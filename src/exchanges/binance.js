@@ -169,7 +169,7 @@ async function usdmSymbolsInWindow(creds, from, to) {
       for (const s of b) symbols.add(s);
       return [...symbols];
     }
-    for (const row of rows) if (row.symbol) symbols.add(String(row.symbol));
+    for (const row of rows) if (row.symbol && isUsdmSymbol(row.symbol)) symbols.add(String(row.symbol));
   }
   return [...symbols];
 }
@@ -192,7 +192,7 @@ async function usdmSymbolTrades(creds, symbol, from, to, depth = 0) {
     ]);
     return a.concat(b);
   }
-  return rows;
+  return rows.filter((r) => isUsdmSymbol(r?.symbol));
 }
 
 /**
@@ -210,8 +210,10 @@ async function usdmWindowTrades(creds, from, to) {
     limit: '1000',
   });
   const rows = await call(`/fapi/v1/userTrades?${q}`, creds);
-  const list = Array.isArray(rows) ? rows : [];
-  if (list.length < 1000) return list;
+  const raw = Array.isArray(rows) ? rows : [];
+  // 统一账户下该接口会混入币本位成交（BTCUSD_PERP），只保留 USDM 行
+  const list = raw.filter((r) => isUsdmSymbol(r?.symbol));
+  if (raw.length < 1000) return list;
   const symbols = await usdmSymbolsInWindow(creds, from, to).catch(() => []);
   // 标的发现失败时退回截断结果：能拿到多少算多少，别把整个窗口丢掉
   if (!symbols.length) return list;
@@ -221,6 +223,16 @@ async function usdmWindowTrades(creds, from, to) {
     for (const row of perSymbol || []) all.push(row);
   }
   return all.length ? all : list;
+}
+
+/**
+ * USDM 合约名只由大写字母和数字组成（BTCUSDT/ETHUSDC）；币本位合约名一定带
+ * 下划线（BTCUSD_PERP/BTCUSD_261225）。统一账户下 /fapi/v1/userTrades 不带
+ * symbol 时会把币本位成交一起返回，必须按此剔除，否则会被当成 U 本位成交
+ * （数量单位是张而不是币、手续费口径也不同）。
+ */
+function isUsdmSymbol(raw) {
+  return /^[A-Z0-9]+$/.test(String(raw || ''));
 }
 
 /** U 本位批量：按 7 天窗口往回翻，命中 1000 笔上限的窗口改为逐标的拉取。 */
@@ -267,7 +279,10 @@ async function coinmTradesBatch({ creds, fromMs, toMs, cap, maxWindows }) {
       limit: '1000',
     });
     const income = await call(`/dapi/v1/income?${q}`, creds, { baseUrl: BASE_DAPI });
-    const symbols = [...new Set((Array.isArray(income) ? income : []).map((r) => r.symbol).filter(Boolean))];
+    // dapi 的合约名一定带下划线；纯字母数字是 U 本位（统一账户可能混入），不要
+    const symbols = [...new Set((Array.isArray(income) ? income : [])
+      .map((r) => r.symbol)
+      .filter((s) => s && !isUsdmSymbol(s)))];
     for (const symbol of symbols) {
       const q2 = new URLSearchParams({
         symbol,

@@ -570,7 +570,7 @@ function migrate(db) {
 let handle = null;
 
 /** 当前 schema 版本。新增增量迁移时 +1，并在 runMigrations 里登记。 */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 function recordMigration(db, version, name) {
   db.prepare('INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
@@ -653,6 +653,15 @@ function runMigrations(db) {
     db.exec("DELETE FROM trades WHERE source = 'api' AND symbol LIKE '%/PERP%'");
     db.exec("DELETE FROM trade_fills WHERE symbol LIKE '%/PERP%'");
     recordMigration(db, 5, 'cleanup-malformed-perp-symbols');
+  }
+
+  // v6：统一账户下 /fapi/v1/userTrades 不带 symbol 会混入币本位成交
+  // （BTCUSD_PERP 被 toFill 归一成 BTCUSD/PERP），v5 之后仍会重新产生。
+  // 源头已在适配器按合约名过滤；这里清掉 v5 之后再次落库的同一批脏成交。
+  if (!applied.has(6)) {
+    db.exec("DELETE FROM trades WHERE source = 'api' AND symbol LIKE '%/PERP%'");
+    db.exec("DELETE FROM trade_fills WHERE symbol LIKE '%/PERP%'");
+    recordMigration(db, 6, 'cleanup-usdm-coinm-leak');
   }
 
   db.prepare(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)

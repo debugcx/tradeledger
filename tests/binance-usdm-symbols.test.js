@@ -29,6 +29,20 @@ function rowsFor(symbol) {
 let mode = 'truncated'; // truncated：不带 symbol 返回 1000 笔；small：只返回 2 笔
 let seen = [];
 
+// 统一账户下 /fapi/v1/userTrades 不带 symbol 会混入的币本位成交（必须被剔除）
+const PERP_ROW = {
+  symbol: 'BTCUSD_PERP',
+  id: 9_000_001,
+  side: 'BUY',
+  price: '76555',
+  qty: '1',
+  quoteQty: '0',
+  commission: '0.00000026',
+  commissionAsset: 'BTC',
+  maker: true,
+  time: NOW - 5 * 3600_000,
+};
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://mock');
   const q = Object.fromEntries(url.searchParams);
@@ -40,12 +54,14 @@ const server = http.createServer((req, res) => {
       { symbol: 'BTCUSDT', incomeType: q.incomeType, income: '-0.1', time: NOW - 1000, tranId: 1 },
       { symbol: 'ETHUSDC', incomeType: q.incomeType, income: '-0.1', time: NOW - 2000, tranId: 2 },
       { symbol: 'SOLUSDC', incomeType: q.incomeType, income: '-0.1', time: NOW - 3000, tranId: 3 },
+      // 统一账户的币本位收益也会出现在 fapi 账单里，不能当作 USDM 标的去拉
+      { symbol: 'BTCUSD_PERP', incomeType: q.incomeType, income: '-0.0001', time: NOW - 4000, tranId: 4 },
     ]));
   }
   if (url.pathname === '/fapi/v1/userTrades') {
     if (q.symbol) return res.end(JSON.stringify(rowsFor(q.symbol)));
-    if (mode === 'truncated') return res.end(JSON.stringify([...rowsFor('BTCUSDT'), ...rowsFor('SOLUSDC')]));
-    return res.end(JSON.stringify(rowsFor('BTCUSDT').slice(0, 2)));
+    if (mode === 'truncated') return res.end(JSON.stringify([...rowsFor('BTCUSDT'), ...rowsFor('SOLUSDC'), PERP_ROW]));
+    return res.end(JSON.stringify([...rowsFor('BTCUSDT').slice(0, 2), PERP_ROW]));
   }
   res.statusCode = 404;
   res.end('{}');
@@ -74,6 +90,9 @@ test('U 本位：不带 symbol 恰好 1000 笔时，改为逐标的拉取，ETHU
   // 先发现标的（income）再逐标的拉成交
   assert.ok(seen.some((s) => s.path === '/fapi/v1/income' && s.incomeType === 'COMMISSION'));
   assert.ok(seen.some((s) => s.path === '/fapi/v1/userTrades' && s.symbol === 'ETHUSDC'));
+  // 统一账户混入的币本位成交不能被当成 U 本位落库，也不能拿它去拉 fapi 成交
+  assert.ok(!r.fills.some((f) => f.symbol.includes('PERP')), '不应出现 BTCUSD/PERP 幽灵成交');
+  assert.ok(!seen.some((s) => s.path === '/fapi/v1/userTrades' && s.symbol === 'BTCUSD_PERP'));
 });
 
 test('U 本位：未拿满 1000 笔时保持单次查询，不额外消耗 income', async () => {
@@ -81,6 +100,7 @@ test('U 本位：未拿满 1000 笔时保持单次查询，不额外消耗 incom
   seen = [];
   const r = await binance.fetchTrades({ creds, ...range(), cursor: null, limit: 5000 });
   assert.equal(r.fills.length, 2);
+  assert.ok(!r.fills.some((f) => f.symbol.includes('PERP')));
   assert.ok(!seen.some((s) => s.path === '/fapi/v1/income'));
   assert.ok(!seen.some((s) => s.path === '/fapi/v1/userTrades' && s.symbol));
 });
