@@ -194,3 +194,35 @@ test('Gate：张数按面值换算、回合合并成一条、K 线与成交明�
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('matchEpisodes：同一仓位来回做T只记一条，数量按最大净持仓而非累计加仓', async () => {
+  const { matchEpisodes } = await import('../src/fills.js');
+  const trades = matchEpisodes([
+    { symbol: 'BTC/USDT', side: 'sell', price: 100, qty: 2, fee: 0, time: 1000 },
+    { symbol: 'BTC/USDT', side: 'buy', price: 90, qty: 1, fee: 0, time: 2000 },
+    { symbol: 'BTC/USDT', side: 'sell', price: 95, qty: 1, fee: 0, time: 3000 },
+    { symbol: 'BTC/USDT', side: 'buy', price: 85, qty: 2, fee: 0, time: 4000 },
+  ], 'binance');
+  assert.equal(trades.length, 1);
+  assert.equal(trades[0].side, 'short');
+  // 累计开仓 3，但实际仓位峰值只有 2
+  assert.equal(trades[0].size, 2);
+  // 空 2@100 → 买回 1@90 = +10；均价回到 100，再卖 1@95 → 均价 97.5，买回 2@85 = +25
+  assert.ok(Math.abs(trades[0].pnl - 35) < 1e-9);
+});
+
+test('matchEpisodes：穿越零轴时手续费按数量拆分，不重复计入', async () => {
+  const { matchEpisodes } = await import('../src/fills.js');
+  const trades = matchEpisodes([
+    { symbol: 'BTC/USDT', side: 'buy', price: 100, qty: 1, fee: -0.3, time: 1000 },
+    { symbol: 'BTC/USDT', side: 'sell', price: 110, qty: 3, fee: -0.6, time: 2000 },
+    { symbol: 'BTC/USDT', side: 'buy', price: 105, qty: 2, fee: -0.2, time: 3000 },
+  ], 'binance');
+  assert.equal(trades.length, 2);
+  // 多单：+10，开仓费 -0.3，平仓腿按 1/3 拆 -0.2
+  assert.ok(Math.abs(trades[0].pnl - 9.5) < 1e-9);
+  assert.ok(Math.abs(trades[0].fee + 0.5) < 1e-9);
+  // 空单：+10，开仓腿按 2/3 拆 -0.4，平仓费 -0.2
+  assert.ok(Math.abs(trades[1].pnl - 9.4) < 1e-9);
+  assert.ok(Math.abs(trades[1].fee + 0.6) < 1e-9);
+});

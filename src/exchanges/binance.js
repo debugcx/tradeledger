@@ -1,6 +1,6 @@
 import { hmacHex } from '../crypto.js';
 import { requestJson } from '../http-client.js';
-import { num, windowsDescending, matchFills, toSymbol, toCoinSymbol, parseStreamCursor, encodeStreamCursor, splitPair, quoteFee, SPOT_QUOTES, marketCache, cacheGet, cachePut } from './common.js';
+import { num, windowsDescending, matchEpisodes, toSymbol, toCoinSymbol, parseStreamCursor, encodeStreamCursor, splitPair, quoteFee, SPOT_QUOTES, marketCache, cacheGet, cachePut } from './common.js';
 
 const candleCache = marketCache('binance:candles');
 const fillCache = marketCache('binance:fills');
@@ -322,6 +322,9 @@ export const binance = {
   // 合约成交接口只保留约 6 个月；现货可用 fromId 翻到最早
   maxLookbackDays: 365,
   returnsFills: true,
+  // 成交接口没有仓位历史：按「净持仓 0 → 0」聚成一个回合。
+  // 来回做T时 FIFO 会把同一个仓位拆成几百条，仓位数量也会被反复加仓累加放大。
+  episodeMatching: true,
   maxSpotLookbackDays: 3650,
   fields: [
     { key: 'api_key', label: 'API Key' },
@@ -371,7 +374,7 @@ export const binance = {
       }
     }
 
-    const trades = matchFills(fills.slice(0, cap), 'binance');
+    const trades = matchEpisodes(fills.slice(0, cap), 'binance');
     return { trades, fills: fills.slice(0, cap), nextCursor, streamErrors };
   },
 

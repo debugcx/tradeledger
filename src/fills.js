@@ -310,6 +310,7 @@ export function matchEpisodes(fills, source) {
     const inverse = contractValue > 0;
     let pos = 0;
     let avg = 0;
+    let maxPos = 0;
     let openQty = 0, closeQty = 0, openFee = 0, closeFee = 0;
     let openNotional = 0, closeNotional = 0, pnl = 0;
     let openTime = Infinity, closeTime = 0;
@@ -317,6 +318,7 @@ export function matchEpisodes(fills, source) {
       const dir = f.side === 'buy' ? 1 : -1;
       const before = pos;
       pos += dir * f.qty;
+      maxPos = Math.max(maxPos, Math.abs(pos));
       const reducing = Math.abs(pos) < Math.abs(before) - 1e-12;
       if (reducing) {
         const legQty = Math.min(f.qty, Math.abs(before));
@@ -329,7 +331,8 @@ export function matchEpisodes(fills, source) {
         }
         closeQty += legQty;
         closeNotional += f.price * legQty;
-        closeFee += f.fee;
+        // 穿越零轴的一腿一部分平仓、一部分反手开仓：手续费按数量拆开，别重复计入
+        closeFee += f.fee * (legQty / f.qty);
       } else {
         if (inverse) {
           const prev = Math.abs(before);
@@ -345,14 +348,19 @@ export function matchEpisodes(fills, source) {
       openTime = Math.min(openTime, f.time);
       closeTime = Math.max(closeTime, f.time);
     }
-    if (openQty <= 1e-12 || closeQty <= 1e-12) return;
+    if (openQty <= 1e-12 || closeQty <= 1e-12 || maxPos <= 1e-12) return;
     const side = legs[0].side === 'buy' ? 'long' : 'short';
+    // 仓位数量按「回合内最大净持仓」记，而不是把做T反复加仓的总量累加：
+    // 来回做T时 openQty 可以是实际仓位的数倍，展示与名义额都会失真
+    const size = inverse ? maxPos * contractValue / (avg || 1) : maxPos;
     const trade = {
       symbol,
       side,
       order_type: classifyOrderType(legs),
-      size: inverse ? openQty * contractValue / (avg || 1) : openQty,
-      notional: inverse ? openQty * contractValue : openNotional,
+      size,
+      notional: inverse
+        ? maxPos * contractValue
+        : (openNotional / openQty) * maxPos,
       entry_price: inverse ? avg : openNotional / openQty,
       exit_price: closeNotional / closeQty,
       open_time: new Date(openTime).toISOString(),
@@ -384,8 +392,17 @@ export function matchEpisodes(fills, source) {
     // 一腿直接穿越零轴：减仓部分结束当前回合，剩余反向开新回合
     if (Math.abs(before) > 1e-12 && Math.sign(book.pos) !== Math.sign(before) && Math.abs(book.pos) > 1e-12) {
       const carried = Math.abs(book.pos);
-      emit(fill.symbol, book.legs);
-      books.set(fill.symbol, { pos: book.pos, avgPx: 0, legs: [{ ...fill, qty: carried }], cv: book.cv, inverse: book.inverse });
+      const closedQty = qty - carried;
+      // 把这一腿拆成「平掉旧仓」和「反向开仓」两段，手续费按数量分摊
+      const closingLeg = { ...fill, qty: closedQty, fee: fill.fee * (closedQty / qty) };
+      emit(fill.symbol, [...book.legs.slice(0, -1), closingLeg]);
+      books.set(fill.symbol, {
+        pos: book.pos,
+        avgPx: 0,
+        legs: [{ ...fill, qty: carried, fee: fill.fee * (carried / qty) }],
+        cv: book.cv,
+        inverse: book.inverse,
+      });
       continue;
     }
     if (Math.abs(book.pos) <= 1e-12) {
