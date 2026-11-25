@@ -142,7 +142,7 @@ function backupSection({ config = {}, local = [], remote = null, remoteError = '
   </section>`;
 }
 
-function agentApiSection({ tokens = [], audit = [], newToken = null }) {
+function agentApiSection({ tokens = [], audit = [], newToken = null, actionQuery = '' }) {
   const now = Date.now();
   const statusOf = (t) => {
     if (t.revoked_at) return { label: '已撤销', cls: 'muted' };
@@ -160,7 +160,7 @@ function agentApiSection({ tokens = [], audit = [], newToken = null }) {
       <td class="small">${t.last_used_at ? e(fmtDateTime(t.last_used_at)) : '—'}</td>
       <td class="small">${t.expires_at ? e(fmtDateTime(t.expires_at)) : '永久'}</td>
       <td class="small ${st.cls}">${st.label}</td>
-      <td class="row-actions">${t.revoked_at ? '' : `<form method="post" action="/dashboard/settings/api-tokens/${Number(t.id)}/revoke" class="inline" data-confirm="撤销后使用该 Token 的 Agent 会立即失效，继续吗？">
+      <td class="row-actions">${t.revoked_at ? '' : `<form method="post" action="/dashboard/settings/api-tokens/${Number(t.id)}/revoke${actionQuery}" class="inline" data-confirm="撤销后使用该 Token 的 Agent 会立即失效，继续吗？">
         <button class="btn btn-ghost small danger" type="submit">撤销</button>
       </form>`}</td>
     </tr>`;
@@ -187,7 +187,7 @@ function agentApiSection({ tokens = [], audit = [], newToken = null }) {
       <pre style="margin:8px 0;white-space:pre-wrap;word-break:break-all"><code>${e(newToken.token)}</code></pre>
       <p class="small" style="margin:0">复制到 Agent 配置后刷新本页即不可再查看；遗失请撤销后重新创建。</p>
     </div>` : ''}
-    <form method="post" action="/dashboard/settings/api-tokens" class="form grid-form">
+    <form method="post" action="/dashboard/settings/api-tokens${actionQuery}" class="form grid-form">
       <label class="field"><span>名称</span><input name="name" maxlength="60" placeholder="ZCode / Claude Desktop"></label>
       <label class="field"><span>权限</span>
         <select name="scopes">
@@ -342,5 +342,44 @@ export function settingsPage({ user, overview, dbBytes, seededAt, recentImports 
     active: 'settings', user, title: '设置与数据',
     subtitle: '数据在你手里：随时导出，随时搬走',
     notice, error, body,
+  });
+}
+
+/** Agent 接入独立页：Token 管理 + REST / MCP 用法 */
+export function agentSettingsPage({ user, notice, error, apiTokens = [], apiAudit = [], newToken = null }) {
+  return shell({
+    active: 'agent',
+    user,
+    title: 'Agent 接入',
+    subtitle: '给外部 Agent 的独立 Token：只访问 /api/v1，读写仅限备注与标签',
+    notice,
+    error,
+    body: `${settingsNav('agent')}
+      <section class="panel">
+        <div class="panel-head"><h2>怎么接</h2><span class="muted small">Bearer Token · 与登录 Cookie 隔离</span></div>
+        <ol class="muted small" style="margin:0 0 10px;padding-left:18px">
+          <li>在下方创建 Token：只查询选「只读」，需要写复盘/标签选「读写」。</li>
+          <li>REST：请求头加 <code>Authorization: Bearer tl_...</code>，端点前缀 <code>/api/v1</code>。</li>
+          <li>MCP：把仓库里的 <code>scripts/mcp-server.mjs</code> 配到客户端，环境变量填地址与 Token。</li>
+        </ol>
+        <pre style="white-space:pre-wrap"><code>curl -H "Authorization: Bearer tl_xxx" http://你的地址/api/v1/trades?limit=20</code></pre>
+        <pre style="white-space:pre-wrap"><code>{
+  "mcpServers": {
+    "tradeledger": {
+      "command": "node",
+      "args": ["F:/zcode/tradeledger/scripts/mcp-server.mjs"],
+      "env": {
+        "TRADELEDGER_BASE_URL": "http://你的地址",
+        "TRADELEDGER_API_TOKEN": "tl_xxx"
+      }
+    }
+  }
+}</code></pre>
+        <p class="muted small" style="margin:10px 0 0">
+          完整端点见 <a href="/api/docs">/api/docs</a>。Token 只能访问 v1，
+          不能读账户密钥、触发同步或删除交易；所有调用都会留审计。
+        </p>
+      </section>
+      ${agentApiSection({ tokens: apiTokens, audit: apiAudit, newToken, actionQuery: '?tab=agent' })}`,
   });
 }

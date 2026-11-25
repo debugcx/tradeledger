@@ -49,7 +49,7 @@ import { resolvePrice } from './prices.js';
 import { walletProviderMeta, getWalletProvider } from './wallets/index.js';
 import { tagsPage } from './views/tags.js';
 import { notesPage, noteViewPage, noteEditPage, symbolNotePage } from './views/notes.js';
-import { settingsPage } from './views/settings.js';
+import { settingsPage, agentSettingsPage } from './views/settings.js';
 import { exchangeMeta, getExchange } from './exchanges/index.js';
 import { syncAccount, isSyncing } from './sync.js';
 import { classifyOrderType } from './fills.js';
@@ -2493,6 +2493,23 @@ async function settingsPageResponse(c, extra = {}) {
 
 route('GET', '/dashboard/settings', (ctx) => requireUser(ctx, (c) => settingsPageResponse(c)));
 
+function agentSettingsPageResponse(c, extra = {}) {
+  return html(page({
+    title: 'Agent 接入 | TradeLedger',
+    user: c.user,
+    body: agentSettingsPage({
+      user: c.user,
+      notice: c.query.notice || '',
+      error: c.query.error || '',
+      apiTokens: listApiTokens(),
+      apiAudit: listApiAudit(20),
+      ...extra,
+    }),
+  }));
+}
+
+route('GET', '/dashboard/settings/agent', (ctx) => requireUser(ctx, (c) => agentSettingsPageResponse(c)));
+
 route('POST', '/dashboard/settings/api-tokens', (ctx) => requireUser(ctx, async (c) => {
   const body = await readForm(c.req);
   const created = createApiToken({
@@ -2501,12 +2518,15 @@ route('POST', '/dashboard/settings/api-tokens', (ctx) => requireUser(ctx, async 
     expiresDays: val(body, 'expiresDays'),
   });
   // Token 明文只在这里出现一次，不跳转（避免进入 URL/历史记录）
-  return settingsPageResponse(c, { newToken: created });
+  return c.query.tab === 'agent'
+    ? agentSettingsPageResponse(c, { newToken: created })
+    : settingsPageResponse(c, { newToken: created });
 }));
 
 route('POST', '/dashboard/settings/api-tokens/:id/revoke', (ctx) => requireUser(ctx, (c) => {
   const ok = revokeApiToken(c.params.id);
-  return redirect('/dashboard/settings?notice=' + encodeURIComponent(ok ? 'Token 已撤销' : 'Token 不存在或已撤销'));
+  const back = c.query.tab === 'agent' ? '/dashboard/settings/agent' : '/dashboard/settings';
+  return redirect(back + '?notice=' + encodeURIComponent(ok ? 'Token 已撤销' : 'Token 不存在或已撤销'));
 }));
 
 route('POST', '/dashboard/settings', (ctx) => requireUser(ctx, async (c) => {

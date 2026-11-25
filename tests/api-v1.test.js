@@ -54,6 +54,27 @@ test('设置页：创建 Token 只展示一次，并可通过 Bearer 访问 /api
   assert.deepEqual(body.token.scopes, ['read']);
 });
 
+test('设置页：Agent 接入是独立页签，创建 Token 留在该页', async () => {
+  const session = auth.login({ remember: false });
+  const cookie = `tl_session=${session.token}`;
+  const pageRes = await handle(req('/dashboard/settings/agent', { headers: { cookie } }));
+  assert.equal(pageRes.status, 200);
+  const html = await pageRes.text();
+  assert.match(html, /Agent 接入（API \/ MCP）/);
+  assert.match(html, /action="\/dashboard\/settings\/api-tokens\?tab=agent"/);
+  assert.match(html, /href="\/dashboard\/settings\/agent"/);
+
+  const res = await handle(req('/dashboard/settings/api-tokens?tab=agent', {
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ name: '页签创建', scopes: 'read' }).toString(),
+  }));
+  assert.equal(res.status, 200);
+  const out = await res.text();
+  assert.match(out, /tl_[A-Za-z0-9_-]{20,}/);
+  assert.match(out, /Agent 接入/);
+});
+
 test('只读 Token：可查询交易、详情、统计、持仓、标签、笔记', async () => {
   const list = await handle(withToken(readToken, '/api/v1/trades?symbol=BTC%2FUSDT&limit=10'));
   assert.equal(list.status, 200);

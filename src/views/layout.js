@@ -32,6 +32,7 @@ const SETTINGS_NAV = [
   { href: '/dashboard/reconcile', label: '对账', key: 'reconcile' },
   { href: '/dashboard/tags', label: '标签', key: 'tags', tab: 'tags' },
   { href: '/dashboard/settings/ai', label: 'AI 模型', key: 'ai-settings', tab: 'ai' },
+  { href: '/dashboard/settings/agent', label: 'Agent 接入', key: 'agent', tab: 'agent' },
 ];
 
 /** 设置区二级导航 */
