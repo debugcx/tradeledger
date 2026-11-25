@@ -9,16 +9,16 @@ const dbmod = await import('../src/db.js');
 
 const versionsOf = (db) => db.prepare('SELECT version, name FROM schema_migrations ORDER BY version').all();
 
-test('全新库：记录 baseline + legacy-repair，schema_version 同步为 6', () => {
+test('全新库：记录 baseline + legacy-repair，schema_version 同步为 7', () => {
   const db = dbmod.openDb(':memory:');
   try {
     const versions = versionsOf(db);
-    assert.deepEqual(versions.map((r) => r.version), [1, 2, 3, 4, 5, 6]);
+    assert.deepEqual(versions.map((r) => r.version), [1, 2, 3, 4, 5, 6, 7]);
     assert.equal(versions[0].name, 'baseline');
     assert.equal(versions[1].name, 'legacy-repair');
     const meta = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
-    assert.equal(meta.value, '6');
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get().n, 6);
+    assert.equal(meta.value, '7');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get().n, 7);
   } finally {
     db.close();
   }
@@ -32,8 +32,8 @@ test('文件库重复打开：迁移记录不重复，schemaVersion() 可读', (
     const db = dbmod.openDb(file);
     dbmod.setDb(db);
     try {
-      assert.equal(versionsOf(db).length, 6);
-      assert.equal(dbmod.schemaVersion(), 6);
+      assert.equal(versionsOf(db).length, 7);
+      assert.equal(dbmod.schemaVersion(), 7);
     } finally {
       dbmod.closeDb();
     }
@@ -60,8 +60,8 @@ test('老库（只有 meta + 旧 accounts 表）自动补列并补齐迁移记�
     const cols = db.prepare('PRAGMA table_info(accounts)').all().map((c) => c.name);
     assert.ok(cols.includes('assets_only'));
     assert.ok(cols.includes('sync_done'));
-    assert.deepEqual(versionsOf(db).map((r) => r.version), [1, 2, 3, 4, 5, 6]);
-    assert.equal(db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get().value, '6');
+    assert.deepEqual(versionsOf(db).map((r) => r.version), [1, 2, 3, 4, 5, 6, 7]);
+    assert.equal(db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get().value, '7');
   } finally {
     db.close();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -89,7 +89,7 @@ test('v6：清理 v5 之后重新漏进 U 本位通道的币本位成交（BTCUS
       const symbols = db.prepare('SELECT symbol FROM trade_fills ORDER BY symbol').all().map((r) => r.symbol);
       // 正确的 dapi 成交（BTC/USD）保留，幽灵成交（BTCUSD/PERP）被清掉
       assert.deepEqual(symbols, ['BTC/USD']);
-      assert.equal(db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get().value, '6');
+      assert.equal(db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get().value, '7');
       assert.ok(versionsOf(db).some((r) => r.version === 6 && r.name === 'cleanup-usdm-coinm-leak'));
     } finally {
       db.close();

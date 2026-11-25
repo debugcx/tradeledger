@@ -85,6 +85,32 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at TEXT NOT NULL
 );
 
+-- Agent 接入用的 API Token：只存 SHA-256，明文仅在创建时展示一次。
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  hint TEXT NOT NULL,
+  scopes TEXT NOT NULL DEFAULT 'read',
+  created_at TEXT NOT NULL,
+  last_used_at TEXT,
+  expires_at TEXT,
+  revoked_at TEXT
+);
+
+-- Agent 调用审计：保留 30 天，设置页展示最近记录。
+CREATE TABLE IF NOT EXISTS api_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_id INTEGER,
+  method TEXT NOT NULL,
+  path TEXT NOT NULL,
+  status INTEGER NOT NULL,
+  ip TEXT,
+  ms INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_api_audit_created ON api_audit(created_at DESC);
+
 CREATE TABLE IF NOT EXISTS imports (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -570,7 +596,7 @@ function migrate(db) {
 let handle = null;
 
 /** 当前 schema 版本。新增增量迁移时 +1，并在 runMigrations 里登记。 */
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 function recordMigration(db, version, name) {
   db.prepare('INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
@@ -662,6 +688,12 @@ function runMigrations(db) {
     db.exec("DELETE FROM trades WHERE source = 'api' AND symbol LIKE '%/PERP%'");
     db.exec("DELETE FROM trade_fills WHERE symbol LIKE '%/PERP%'");
     recordMigration(db, 6, 'cleanup-usdm-coinm-leak');
+  }
+
+  // v7：Agent 接入（/api/v1 + MCP）的 Token 与审计表。表由 SCHEMA 的
+  // IF NOT EXISTS 建好，这里只记录版本，便于后续审计与升级。
+  if (!applied.has(7)) {
+    recordMigration(db, 7, 'api-tokens');
   }
 
   db.prepare(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)

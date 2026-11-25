@@ -11,7 +11,8 @@ import { escapeHtml, localInputToIso, uid, fmtNum, readFormDataLimited, readJson
 import * as auth from './auth.js';
 import * as store from './store.js';
 import * as backup from './backup.js';
-import { analyzeCachedLazy, filterTrades, localMonthKey, localDayStartUtc } from './stats.js';
+import { analyzeCachedLazy, analyze, filterTrades, localMonthKey, localDayStartUtc } from './stats.js';
+import { edgeScore } from './edge-score.js';
 import { renderMarkdown } from './markdown.js';
 import { aiSettingsPage } from './views/ai.js';
 import {
@@ -58,6 +59,10 @@ import { createReconcileAccumulator } from './reconcile.js';
 import { monthlyLedgerCache } from './ledger-cache.js';
 import { resolveClientIp, isLoopbackPeer } from './client-ip.js';
 import {
+  verifyApiToken, hasApiScope, checkApiAuthFailure, checkApiTokenRate,
+  recordApiAudit, listApiTokens, createApiToken, revokeApiToken, listApiAudit,
+} from './api-tokens.js';
+import {
   buildPeriodReview, reviewMarkdown, reportPrompt, formatWeek, isoWeekOf, shiftWeek,
   parsePeriod, periodRange, shiftMonth, monthOf, yearOf,
 } from './review.js';
@@ -75,6 +80,13 @@ const json = (data, status = 200, headers = {}) => new Response(JSON.stringify(d
   status,
   headers: { 'content-type': 'application/json; charset=utf-8', ...headers },
 });
+
+/* Agent API（/api/v1）：统一 { ok, ... } / { ok:false, error:{code,message} } 形状 */
+const agentJson = (data, status = 200, headers = {}) => json({ ok: status < 400, ...data }, status, headers);
+const agentError = (code, message, status = 400, headers = {}) => json({
+  ok: false,
+  error: { code, message },
+}, status, headers);
 
 const redirect = (location, status = 302, headers = {}) => new Response(null, {
   status,
@@ -186,7 +198,15 @@ const route = (method, pattern, handler, options = {}) => {
     keys.push(key);
     return '([^/]+)';
   }) + '$');
-  routes.push({ method, regex, keys, handler, public: Boolean(options.public) });
+  routes.push({
+    method,
+    regex,
+    keys,
+    handler,
+    public: Boolean(options.public),
+    // Agent API：'read' | 'write'；write 需要 Token 的 write scope
+    api: options.api || null,
+  });
 };
 
 function matchRoute(method, pathname) {
@@ -200,7 +220,7 @@ function matchRoute(method, pathname) {
     } catch {
       return null; // 非法百分号编码按 404 处理，而不是 500
     }
-    return { handler: r.handler, params, public: r.public };
+    return { handler: r.handler, params, public: r.public, api: r.api };
   }
   return null;
 }
@@ -2431,7 +2451,7 @@ route('POST', '/dashboard/notes/delete', (ctx) => requireUser(ctx, async (c) => 
  *  设置与数据
  * ========================================================= */
 
-route('GET', '/dashboard/settings', (ctx) => requireUser(ctx, async (c) => {
+async function settingsPageResponse(c, extra = {}) {
   const backupConfig = backup.getBackupConfig();
   let remote = null;
   let remoteError = '';
@@ -2457,6 +2477,8 @@ route('GET', '/dashboard/settings', (ctx) => requireUser(ctx, async (c) => {
       },
       notice: c.query.notice || '',
       error: c.query.error || '',
+      apiTokens: listApiTokens(),
+      apiAudit: listApiAudit(20),
       backup: {
         config: backupConfig,
         local: backup.listLocalBackups(),
@@ -2464,8 +2486,27 @@ route('GET', '/dashboard/settings', (ctx) => requireUser(ctx, async (c) => {
         remoteError,
         remoteRequested: c.query.remote === '1',
       },
+      ...extra,
     }),
   }));
+}
+
+route('GET', '/dashboard/settings', (ctx) => requireUser(ctx, (c) => settingsPageResponse(c)));
+
+route('POST', '/dashboard/settings/api-tokens', (ctx) => requireUser(ctx, async (c) => {
+  const body = await readForm(c.req);
+  const created = createApiToken({
+    name: val(body, 'name'),
+    scopes: val(body, 'scopes'),
+    expiresDays: val(body, 'expiresDays'),
+  });
+  // Token 明文只在这里出现一次，不跳转（避免进入 URL/历史记录）
+  return settingsPageResponse(c, { newToken: created });
+}));
+
+route('POST', '/dashboard/settings/api-tokens/:id/revoke', (ctx) => requireUser(ctx, (c) => {
+  const ok = revokeApiToken(c.params.id);
+  return redirect('/dashboard/settings?notice=' + encodeURIComponent(ok ? 'Token 已撤销' : 'Token 不存在或已撤销'));
 }));
 
 route('POST', '/dashboard/settings', (ctx) => requireUser(ctx, async (c) => {
@@ -2744,12 +2785,253 @@ route('GET', '/api/export', (ctx) => {
   });
 });
 
+/* =========================================================
+ *  Agent API（/api/v1）：Bearer Token，读写范围见 route 的 api 选项
+ * ========================================================= */
+
+function agentTradeFilters(query = {}) {
+  const out = {};
+  const aliases = {
+    accountId: 'account_id', account_id: 'account_id',
+    market: 'market', side: 'side', result: 'result', symbol: 'symbol',
+    orderType: 'orderType', order_type: 'orderType',
+    tag: 'tag', note: 'note', from: 'from', to: 'to', q: 'q', sort: 'sort',
+  };
+  for (const [key, target] of Object.entries(aliases)) {
+    if (query[key] !== undefined && query[key] !== '') out[target] = String(query[key]);
+  }
+  return out;
+}
+
+function agentActiveTrade(id) {
+  const trade = store.getTrade(Number(id));
+  if (!trade || trade.trashed_at) return null;
+  return trade;
+}
+
+async function agentJsonBody(ctx, maxBytes = 256 * 1024) {
+  try {
+    return await readJsonLimited(ctx.req, maxBytes, '请求体');
+  } catch (err) {
+    return { __error: err?.message || 'JSON 格式不正确' };
+  }
+}
+
+route('GET', '/api/v1/me', (ctx) => {
+  if (ctx.apiToken) {
+    return agentJson({
+      auth: 'token',
+      token: {
+        name: ctx.apiToken.name,
+        hint: ctx.apiToken.hint,
+        scopes: ctx.apiToken.scopes,
+        expires_at: ctx.apiToken.expires_at,
+      },
+    });
+  }
+  return agentJson({
+    auth: 'session',
+    user: { id: ctx.user.id, username: ctx.user.username, display_name: ctx.user.display_name },
+  });
+}, { api: 'read' });
+
+route('GET', '/api/v1/accounts', () => {
+  const accounts = store.listAccounts().map((a) => ({
+    id: a.id,
+    exchange: a.exchange,
+    name: a.name,
+    is_demo: Boolean(a.is_demo),
+    assets_only: Boolean(a.assets_only),
+    last_sync_at: a.last_sync_at,
+    last_sync_status: a.last_sync_status,
+    lookback_days: a.lookback_days,
+  }));
+  return agentJson({ count: accounts.length, accounts });
+}, { api: 'read' });
+
+route('GET', '/api/v1/trades', (ctx) => {
+  const filters = agentTradeFilters(ctx.query);
+  const limit = Math.min(Math.max(Number(ctx.query.limit) || 50, 1), 200);
+  const offset = Math.max(Number(ctx.query.offset) || 0, 0);
+  const count = store.countTradesFiltered(filters);
+  const trades = store.listTradesPage(filters, { limit, offset });
+  return agentJson({ count, limit, offset, trades });
+}, { api: 'read' });
+
+route('GET', '/api/v1/trades/:id', (ctx) => {
+  const trade = agentActiveTrade(ctx.params.id);
+  if (!trade) return agentError('not_found', '交易不存在或在垃圾箱里', 404);
+  const fillExchange = trade.source === 'csv' ? 'csv' : trade.account_exchange;
+  let fills = store.listTradeFills(trade.account_id, trade.symbol, { exchange: fillExchange });
+  if (!fills.length) fills = store.listTradeFills(trade.account_id, trade.symbol);
+  const total = fills.length;
+  const page = fills.slice(0, 500).map((f) => ({
+    ...f,
+    time_iso: new Date(Number(f.time)).toISOString(),
+  }));
+  return agentJson({
+    trade,
+    fills: page,
+    fills_total: total,
+    fills_truncated: total > page.length,
+  });
+}, { api: 'read' });
+
+route('GET', '/api/v1/summary', (ctx) => {
+  const filters = agentTradeFilters(ctx.query);
+  if (!['all', 'futures', 'spot'].includes(filters.market)) filters.market = 'all';
+  const stats = analyze(filterTrades(store.listTrades(), filters));
+  const daily = stats.daily.slice(-180);
+  return agentJson({
+    filters,
+    totals: {
+      trades: stats.total,
+      wins: stats.wins,
+      losses: stats.losses,
+      win_rate: stats.winRate,
+      pnl: stats.totalPnl,
+      expectancy: stats.expectancy,
+      avg_win: stats.avgWin,
+      avg_loss: stats.avgLoss,
+      profit_factor: stats.behavior.profitFactor,
+      max_drawdown: stats.drawdown.maxDrawdown,
+      max_drawdown_pct: stats.drawdown.maxDrawdownPct,
+      avg_duration_ms: stats.avgDuration,
+      active_days: stats.activeDays,
+    },
+    long: { count: stats.longs.count, win_rate: stats.longs.winRate, pnl: stats.longs.pnl },
+    short: { count: stats.shorts.count, win_rate: stats.shorts.winRate, pnl: stats.shorts.pnl },
+    funding: stats.funding,
+    fees: stats.fees,
+    top_symbols: [...stats.symbols].sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl)).slice(0, 20),
+    top_tags: stats.tagStats.slice(0, 20),
+    daily,
+    daily_truncated: stats.daily.length > daily.length,
+    note_coverage: {
+      noted: stats.noteCoverage.noted,
+      total: stats.noteCoverage.total,
+      ratio: stats.noteCoverage.ratio,
+    },
+    edge: edgeScore(stats),
+  });
+}, { api: 'read' });
+
+route('GET', '/api/v1/positions', () => {
+  const positions = store.listPositions();
+  const unrealized = positions.reduce((sum, p) => sum + (Number(p.unrealized) || 0), 0);
+  return agentJson({ count: positions.length, unrealized, positions });
+}, { api: 'read' });
+
+route('GET', '/api/v1/tags', () => {
+  return agentJson({ tags: store.listTagsWithCounts() });
+}, { api: 'read' });
+
+route('GET', '/api/v1/notes', (ctx) => {
+  const limit = Math.min(Math.max(Number(ctx.query.limit) || 50, 1), 200);
+  const notes = store.listNotes({
+    category: ctx.query.category || null,
+    subject: ctx.query.subject || null,
+    accountId: ctx.query.accountId ? Number(ctx.query.accountId) : null,
+    q: ctx.query.q || null,
+  });
+  return agentJson({ count: notes.length, notes: notes.slice(0, limit) });
+}, { api: 'read' });
+
+route('GET', '/api/v1/missed', (ctx) => {
+  const limit = Math.min(Math.max(Number(ctx.query.limit) || 100, 1), 500);
+  const missed = store.listMissedTrades({ limit });
+  return agentJson({ count: missed.length, missed });
+}, { api: 'read' });
+
+route('PATCH', '/api/v1/trades/:id', async (ctx) => {
+  const trade = agentActiveTrade(ctx.params.id);
+  if (!trade) return agentError('not_found', '交易不存在或在垃圾箱里', 404);
+  const body = await agentJsonBody(ctx);
+  if (body.__error) return agentError('invalid_json', body.__error, 400);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return agentError('invalid_json', '请求体必须是 JSON 对象', 400);
+  }
+  const hasNote = Object.prototype.hasOwnProperty.call(body, 'note');
+  const hasTags = Object.prototype.hasOwnProperty.call(body, 'tags');
+  if (!hasNote && !hasTags) return agentError('bad_request', '至少提供 note 或 tags', 400);
+  if (hasNote) {
+    if (typeof body.note !== 'string') return agentError('invalid_note', 'note 必须是字符串', 400);
+    if (body.note.length > 100_000) return agentError('invalid_note', 'note 过长（上限 100000 字）', 400);
+    store.setTradeNote(trade.id, body.note);
+  }
+  if (hasTags) {
+    if (!Array.isArray(body.tags)) return agentError('invalid_tags', 'tags 必须是字符串数组', 400);
+    const names = [...new Set(body.tags.map((t) => String(t || '').trim()).filter(Boolean))];
+    if (names.length > 20) return agentError('invalid_tags', '标签最多 20 个', 400);
+    if (names.some((n) => n.length > 40)) return agentError('invalid_tags', '单个标签不能超过 40 字', 400);
+    store.setTradeTags(trade.id, names);
+  }
+  return agentJson({ trade: store.getTrade(trade.id) });
+}, { api: 'write' });
+
+route('POST', '/api/v1/trades/:id/tags/toggle', async (ctx) => {
+  const trade = agentActiveTrade(ctx.params.id);
+  if (!trade) return agentError('not_found', '交易不存在或在垃圾箱里', 404);
+  const body = await agentJsonBody(ctx);
+  if (body.__error) return agentError('invalid_json', body.__error, 400);
+  const tag = String(body?.tag || '').trim();
+  if (!tag) return agentError('invalid_tag', 'tag 不能为空', 400);
+  if (tag.length > 40) return agentError('invalid_tag', '标签不能超过 40 字', 400);
+  const result = store.toggleTradeTag(trade.id, tag);
+  return agentJson({ tag: result.tag.name, attached: result.attached });
+}, { api: 'write' });
+
+route('POST', '/api/v1/positions/note', async (ctx) => {
+  const body = await agentJsonBody(ctx);
+  if (body.__error) return agentError('invalid_json', body.__error, 400);
+  const accountId = Number(body?.accountId || body?.account_id);
+  const symbol = String(body?.symbol || '').trim();
+  const side = body?.side === 'short' ? 'short' : 'long';
+  if (!accountId || !symbol) return agentError('bad_request', 'accountId 与 symbol 必填', 400);
+  if (!store.getAccount(accountId)) return agentError('not_found', '账户不存在', 404);
+  if (body?.note !== undefined && typeof body.note !== 'string') {
+    return agentError('invalid_note', 'note 必须是字符串', 400);
+  }
+  if (typeof body?.note === 'string' && body.note.length > 2000) {
+    return agentError('invalid_note', 'note 过长（上限 2000 字）', 400);
+  }
+  const note = store.setPositionNote(accountId, symbol, side, body?.note || '');
+  return agentJson({ note });
+}, { api: 'write' });
+
 route('GET', '/api/docs', (ctx) => html(page({
   title: 'API 文档 | TradeLedger',
   user: ctx.user,
   body: `<div class="container narrow prose">
     <h1>API 文档</h1>
-    <p>所有接口都需要登录后的会话 Cookie。</p>
+    <p><b>Agent 接入（推荐）：</b>在「设置 → Agent 接入」创建 Token，用
+      <code>Authorization: Bearer tl_...</code> 调用 <code>/api/v1/*</code>。
+      Token 只对 v1 生效，不能访问页面、旧接口或账户密钥；支持只读 / 读写两种权限。</p>
+    <pre><code>curl -H "Authorization: Bearer tl_xxx" https://你的地址/api/v1/trades?limit=20
+curl -X PATCH -H "Authorization: Bearer tl_xxx" -H "Content-Type: application/json" \\
+  -d '{"note":"复盘内容","tags":["计划内","突破"]}' https://你的地址/api/v1/trades/123</code></pre>
+    <p>MCP 桥接（零依赖）：<code>TRADELEDGER_BASE_URL=https://你的地址 \\
+      TRADELEDGER_API_TOKEN=tl_xxx node scripts/mcp-server.mjs</code>，
+      在 MCP 客户端里把 command 配成 <code>node</code>、args 指向该脚本即可。
+      工具：trades_search / trade_get / ledger_summary / positions_list / accounts_list /
+      tags_list / notes_search / missed_trades_list / trade_note_set / trade_tags_set /
+      trade_tag_toggle / position_note_set。</p>
+    <table class="table"><thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead><tbody>
+      <tr><td>GET</td><td>/api/v1/me</td><td>当前 Token 的权限与有效期</td></tr>
+      <tr><td>GET</td><td>/api/v1/accounts</td><td>账户列表（不含密钥）</td></tr>
+      <tr><td>GET</td><td>/api/v1/trades</td><td>交易查询；accountId/market/side/result/symbol/orderType/tag/note/from/to/q/sort/limit/offset</td></tr>
+      <tr><td>GET</td><td>/api/v1/trades/:id</td><td>单笔交易 + 标签 + 已持久化成交（最多 500 条）</td></tr>
+      <tr><td>GET</td><td>/api/v1/summary</td><td>汇总统计（支持 accountId/market/from/to）与优势分</td></tr>
+      <tr><td>GET</td><td>/api/v1/positions</td><td>实时持仓（含未实现盈亏）</td></tr>
+      <tr><td>GET</td><td>/api/v1/tags</td><td>标签及使用次数</td></tr>
+      <tr><td>GET</td><td>/api/v1/notes</td><td>独立笔记；category/subject/q/limit</td></tr>
+      <tr><td>GET</td><td>/api/v1/missed</td><td>错过机会记录</td></tr>
+      <tr><td>PATCH</td><td>/api/v1/trades/:id</td><td>写备注 / 替换标签：{note?, tags?}（需 write）</td></tr>
+      <tr><td>POST</td><td>/api/v1/trades/:id/tags/toggle</td><td>添加或移除一个标签：{tag}（需 write）</td></tr>
+      <tr><td>POST</td><td>/api/v1/positions/note</td><td>写持仓笔记：{accountId,symbol,side,note}（需 write）</td></tr>
+    </tbody></table>
+    <h2>旧版接口（会话 Cookie）</h2>
+    <p>以下接口需要登录后的会话 Cookie，供应用内页面与脚本使用；Agent 请优先使用上面的 v1。</p>
     <table class="table"><thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead><tbody>
       <tr><td>GET</td><td>/api/health</td><td>健康检查（公开）</td></tr>
       <tr><td>GET</td><td>/api/summary</td><td>汇总统计，含周×小时矩阵</td></tr>
@@ -2788,10 +3070,38 @@ route('GET', '/api/docs', (ctx) => html(page({
 export async function handle(request) {
   const url = new URL(request.url);
   const pathname = url.pathname;
+  const isAgentApi = pathname.startsWith('/api/v1/');
+  const ip = clientIp(request);
+  let apiToken = null;
+
+  // Agent API：先认 Bearer Token。无效/过期/撤销直接 401，并做失败限流。
+  if (isAgentApi) {
+    const check = verifyApiToken(request);
+    if (check.error) {
+      const limit = checkApiAuthFailure(ip);
+      if (!limit.ok) {
+        return agentError('rate_limited', '认证失败次数过多，请稍后再试', 429, {
+          'retry-after': String(limit.retryAfterSec),
+        });
+      }
+      return agentError('unauthorized', 'Token 无效、已撤销或已过期', 401);
+    }
+    apiToken = check.token;
+    if (apiToken) {
+      const limit = checkApiTokenRate(apiToken.id);
+      if (!limit.ok) {
+        return agentError('rate_limited', '调用过于频繁，请稍后再试', 429, {
+          'retry-after': String(limit.retryAfterSec),
+        });
+      }
+    }
+  }
+
   // CSRF 第二层：浏览器发出的跨站写请求会带 Origin 头，与宿主不一致直接拒绝。
   // 与 SameSite=Lax 叠加。反向代理/内嵌浏览器可能改写 Host，此时浏览器给出的
   // Sec-Fetch-Site: same-origin 作为同源兜底（跨站页面无法伪造该值）。
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
+  // Bearer Token 请求不依赖 Cookie，不受浏览器跨站规则影响，跳过该校验。
+  if (!apiToken && !['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
     const origin = request.headers.get('origin');
     const host = request.headers.get('host') || '';
     const secFetchSite = request.headers.get('sec-fetch-site') || '';
@@ -2805,6 +3115,43 @@ export async function handle(request) {
     const match = matchRoute(method, pathname);
     if (match) {
       const ctx = ctxOf(request, match.params);
+      ctx.apiToken = apiToken;
+      ctx.agentApi = isAgentApi;
+      if (match.api) {
+        // Agent API：Token 或登录会话二选一；Token 的写接口额外要求 write scope
+        if (!ctx.user && !apiToken) {
+          return agentError('unauthorized', '需要 Bearer Token 或登录会话', 401);
+        }
+        if (!ctx.user && apiToken && !hasApiScope(apiToken, match.api)) {
+          return agentError('forbidden', '该 Token 只有读取权限，不能写入', 403);
+        }
+        const started = Date.now();
+        try {
+          const response = await match.handler(ctx);
+          recordApiAudit({
+            tokenId: apiToken ? apiToken.id : null,
+            method: request.method,
+            path: pathname,
+            status: response.status,
+            ip,
+            ms: Date.now() - started,
+          });
+          if (request.method === 'HEAD' && response.body) {
+            return new Response(null, { status: response.status, headers: response.headers });
+          }
+          return response;
+        } catch (err) {
+          recordApiAudit({
+            tokenId: apiToken ? apiToken.id : null,
+            method: request.method,
+            path: pathname,
+            status: 500,
+            ip,
+            ms: Date.now() - started,
+          });
+          throw err;
+        }
+      }
       // 默认拒绝：未显式标记 public 的路由一律要求登录。
       // 历史上靠每个 handler 自己检查，漏写一处就会暴露；这里兜底。
       if (!match.public && !ctx.user) {
@@ -2818,6 +3165,7 @@ export async function handle(request) {
       }
       return response;
     }
+    if (isAgentApi) return agentError('not_found', '接口不存在', 404);
     if (request.method === 'GET') {
       return html(page({
         title: '404 | TradeLedger',
@@ -2829,6 +3177,9 @@ export async function handle(request) {
   } catch (err) {
     // 详细错误只写服务端日志；响应体不回传内部消息（可能含路径/SQL/凭据线索）。
     console.error('[error]', request.method, pathname, err);
+    if (pathname.startsWith('/api/v1/')) {
+      return agentError('internal_error', '服务器内部错误', 500);
+    }
     if (pathname.startsWith('/api/')) {
       return json({ error: 'internal_error' }, 500);
     }

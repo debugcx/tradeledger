@@ -123,6 +123,56 @@ npm run sync              # CLI：把所有真实账户拉到没有更多历史
 - **周报 / AI 复盘**：按 ISO 周生成指标摘要与复盘问题；可配置 OpenAI 兼容接口 /
   Anthropic / Ollama，让模型基于周报和笔记生成复盘；也能只导出 Markdown/JSON 给外部模型。
 - **设置**：导出全量 JSON / 交易 CSV、清除演示数据、清空全部数据。
+- **Agent 接入**：独立的 `/api/v1` REST 接口 + 零依赖 MCP 桥接，Token 分「只读 / 读写」，
+  读写仅限交易备注、标签与持仓笔记；不触碰账户密钥、同步与删除操作。
+
+## Agent 接入（REST API + MCP）
+
+TradeLedger 提供 `/api/v1` REST 接口和 `scripts/mcp-server.mjs` MCP 桥接，供外部 Agent
+查询台账、写复盘/标签。它与登录 Cookie 完全隔离：
+
+- 在**设置 → Agent 接入**创建 Token，权限选「只读」或「读写」，可设有效期；
+  明文只显示一次，服务端只保存 SHA-256。
+- Token 只对 `/api/v1/*` 生效，不能访问页面、旧接口、账户密钥，也不能触发同步；
+  「读写」也只允许写交易备注、标签和持仓笔记。
+- 所有调用写入审计（保留 30 天，设置页可查），并按 Token/IP 限流；撤销后立即失效。
+
+```bash
+# 查询交易
+curl -H "Authorization: Bearer tl_xxx" "http://127.0.0.1:8790/api/v1/trades?limit=20"
+
+# 写复盘与标签
+curl -X PATCH -H "Authorization: Bearer tl_xxx" -H "Content-Type: application/json" \
+  -d '{"note":"按计划减仓","tags":["计划内"]}' \
+  "http://127.0.0.1:8790/api/v1/trades/123"
+```
+
+完整端点与请求参数见应用内 `/api/docs`。
+
+### MCP 桥接
+
+`scripts/mcp-server.mjs` 用 stdio 把 `/api/v1` 包装成 MCP 工具（零依赖，Node ≥ 24）：
+
+```json
+{
+  "mcpServers": {
+    "tradeledger": {
+      "command": "node",
+      "args": ["F:/zcode/tradeledger/scripts/mcp-server.mjs"],
+      "env": {
+        "TRADELEDGER_BASE_URL": "http://10.126.126.50:8790",
+        "TRADELEDGER_API_TOKEN": "tl_xxx"
+      }
+    }
+  }
+}
+```
+
+工具：`trades_search`、`trade_get`、`ledger_summary`、`positions_list`、`accounts_list`、
+`tags_list`、`notes_search`、`missed_trades_list`、`trade_note_set`、`trade_tags_set`、
+`trade_tag_toggle`、`position_note_set`。
+
+> 公网直接暴露时 Token 会以明文经过网络：建议套 HTTPS 反向代理，并在防火墙限制来源 IP。
 
 ## 目录
 
@@ -145,6 +195,8 @@ src/prices.js               USD 估值（稳定币 + OKX/Binance 公共行情）
 src/wallets/                钱包索引器（DeBank / Zerion）与链名归一化
 src/exchanges/             六家交易所只读适配器 + 成交配对 + 资金费 + 资产桶
 src/reconcile.js           对账（纯函数）
+src/api-tokens.js          Agent API Token（哈希存储 / 审计 / 限流）
+scripts/mcp-server.mjs     MCP 桥接（stdio，零依赖）
 src/review.js              周报 / AI 上下文（纯函数）
 src/llm.js                 LLM 配置与调用（OpenAI 兼容 / Anthropic / Ollama）
 src/markdown.js            Markdown 渲染与摘要（纯函数）

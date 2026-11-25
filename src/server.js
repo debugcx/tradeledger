@@ -28,6 +28,7 @@ const { refreshLive } = await import('./live.js');
 const { startAssetWorker, stopAssetWorker, isAssetBusy } = await import('./asset-worker.js');
 const { startBackupWorker, stopBackupWorker, isBackupBusy } = await import('./backup-worker.js');
 const { finishPendingRestore } = await import('./backup.js');
+const { startApiAuditCleanup } = await import('./api-tokens.js');
 
 if (restoreResult?.ok) {
   finishPendingRestore();
@@ -197,6 +198,10 @@ server.listen(config.port, config.host, () => {
 
   // 账户加进来就自动回溯历史；关掉页面也会继续
   startSyncWorker();
+  // Agent 调用审计只保留 30 天：启动时清一次，之后每天一次
+  // 必须放在 seed 之后：这里会打开数据库并创建文件，过早执行会让
+  // 「首次启动 + SEED_DEMO=1」的种子判断（文件不存在）失效。
+  startApiAuditCleanup();
   // 本地快照 + WebDAV 自动备份
   startBackupWorker();
   // 资产总览：交易所账内资产 + 链上钱包（按各自 TTL 刷新）

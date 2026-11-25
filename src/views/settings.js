@@ -142,7 +142,87 @@ function backupSection({ config = {}, local = [], remote = null, remoteError = '
   </section>`;
 }
 
-export function settingsPage({ user, overview, dbBytes, seededAt, recentImports = [], notice, error, backup = {}, net = {} }) {
+function agentApiSection({ tokens = [], audit = [], newToken = null }) {
+  const now = Date.now();
+  const statusOf = (t) => {
+    if (t.revoked_at) return { label: '已撤销', cls: 'muted' };
+    if (t.expires_at && Date.parse(t.expires_at) <= now) return { label: '已过期', cls: 'neg' };
+    return { label: '有效', cls: 'pos' };
+  };
+  const rows = tokens.map((t) => {
+    const st = statusOf(t);
+    const scope = String(t.scopes || '').includes('write') ? '读写' : '只读';
+    return `<tr>
+      <td class="small"><b>${e(t.name)}</b></td>
+      <td class="small"><code>${e(t.hint)}</code></td>
+      <td class="small">${scope}</td>
+      <td class="small">${e(fmtDateTime(t.created_at))}</td>
+      <td class="small">${t.last_used_at ? e(fmtDateTime(t.last_used_at)) : '—'}</td>
+      <td class="small">${t.expires_at ? e(fmtDateTime(t.expires_at)) : '永久'}</td>
+      <td class="small ${st.cls}">${st.label}</td>
+      <td class="row-actions">${t.revoked_at ? '' : `<form method="post" action="/dashboard/settings/api-tokens/${Number(t.id)}/revoke" class="inline" data-confirm="撤销后使用该 Token 的 Agent 会立即失效，继续吗？">
+        <button class="btn btn-ghost small danger" type="submit">撤销</button>
+      </form>`}</td>
+    </tr>`;
+  }).join('');
+
+  const auditRows = audit.map((a) => `<tr>
+    <td class="small">${e(fmtDateTime(a.created_at))}</td>
+    <td class="small"><code>${e(a.method)} ${e(a.path)}</code></td>
+    <td class="small ${Number(a.status) >= 400 ? 'neg' : 'pos'}">${fmtNum(a.status)}</td>
+    <td class="small">${e(a.token_name || '登录会话')}</td>
+    <td class="small muted">${e(a.ip || '—')}</td>
+    <td class="small muted">${fmtNum(a.ms)}ms</td>
+  </tr>`).join('');
+
+  return `<section class="panel" id="agent-api">
+    <div class="panel-head"><h2>Agent 接入（API / MCP）</h2><span class="muted small">/api/v1 · Bearer Token</span></div>
+    <p class="muted small" style="margin:0 0 10px">
+      给外部 Agent 用的独立令牌：只能访问 <code>/api/v1/*</code>（交易查询、统计、持仓、笔记与标签），
+      不能打开页面、读取账户密钥或触发同步。「读写」也只允许写备注、标签和持仓笔记。
+      Token 明文<b>只显示一次</b>，服务端只保存哈希；公网使用请务必走 HTTPS，并在防火墙限制来源 IP。
+    </p>
+    ${newToken ? `<div class="alert alert-info">
+      <b>新 Token 已创建，只显示这一次：</b>
+      <pre style="margin:8px 0;white-space:pre-wrap;word-break:break-all"><code>${e(newToken.token)}</code></pre>
+      <p class="small" style="margin:0">复制到 Agent 配置后刷新本页即不可再查看；遗失请撤销后重新创建。</p>
+    </div>` : ''}
+    <form method="post" action="/dashboard/settings/api-tokens" class="form grid-form">
+      <label class="field"><span>名称</span><input name="name" maxlength="60" placeholder="ZCode / Claude Desktop"></label>
+      <label class="field"><span>权限</span>
+        <select name="scopes">
+          <option value="read">只读（查询）</option>
+          <option value="write">读写（查询 + 备注/标签）</option>
+        </select>
+      </label>
+      <label class="field"><span>有效期</span>
+        <select name="expiresDays">
+          <option value="">永久</option>
+          <option value="30">30 天</option>
+          <option value="90">90 天</option>
+          <option value="365">365 天</option>
+        </select>
+      </label>
+      <div class="form-actions wide"><button class="btn btn-primary" type="submit">创建 Token</button></div>
+    </form>
+    ${rows ? `<table class="table" style="margin-top:12px">
+      <thead><tr><th>名称</th><th>提示</th><th>权限</th><th>创建</th><th>最近使用</th><th>到期</th><th>状态</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>` : '<p class="muted small">还没有 Token。创建后可在 Agent 的 MCP 配置或脚本里使用。</p>'}
+    <p class="muted small" style="margin:12px 0 0">
+      接口列表与 curl 示例见 <a href="/api/docs">/api/docs</a>；MCP 桥接脚本为仓库内
+      <code>scripts/mcp-server.mjs</code>，环境变量 <code>TRADELEDGER_BASE_URL</code> 与
+      <code>TRADELEDGER_API_TOKEN</code>。
+    </p>
+    ${auditRows ? `<div class="panel-head" style="margin-top:16px"><h2>最近调用</h2><span class="muted small">保留 30 天 · 最近 20 条</span></div>
+    <table class="table">
+      <thead><tr><th>时间</th><th>请求</th><th>状态</th><th>Token</th><th>IP</th><th>耗时</th></tr></thead>
+      <tbody>${auditRows}</tbody>
+    </table>` : ''}
+  </section>`;
+}
+
+export function settingsPage({ user, overview, dbBytes, seededAt, recentImports = [], notice, error, backup = {}, net = {}, apiTokens = [], apiAudit = [], newToken = null }) {
   const demoBox = overview.demoAccounts
     ? `<div class="danger-row">
         <div><b>清除演示数据</b><p class="muted small">删除 ${overview.demoAccounts} 个演示账户及其全部交易，保留真实交易、笔记和标签。</p></div>
@@ -242,6 +322,8 @@ export function settingsPage({ user, overview, dbBytes, seededAt, recentImports 
         </tr>`).join('')}</tbody>
       </table>` : '<p class="muted small">还没有导入记录。CSV 导入在<a href="/dashboard/import">数据导入</a>页完成。</p>'}
     </section>
+
+    ${agentApiSection({ tokens: apiTokens, audit: apiAudit, newToken })}
 
     <section class="panel">
       <div class="panel-head"><h2>关于</h2></div>
