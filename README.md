@@ -149,9 +149,25 @@ curl -X PATCH -H "Authorization: Bearer tl_xxx" -H "Content-Type: application/js
 
 完整端点与请求参数见应用内 `/api/docs`。
 
-### MCP 桥接
+### MCP（服务端 HTTP，推荐）
 
-`scripts/mcp-server.mjs` 用 stdio 把 `/api/v1` 包装成 MCP 工具（零依赖，Node ≥ 24）：
+MCP 工具实现在 TradeLedger 进程内，客户端直接连 `POST /mcp`（Streamable HTTP，无状态），
+不需要在 Agent 机器上安装脚本；Agent 所在电脑关机也不影响其他客户端。
+
+```json
+{
+  "mcpServers": {
+    "tradeledger": {
+      "type": "http",
+      "url": "http://10.126.126.50:8790/mcp",
+      "headers": { "Authorization": "Bearer tl_xxx" }
+    }
+  }
+}
+```
+
+只有 stdio 的客户端可以用仓库里的薄转发器 `scripts/mcp-server.mjs`（它只是把消息
+转发到 `/mcp`）：
 
 ```json
 {
@@ -196,7 +212,8 @@ src/wallets/                钱包索引器（DeBank / Zerion）与链名归一�
 src/exchanges/             六家交易所只读适配器 + 成交配对 + 资金费 + 资产桶
 src/reconcile.js           对账（纯函数）
 src/api-tokens.js          Agent API Token（哈希存储 / 审计 / 限流）
-scripts/mcp-server.mjs     MCP 桥接（stdio，零依赖）
+src/mcp.js                 MCP 工具目录与 JSON-RPC 分发（服务端 /mcp）
+scripts/mcp-server.mjs     stdio → /mcp 转发器（仅 stdio 客户端需要）
 src/review.js              周报 / AI 上下文（纯函数）
 src/llm.js                 LLM 配置与调用（OpenAI 兼容 / Anthropic / Ollama）
 src/markdown.js            Markdown 渲染与摘要（纯函数）

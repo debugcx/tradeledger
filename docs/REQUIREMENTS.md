@@ -175,7 +175,8 @@ Wayback 存档重建，但存在三个结构性问题：
   新建/删除交易、修改账户、读取密钥、触发同步。
 - Token 只存 SHA-256，明文创建时展示一次；支持有效期与撤销。
 - 每次调用写入 `api_audit`（保留 30 天），失败认证与调用频率均有内存限流。
-- `scripts/mcp-server.mjs` 提供零依赖 stdio MCP 桥接，工具与 REST 一一对应。
+- 服务端 `POST /mcp` 提供无状态 Streamable HTTP MCP，工具与 REST 一一对应；
+  `scripts/mcp-server.mjs` 仅作为 stdio 客户端的转发器。
 
 ---
 

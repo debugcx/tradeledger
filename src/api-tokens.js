@@ -112,6 +112,8 @@ export function verifyApiToken(request) {
       hint: row.hint,
       scopes: parseApiScopes(row.scopes),
       expires_at: row.expires_at || null,
+      // 仅供服务端内部复用（/mcp 转发到 /api/v1）；不要在响应里序列化
+      rawToken: raw,
     },
     error: null,
   };

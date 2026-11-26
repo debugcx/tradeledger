@@ -7,36 +7,83 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const requests = [];
+const TOOL_NAMES = [
+  'trades_search', 'trade_get', 'ledger_summary', 'positions_list', 'accounts_list',
+  'tags_list', 'notes_search', 'missed_trades_list', 'trade_note_set', 'trade_tags_set',
+  'trade_tag_toggle', 'position_note_set',
+];
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://mock');
   let body = '';
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
-    requests.push({ method: req.method, path: url.pathname, query: url.search, body });
+    requests.push({ method: req.method, path: url.pathname, body });
     res.setHeader('content-type', 'application/json');
-    if (req.method === 'GET' && url.pathname === '/api/v1/positions') {
-      res.statusCode = 401;
-      res.end(JSON.stringify({ ok: false, error: { code: 'unauthorized', message: 'Token 无效' } }));
+    if (req.method !== 'POST' || url.pathname !== '/mcp') {
+      res.statusCode = 404;
+      res.end('{}');
       return;
     }
-    if (req.method === 'GET' && url.pathname === '/api/v1/trades') {
-      res.end(JSON.stringify({ ok: true, count: 1, trades: [{ id: 7, symbol: 'BTC/USDT' }] }));
+    let msg;
+    try { msg = JSON.parse(body); } catch {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'bad json' } }));
       return;
     }
-    if (req.method === 'PATCH' && url.pathname === '/api/v1/trades/7') {
-      const parsed = JSON.parse(body || '{}');
-      res.end(JSON.stringify({ ok: true, trade: { id: 7, note: parsed.note } }));
+    const send = (obj) => res.end(JSON.stringify(obj));
+    if (msg.method === 'notifications/initialized') {
+      res.statusCode = 202;
+      res.end();
       return;
     }
-    res.end(JSON.stringify({ ok: true }));
+    if (msg.method === 'initialize') {
+      return send({
+        jsonrpc: '2.0', id: msg.id,
+        result: {
+          protocolVersion: msg.params?.protocolVersion || '2025-03-26',
+          capabilities: { tools: { listChanged: false } },
+          serverInfo: { name: 'tradeledger', version: 'test' },
+        },
+      });
+    }
+    if (msg.method === 'tools/list') {
+      return send({
+        jsonrpc: '2.0', id: msg.id,
+        result: { tools: TOOL_NAMES.map((name) => ({ name, description: '', inputSchema: { type: 'object' } })) },
+      });
+    }
+    if (msg.method === 'tools/call') {
+      const name = msg.params?.name;
+      const args = msg.params?.arguments || {};
+      if (name === 'trades_search') {
+        return send({
+          jsonrpc: '2.0', id: msg.id,
+          result: { content: [{ type: 'text', text: JSON.stringify({ ok: true, count: 1, trades: [{ id: 7, symbol: args.symbol || 'BTC/USDT' }] }) }] },
+        });
+      }
+      if (name === 'trade_note_set') {
+        return send({
+          jsonrpc: '2.0', id: msg.id,
+          result: { content: [{ type: 'text', text: JSON.stringify({ ok: true, trade: { id: args.id, note: args.note } }) }] },
+        });
+      }
+      if (name === 'positions_list') {
+        return send({
+          jsonrpc: '2.0', id: msg.id,
+          result: { content: [{ type: 'text', text: '调用失败：Token 无效' }], isError: true },
+        });
+      }
+      return send({ jsonrpc: '2.0', id: msg.id, error: { code: -32602, message: '未知工具' } });
+    }
+    return send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'unknown method' } });
   });
 });
 
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 
-function runMcp(messages) {
+function runStdio(messages) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'mcp-server.mjs')], {
       cwd: ROOT,
@@ -59,11 +106,9 @@ function runMcp(messages) {
     child.on('error', (err) => { clearTimeout(timer); reject(err); });
     child.on('close', (code) => {
       clearTimeout(timer);
-      const lines = stdout.split('\n').map((s) => s.trim()).filter(Boolean);
-      const parsed = [];
-      for (const line of lines) {
-        try { parsed.push(JSON.parse(line)); } catch { /* 忽略非协议输出 */ }
-      }
+      const parsed = stdout.split('\n').map((s) => s.trim()).filter(Boolean).flatMap((line) => {
+        try { return [JSON.parse(line)]; } catch { return []; }
+      });
       resolve({ code, parsed, stderr });
     });
     for (const message of messages) child.stdin.write(`${JSON.stringify(message)}\n`);
@@ -71,9 +116,9 @@ function runMcp(messages) {
   });
 }
 
-test('MCP：initialize / tools/list / tools/call 与错误处理', async () => {
-  const { code, parsed, stderr } = await runMcp([
-    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } },
+test('stdio 转发器：initialize / tools/call / 错误都透传到 /mcp', async () => {
+  const { code, parsed, stderr } = await runStdio([
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } },
     { jsonrpc: '2.0', method: 'notifications/initialized' },
     { jsonrpc: '2.0', id: 2, method: 'tools/list' },
     { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'trades_search', arguments: { symbol: 'BTC/USDT', limit: 5 } } },
@@ -85,31 +130,21 @@ test('MCP：initialize / tools/list / tools/call 与错误处理', async () => {
   const byId = new Map(parsed.map((m) => [m.id, m]));
 
   assert.equal(byId.get(1).result.serverInfo.name, 'tradeledger');
-  assert.equal(byId.get(1).result.capabilities.tools.listChanged, false);
-
-  const tools = byId.get(2).result.tools;
-  const names = tools.map((t) => t.name);
-  for (const name of [
-    'trades_search', 'trade_get', 'ledger_summary', 'positions_list', 'accounts_list',
-    'tags_list', 'notes_search', 'missed_trades_list', 'trade_note_set', 'trade_tags_set',
-    'trade_tag_toggle', 'position_note_set',
-  ]) {
-    assert.ok(names.includes(name), `缺少工具 ${name}`);
-  }
+  assert.equal(byId.get(2).result.tools.length, 12);
 
   const search = JSON.parse(byId.get(3).result.content[0].text);
   assert.equal(search.ok, true);
   assert.equal(search.count, 1);
-  const searchReq = requests.find((r) => r.method === 'GET' && r.path === '/api/v1/trades');
-  assert.ok(searchReq);
-  assert.match(searchReq.query, /symbol=BTC%2FUSDT/);
-  assert.match(searchReq.query, /limit=5/);
+
+  const forwarded = requests.find((r) => {
+    try { return JSON.parse(r.body).params?.name === 'trades_search'; } catch { return false; }
+  });
+  assert.ok(forwarded);
+  assert.equal(forwarded.path, '/mcp');
+  assert.equal(JSON.parse(forwarded.body).params.arguments.limit, 5);
 
   const write = JSON.parse(byId.get(4).result.content[0].text);
   assert.equal(write.trade.note, '复盘内容');
-  const writeReq = requests.find((r) => r.method === 'PATCH' && r.path === '/api/v1/trades/7');
-  assert.ok(writeReq);
-  assert.equal(JSON.parse(writeReq.body).note, '复盘内容');
 
   assert.equal(byId.get(5).result.isError, true);
   assert.match(byId.get(5).result.content[0].text, /Token 无效/);

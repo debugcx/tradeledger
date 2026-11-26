@@ -62,6 +62,7 @@ import {
   verifyApiToken, hasApiScope, checkApiAuthFailure, checkApiTokenRate,
   recordApiAudit, listApiTokens, createApiToken, revokeApiToken, listApiAudit,
 } from './api-tokens.js';
+import { dispatchMcp } from './mcp.js';
 import {
   buildPeriodReview, reviewMarkdown, reportPrompt, formatWeek, isoWeekOf, shiftWeek,
   parsePeriod, periodRange, shiftMonth, monthOf, yearOf,
@@ -3019,6 +3020,64 @@ route('POST', '/api/v1/positions/note', async (ctx) => {
   return agentJson({ note });
 }, { api: 'write' });
 
+/* ---- MCP over HTTP（Streamable HTTP，无状态）----
+ * Agent 直接 POST JSON-RPC 到 /mcp，不依赖任何本机脚本；工具内部走 /api/v1，
+ * 复用 Bearer 鉴权、scope 校验与审计。GET/DELETE 不提供服务端推送，返回 405。 */
+route('POST', '/mcp', async (ctx) => {
+  if (!ctx.apiToken) return agentError('unauthorized', '需要 Bearer Token', 401);
+  // 防止浏览器 DNS rebinding 类的跨站调用；MCP 客户端通常不带 Origin
+  const origin = ctx.req.headers.get('origin');
+  const host = ctx.req.headers.get('host') || '';
+  const secFetchSite = ctx.req.headers.get('sec-fetch-site') || '';
+  if (origin && !isSameOriginRequest({ origin, host, secFetchSite, appPort: config.port })) {
+    return agentError('forbidden', 'cross-origin request blocked', 403);
+  }
+  let body;
+  try {
+    body = await readJsonLimited(ctx.req, 1024 * 1024, 'MCP 请求体');
+  } catch (err) {
+    return json({
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -32700, message: err?.message || 'JSON 解析失败' },
+    }, 400);
+  }
+  const callApi = async (method, path, payload) => {
+    const res = await handle(new Request(`http://localhost${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${ctx.apiToken.rawToken}`,
+        ...(payload === undefined ? {} : { 'content-type': 'application/json' }),
+      },
+      body: payload === undefined ? undefined : JSON.stringify(payload),
+    }));
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data || data.ok === false) {
+      throw new Error(data?.error?.message || `HTTP ${res.status}`);
+    }
+    return data;
+  };
+  const runOne = (message) => dispatchMcp(message, callApi, { version: APP_VERSION });
+  if (Array.isArray(body)) {
+    const out = [];
+    for (const item of body) {
+      const response = await runOne(item);
+      if (response) out.push(response);
+    }
+    return out.length ? json(out) : new Response(null, { status: 202 });
+  }
+  const response = await runOne(body);
+  return response ? json(response) : new Response(null, { status: 202 });
+}, { public: true });
+
+route('GET', '/mcp', () => new Response('Method Not Allowed', {
+  status: 405, headers: { allow: 'POST' },
+}), { public: true });
+
+route('DELETE', '/mcp', () => new Response(null, {
+  status: 405, headers: { allow: 'POST' },
+}), { public: true });
+
 route('GET', '/api/docs', (ctx) => html(page({
   title: 'API 文档 | TradeLedger',
   user: ctx.user,
@@ -3030,10 +3089,15 @@ route('GET', '/api/docs', (ctx) => html(page({
     <pre><code>curl -H "Authorization: Bearer tl_xxx" https://你的地址/api/v1/trades?limit=20
 curl -X PATCH -H "Authorization: Bearer tl_xxx" -H "Content-Type: application/json" \\
   -d '{"note":"复盘内容","tags":["计划内","突破"]}' https://你的地址/api/v1/trades/123</code></pre>
-    <p>MCP 桥接（零依赖）：<code>TRADELEDGER_BASE_URL=https://你的地址 \\
-      TRADELEDGER_API_TOKEN=tl_xxx node scripts/mcp-server.mjs</code>，
-      在 MCP 客户端里把 command 配成 <code>node</code>、args 指向该脚本即可。
-      工具：trades_search / trade_get / ledger_summary / positions_list / accounts_list /
+    <p><b>MCP：</b>服务端直接提供 <code>POST /mcp</code>（Streamable HTTP，无状态），
+      客户端用 <code>type:"http"</code> + <code>Authorization: Bearer tl_...</code> 连接即可，
+      不依赖任何本机脚本，Agent 所在机器关机也不影响其他客户端。</p>
+    <pre><code>{"mcpServers":{"tradeledger":{"type":"http","url":"https://你的地址/mcp",
+  "headers":{"Authorization":"Bearer tl_xxx"}}}}</code></pre>
+    <p>只有 stdio 的客户端可用仓库里的薄转发器：
+      <code>TRADELEDGER_BASE_URL=https://你的地址 TRADELEDGER_API_TOKEN=tl_xxx node scripts/mcp-server.mjs</code>
+      （它只是把消息转发到 <code>/mcp</code>）。</p>
+    <p>工具：trades_search / trade_get / ledger_summary / positions_list / accounts_list /
       tags_list / notes_search / missed_trades_list / trade_note_set / trade_tags_set /
       trade_tag_toggle / position_note_set。</p>
     <table class="table"><thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead><tbody>
@@ -3049,6 +3113,7 @@ curl -X PATCH -H "Authorization: Bearer tl_xxx" -H "Content-Type: application/js
       <tr><td>PATCH</td><td>/api/v1/trades/:id</td><td>写备注 / 替换标签：{note?, tags?}（需 write）</td></tr>
       <tr><td>POST</td><td>/api/v1/trades/:id/tags/toggle</td><td>添加或移除一个标签：{tag}（需 write）</td></tr>
       <tr><td>POST</td><td>/api/v1/positions/note</td><td>写持仓笔记：{accountId,symbol,side,note}（需 write）</td></tr>
+      <tr><td>POST</td><td>/mcp</td><td>MCP JSON-RPC（Streamable HTTP，Bearer Token；工具与 v1 一一对应）</td></tr>
     </tbody></table>
     <h2>旧版接口（会话 Cookie）</h2>
     <p>以下接口需要登录后的会话 Cookie，供应用内页面与脚本使用；Agent 请优先使用上面的 v1。</p>
@@ -3090,7 +3155,7 @@ curl -X PATCH -H "Authorization: Bearer tl_xxx" -H "Content-Type: application/js
 export async function handle(request) {
   const url = new URL(request.url);
   const pathname = url.pathname;
-  const isAgentApi = pathname.startsWith('/api/v1/');
+  const isAgentApi = pathname.startsWith('/api/v1/') || pathname === '/mcp';
   const ip = clientIp(request);
   let apiToken = null;
 

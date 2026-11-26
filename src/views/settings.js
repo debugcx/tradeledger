@@ -351,7 +351,7 @@ export function agentSettingsPage({ user, notice, error, apiTokens = [], apiAudi
     active: 'agent',
     user,
     title: 'Agent 接入',
-    subtitle: '给外部 Agent 的独立 Token：只访问 /api/v1，读写仅限备注与标签',
+    subtitle: '给外部 Agent 的独立 Token：只访问 /api/v1 与 /mcp，读写仅限备注与标签',
     notice,
     error,
     body: `${settingsNav('agent')}
@@ -360,10 +360,23 @@ export function agentSettingsPage({ user, notice, error, apiTokens = [], apiAudi
         <ol class="muted small" style="margin:0 0 10px;padding-left:18px">
           <li>在下方创建 Token：只查询选「只读」，需要写复盘/标签选「读写」。</li>
           <li>REST：请求头加 <code>Authorization: Bearer tl_...</code>，端点前缀 <code>/api/v1</code>。</li>
-          <li>MCP：把仓库里的 <code>scripts/mcp-server.mjs</code> 配到客户端，环境变量填地址与 Token。</li>
+          <li>MCP：客户端直接连服务端 <code>POST /mcp</code>（推荐），不依赖任何本机脚本；
+            你的电脑关机也不影响其他 Agent。</li>
         </ol>
         <pre style="white-space:pre-wrap"><code>curl -H "Authorization: Bearer tl_xxx" http://你的地址/api/v1/trades?limit=20</code></pre>
+        <p class="muted small" style="margin:10px 0 4px">MCP 客户端配置（HTTP，推荐）：</p>
         <pre style="white-space:pre-wrap"><code>{
+  "mcpServers": {
+    "tradeledger": {
+      "type": "http",
+      "url": "http://你的地址/mcp",
+      "headers": { "Authorization": "Bearer tl_xxx" }
+    }
+  }
+}</code></pre>
+        <details class="muted small" style="margin:10px 0 0">
+          <summary>只有 stdio 的客户端：用仓库里的转发脚本</summary>
+          <pre style="white-space:pre-wrap"><code>{
   "mcpServers": {
     "tradeledger": {
       "command": "node",
@@ -375,6 +388,7 @@ export function agentSettingsPage({ user, notice, error, apiTokens = [], apiAudi
     }
   }
 }</code></pre>
+        </details>
         <p class="muted small" style="margin:10px 0 0">
           完整端点见 <a href="/api/docs">/api/docs</a>。Token 只能访问 v1，
           不能读账户密钥、触发同步或删除交易；所有调用都会留审计。
