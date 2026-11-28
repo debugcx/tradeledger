@@ -16,8 +16,12 @@ import { valuePositions, resolvePrice } from './prices.js';
 export const BUCKET_LABELS = {
   trading: '交易账户',
   futures: '合约账户',
+  quant: '策略网格（量化账户）',
   spot: '现货',
   funding: '资金账户',
+  margin: '杠杆账户',
+  options: '期权账户',
+  event_contract: '活动合约',
   earn_flexible: '活期理财',
   earn_locked: '定期理财',
   staking: '链上质押',
@@ -32,7 +36,8 @@ export const BUCKET_LABELS = {
 };
 
 export const BUCKET_ORDER = [
-  'trading', 'futures', 'spot', 'funding', 'earn_flexible', 'earn_locked',
+  'trading', 'futures', 'quant', 'spot', 'funding', 'margin', 'options',
+  'event_contract', 'earn_flexible', 'earn_locked',
   'staking', 'launchpool', 'wallet', 'defi_supply', 'defi_lp', 'defi_staking',
   'defi_reward', 'defi_debt', 'other',
 ];

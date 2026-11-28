@@ -441,8 +441,13 @@ export const gate = {
   },
 
   /**
-   * 资产总览：合约账户 / 现货账户 / 余币宝（Uni Lending）/ 链上质押。
+   * 资产总览：合约账户 / 现货账户 / 量化策略（网格机器人）/ 杠杆 / 余币宝 / 链上质押。
    * Gate Launchpad 没有持仓查询接口，走手动台账。
+   *
+   * 注意：网格机器人（量化策略）的资金既不在现货也不在合约账户里，只在
+   * /wallet/total_balance 的分账户折算里出现；这里用它补齐没有被专用接口
+   * 覆盖到的桶（量化 / 杠杆 / 交割 / CFD / 期权 / 活动合约），已覆盖的桶
+   * （现货、余币宝、质押）不重复统计。
    */
   async fetchAssetPositions(creds) {
     const positions = [];
@@ -469,6 +474,31 @@ export const gate = {
       push('futures', account?.currency || 'BTC', num(account?.total), 'gate:/api/v4/futures/btc/accounts', '币本位合约账户');
     } catch (err) {
       if (!isNoCoinAccount(err)) errors.push(`币本位合约账户：${err?.message || err}`);
+    }
+
+    try {
+      // 网格机器人等量化策略的资金在「量化账户」，只有 total_balance 能看到；
+      // details 已按账户折算成 USDT，直接按等值 USDT 记账
+      const data = await call('/api/v4/wallet/total_balance', {}, creds);
+      const details = data?.details || {};
+      mark('quant');
+      mark('margin');
+      mark('futures');
+      mark('options');
+      mark('event_contract');
+      const pushEq = (key, bucket, label, product) => {
+        const d = details[key];
+        if (!d) return;
+        push(bucket, d.currency || 'USDT', num(d.amount), 'gate:/api/v4/wallet/total_balance', label, product ? { product } : {});
+      };
+      pushEq('quant', 'quant', '量化策略账户');
+      pushEq('margin', 'margin', '杠杆账户');
+      pushEq('delivery', 'futures', '交割合约账户');
+      pushEq('cfd', 'futures', 'CFD 账户');
+      pushEq('options', 'options', '期权账户');
+      pushEq('event_contract', 'event_contract', '活动合约');
+    } catch (err) {
+      errors.push(`量化/杠杆账户：${err?.message || err}`);
     }
 
     try {
